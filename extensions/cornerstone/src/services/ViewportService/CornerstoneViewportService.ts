@@ -1142,7 +1142,17 @@ class CornerstoneViewportService extends PubSubService implements IViewportServi
     const volumesProperties = filteredVolumeInputArray.map(({ volumeInput, displaySetOptions }) => {
       const { volumeId } = volumeInput;
       const { voi, voiInverted, colormap, displayPreset } = displaySetOptions;
-      const properties = {} as ViewportProperties;
+      // GPU bilinear interpolation only (no blocky/pixelated reformats) -
+      // matches the same fix already applied to stack viewports in
+      // _setStackViewport above. Volume viewports (used for MPR axial/
+      // sagittal/coronal reformatting) never had this set, so they were
+      // falling back to cornerstone3D/VTK's own default interpolation,
+      // which produces visibly blocky, aliased reformats compared to a
+      // plain stack view of the same series.
+      const properties = {
+        interpolationType: csEnums.InterpolationType.LINEAR,
+        smoothing: 0,
+      } as ViewportProperties;
 
       if (voi && (voi.windowWidth || voi.windowCenter)) {
         const { lower, upper } = csUtils.windowLevel.toLowHighRange(

@@ -317,7 +317,10 @@ const toolbarButtons: Button[] = [
     id: 'ImageSliceSync',
     uiType: 'ohif.toolButton',
     props: {
-      icon: 'link',
+      // Distinct from ImageIndexSync/ZoomPanSync below - was the same
+      // plain 'link' icon on all three, making the three sync toggles
+      // visually indistinguishable from each other on the toolbar.
+      icon: 'tool-stack-image-sync',
       label: i18n.t('Buttons:Auto Sync'),
       tooltip: i18n.t(
         'Buttons:Auto sync - keeps viewports aligned by 3D position as you scroll'
@@ -358,7 +361,13 @@ const toolbarButtons: Button[] = [
     id: 'ImageIndexSync',
     uiType: 'ohif.toolButton',
     props: {
-      icon: 'link',
+      // 'icon-link' turned out to be the exact same underlying icon
+      // component as the plain 'link' ZoomPanSync uses below (verified
+      // against the icon registry, not just the string name). "Manual"
+      // sync keeps viewports on the same plain image number/slice - the
+      // jump-to-slice icon is a meaningful match for that, not just a
+      // visually-distinct placeholder.
+      icon: 'JumpToSlice',
       label: i18n.t('Buttons:Manual Sync'),
       tooltip: i18n.t(
         'Buttons:Manual sync - keeps viewports on the same plain image number as you scroll, ignoring 3D position'
@@ -599,7 +608,10 @@ const toolbarButtons: Button[] = [
     id: 'AdvancedMagnify',
     uiType: 'ohif.toolButton',
     props: {
-      icon: 'icon-tool-loupe',
+      // 'icon-tool-loupe' turned out to be the exact same underlying icon
+      // component as 'tool-magnify' (the plain Magnify/Zoom-in tool above) -
+      // genuinely switching to a different magnify glyph.
+      icon: 'tool-quick-magnify',
       label: i18n.t('Buttons:Magnify Probe'),
       tooltip: i18n.t('Buttons:Magnify Probe'),
       commands: 'toggleActiveDisabledToolbar',
@@ -818,7 +830,11 @@ const toolbarButtons: Button[] = [
     id: 'TimeIntensityCurve',
     uiType: 'ohif.toolButton',
     props: {
-      icon: 'tool-probe',
+      // No chart/curve icon existed anywhere in this app's icon set for
+      // this - hand-built one (extensions/../Icons/Sources/
+      // TimeIntensityCurve.tsx): axes plus a rising polyline with data
+      // points, matching what the feature actually plots.
+      icon: 'TimeIntensityCurve',
       label: i18n.t('Buttons:Time-Intensity Curve'),
       tooltip: i18n.t(
         'Buttons:Plot signal intensity at the 3D Cursor point across a perfusion/DCE series\' time phases'
@@ -911,7 +927,10 @@ const toolbarButtons: Button[] = [
     id: 'SimpleCrosshair',
     uiType: 'ohif.toolButton',
     props: {
-      icon: 'tool-crosshair',
+      // Distinct from the real volumetric Crosshairs tool above, which was
+      // using this exact same plain-outline icon - this is a different
+      // marked/filled variant of the crosshair glyph.
+      icon: 'tool-crosshair-checked',
       label: i18n.t('Buttons:Simple Crosshair'),
       tooltip: i18n.t('Buttons:Click to place a crosshair on the current image'),
       commands: toggleToolActiveToolbar,

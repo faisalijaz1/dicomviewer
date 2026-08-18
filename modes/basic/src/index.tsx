@@ -430,17 +430,25 @@ export function onModeExit({ servicesManager }: withAppTypes) {
 }
 
 export const toolbarSections = {
+  // RadiAnt's own basic toolbar leads with exactly this sequence - Browse,
+  // Window/Level, Pan, Zoom, then the ROI dropdown - so a radiologist
+  // trained on RadiAnt finds the same tool in the same position (2nd
+  // button = Browse, 3rd = W/L, etc.) without having to relearn anything.
+  // Everything after MeasurementTools (RadiAnt's "ROI" dropdown) is extra
+  // functionality this app has beyond RadiAnt's basic bar, kept available
+  // but not competing with the core 5 for the first-glance position.
   [TOOLBAR_SECTIONS.primary]: [
     'Layout',
+    'StackScroll',
+    'WindowLevel',
+    'Pan',
+    'Zoom',
+    'MeasurementTools',
+    'divider1',
     'MouseBindingsMenu',
     'Crosshairs',
     'SimpleCrosshair',
     'TrackballRotate',
-    'divider1',
-    'WindowLevel',
-    'Zoom',
-    'Pan',
-    'StackScroll',
     'Bidirectional',
     'FitToWindow',
     'Reset',
@@ -450,8 +458,6 @@ export const toolbarSections = {
     'flipHorizontal',
     'invert',
     'divider2',
-    'MeasurementTools',
-    'divider3',
     'ImageSliceSync',
     'ImageIndexSync',
     'ZoomPanSync',
@@ -459,7 +465,7 @@ export const toolbarSections = {
     'ImageOverlayViewer',
     'Magnify',
     'Cine',
-    'divider4',
+    'divider3',
     'Capture',
     'TimeIntensityCurve',
     'PetCtFusion',

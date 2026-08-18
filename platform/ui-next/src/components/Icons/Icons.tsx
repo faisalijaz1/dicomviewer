@@ -25,6 +25,7 @@ import Info from './Sources/Info';
 import InfoLink from './Sources/InfoLink';
 import InfoSeries from './Sources/InfoSeries';
 import JumpToSlice from './Sources/JumpToSlice';
+import TimeIntensityCurveIcon from './Sources/TimeIntensityCurve';
 import ListView from './Sources/ListView';
 import LoadingSpinner from './Sources/LoadingSpinner';
 import Lock from './Sources/Lock';
@@ -802,6 +803,7 @@ export const Icons = {
   Undo,
   Redo,
   JumpToSlice,
+  TimeIntensityCurve: TimeIntensityCurveIcon,
   IllustrationNotFound,
 
   /** Adds an icon to the set of icons */

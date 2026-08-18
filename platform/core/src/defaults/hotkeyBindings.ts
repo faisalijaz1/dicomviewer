@@ -7,21 +7,25 @@ const bindings = [
     isEditable: true,
   },
   {
+    // RadiAnt: "Ctrl + +: Zoom in" - kept alongside the existing bare '+'
+    // binding rather than replacing it.
     commandName: 'scaleUpViewport',
     label: 'Zoom In',
-    keys: ['+'],
+    keys: ['+', 'ctrl++'],
     isEditable: true,
   },
   {
+    // RadiAnt: "Ctrl + -: Zoom out".
     commandName: 'scaleDownViewport',
     label: 'Zoom Out',
-    keys: ['-'],
+    keys: ['-', 'ctrl+-'],
     isEditable: true,
   },
   {
+    // RadiAnt: "Ctrl + 0: Fit image to viewport".
     commandName: 'fitViewportToWindow',
     label: 'Zoom to Fit',
-    keys: ['='],
+    keys: ['=', 'ctrl+0'],
     isEditable: true,
   },
   {
@@ -74,24 +78,14 @@ const bindings = [
     isEditable: true,
   },
   {
-    commandName: 'incrementActiveViewport',
-    label: 'Next Image Viewport',
-    keys: ['right'],
-    isEditable: true,
-  },
-  {
-    commandName: 'decrementActiveViewport',
-    label: 'Previous Image Viewport',
-    keys: ['left'],
-    isEditable: true,
-  },
-  {
+    // RadiAnt: "Left Arrow: Previous series" / "Right Arrow: Next series" -
+    // NOT panel navigation (that's Tab/Shift+Tab below, matching RadiAnt).
     commandName: 'updateViewportDisplaySet',
     commandOptions: {
       direction: -1,
     },
     label: 'Previous Series',
-    keys: ['pageup'],
+    keys: ['left'],
     isEditable: true,
   },
   {
@@ -100,6 +94,42 @@ const bindings = [
       direction: 1,
     },
     label: 'Next Series',
+    keys: ['right'],
+    isEditable: true,
+  },
+  {
+    // RadiAnt: "Tab: Activate next panel".
+    commandName: 'incrementActiveViewport',
+    label: 'Next Panel',
+    keys: ['tab'],
+    isEditable: true,
+  },
+  {
+    // RadiAnt: "Shift + Tab: Activate previous panel".
+    commandName: 'decrementActiveViewport',
+    label: 'Previous Panel',
+    keys: ['shift+tab'],
+    isEditable: true,
+  },
+  {
+    // RadiAnt: "Page Up: 10 images backward" - reuses the same scroll
+    // command as previousImage/nextImage below with a bigger delta, not
+    // series navigation (that moved to Left/Right above).
+    commandName: 'previousImage',
+    commandOptions: {
+      delta: 10,
+    },
+    label: '10 Images Backward',
+    keys: ['pageup'],
+    isEditable: true,
+  },
+  {
+    // RadiAnt: "Page Down: 10 images forward".
+    commandName: 'nextImage',
+    commandOptions: {
+      delta: 10,
+    },
+    label: '10 Images Forward',
     keys: ['pagedown'],
     isEditable: true,
   },
@@ -217,9 +247,11 @@ const bindings = [
     keys: ['7'],
   },
   {
+    // RadiAnt: "Del: Delete selected ROI" - kept alongside the existing
+    // backspace binding rather than replacing it.
     commandName: 'deleteActiveAnnotation',
     label: 'Delete Annotation',
-    keys: ['backspace'],
+    keys: ['backspace', 'del'],
   },
   {
     commandName: 'acceptPreview',
