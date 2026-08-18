@@ -1142,17 +1142,16 @@ class CornerstoneViewportService extends PubSubService implements IViewportServi
     const volumesProperties = filteredVolumeInputArray.map(({ volumeInput, displaySetOptions }) => {
       const { volumeId } = volumeInput;
       const { voi, voiInverted, colormap, displayPreset } = displaySetOptions;
-      // GPU bilinear interpolation only (no blocky/pixelated reformats) -
-      // matches the same fix already applied to stack viewports in
-      // _setStackViewport above. Volume viewports (used for MPR axial/
-      // sagittal/coronal reformatting) never had this set, so they were
-      // falling back to cornerstone3D/VTK's own default interpolation,
-      // which produces visibly blocky, aliased reformats compared to a
-      // plain stack view of the same series.
-      const properties = {
-        interpolationType: csEnums.InterpolationType.LINEAR,
-        smoothing: 0,
-      } as ViewportProperties;
+      // REVERTED: forcing interpolationType: LINEAR here (to fix blocky/
+      // aliased MPR reformats) caused severe rendering corruption
+      // (regular vertical/horizontal banding, no recognizable anatomy) on
+      // at least one large, thin-slice (~500+ image) series - suspected
+      // GPU texture/driver issue with trilinear sampling on very large
+      // volumes. A corrupted image is far more dangerous than a blocky
+      // one for a diagnostic viewer, so this is reverted to cornerstone3D's
+      // own default interpolation until a safer fix (e.g. gated by volume
+      // size) can be verified against real large studies.
+      const properties = {} as ViewportProperties;
 
       if (voi && (voi.windowWidth || voi.windowCenter)) {
         const { lower, upper } = csUtils.windowLevel.toLowHighRange(
