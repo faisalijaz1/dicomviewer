@@ -1,0 +1,44 @@
+diff --git a/node_modules/@cornerstonejs/tools/dist/esm/tools/annotation/BidirectionalTool.js b/node_modules/@cornerstonejs/tools/dist/esm/tools/annotation/BidirectionalTool.js
+--- a/node_modules/@cornerstonejs/tools/dist/esm/tools/annotation/BidirectionalTool.js	
++++ b/node_modules/@cornerstonejs/tools/dist/esm/tools/annotation/BidirectionalTool.js	
+@@ -115,6 +115,16 @@
+             const { annotation, viewportIdsToRender, newAnnotation, hasMoved } = this.editData;
+             const { data } = annotation;
+             if (newAnnotation && !hasMoved) {
++                // OHIF patch: a plain click (no drag) while drawing/modifying must still
++                // deactivate - otherwise state.isInteractingWithTool stays stuck true and
++                // silently blocks wheel-scroll/tool-activation on every other viewport
++                // until the user returns here and finishes or cancels the interaction.
++                resetElementCursor(element);
++                this._deactivateModify(element);
++                this._deactivateDraw(element);
++                removeAnnotation(annotation.annotationUID);
++                this.editData = null;
++                this.isDrawing = false;
+                 return;
+             }
+             this.doneEditMemo();
+diff --git a/node_modules/@cornerstonejs/tools/dist/esm/store/filterToolsWithMoveableHandles.js b/node_modules/@cornerstonejs/tools/dist/esm/store/filterToolsWithMoveableHandles.js
+--- a/node_modules/@cornerstonejs/tools/dist/esm/store/filterToolsWithMoveableHandles.js	
++++ b/node_modules/@cornerstonejs/tools/dist/esm/store/filterToolsWithMoveableHandles.js	
+@@ -1,5 +1,7 @@
+ export default function filterToolsWithMoveableHandles(element, ToolAndAnnotations, canvasCoords, interactionType = 'mouse') {
+-    const proximity = interactionType === 'touch' ? 36 : 6;
++    // OHIF patch: widen desktop-mouse handle grab radius (was 6px, too small to
++    // reliably grab rotation/manipulation handles like Crosshairs' rotation line).
++    const proximity = interactionType === 'touch' ? 36 : 13;
+     const toolsWithMoveableHandles = [];
+     ToolAndAnnotations.forEach(({ tool, annotations }) => {
+         for (const annotation of annotations) {
+diff --git a/node_modules/@cornerstonejs/tools/dist/esm/store/filterMoveableAnnotationTools.js b/node_modules/@cornerstonejs/tools/dist/esm/store/filterMoveableAnnotationTools.js
+--- a/node_modules/@cornerstonejs/tools/dist/esm/store/filterMoveableAnnotationTools.js	
++++ b/node_modules/@cornerstonejs/tools/dist/esm/store/filterMoveableAnnotationTools.js	
+@@ -1,5 +1,7 @@
+ export default function filterMoveableAnnotationTools(element, ToolAndAnnotations, canvasCoords, interactionType = 'mouse') {
+-    const proximity = interactionType === 'touch' ? 36 : 6;
++    // OHIF patch: widen desktop-mouse handle grab radius (was 6px, too small to
++    // reliably grab rotation/manipulation handles like Crosshairs' rotation line).
++    const proximity = interactionType === 'touch' ? 36 : 13;
+     const moveableAnnotationTools = [];
+     ToolAndAnnotations.forEach(({ tool, annotations }) => {
+         for (const annotation of annotations) {

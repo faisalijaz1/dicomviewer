@@ -1,0 +1,318 @@
+import { MIN_SEGMENTATION_DRAWING_RADIUS, MAX_SEGMENTATION_DRAWING_RADIUS } from './constants';
+
+const colours = {
+  'viewport-0': 'rgb(200, 0, 0)',
+  'viewport-1': 'rgb(200, 200, 0)',
+  'viewport-2': 'rgb(0, 200, 0)',
+};
+
+const colorsByOrientation = {
+  axial: 'rgb(200, 0, 0)',
+  sagittal: 'rgb(200, 200, 0)',
+  coronal: 'rgb(0, 200, 0)',
+};
+
+function createTools({ utilityModule, commandsManager }) {
+  const { toolNames, Enums } = utilityModule.exports;
+
+  // Measurement/marking tools (Length, ROI shapes, angles, etc.) shown together
+  // under the "MeasurementTools" dropdown on the toolbar, matching Basic Viewer's
+  // set of measurement tools rather than the segmentation-drawing tools above.
+  const measurementTools = [
+    { toolName: toolNames.Length },
+    {
+      toolName: toolNames.ArrowAnnotate,
+      configuration: {
+        getTextCallback: (callback, eventDetails) => {
+          commandsManager.runCommand('arrowTextCallback', {
+            callback,
+            eventDetails,
+          });
+        },
+        changeTextCallback: (data, eventDetails, callback) => {
+          commandsManager.runCommand('arrowTextCallback', {
+            callback,
+            data,
+            eventDetails,
+          });
+        },
+      },
+    },
+    { toolName: toolNames.Bidirectional },
+    { toolName: toolNames.DragProbe },
+    { toolName: toolNames.Probe },
+    { toolName: toolNames.EllipticalROI },
+    { toolName: toolNames.CircleROI },
+    { toolName: toolNames.RectangleROI },
+    { toolName: toolNames.Angle },
+    { toolName: toolNames.CobbAngle },
+    { toolName: toolNames.CalibrationLine },
+    { toolName: toolNames.SimpleCrosshair },
+    { toolName: toolNames.SplineROI },
+    { toolName: toolNames.LivewireContour },
+  ];
+
+  const tools = {
+    active: [
+      { toolName: toolNames.Pan, bindings: [{ mouseButton: Enums.MouseBindings.Auxiliary }] },
+      {
+        toolName: toolNames.Zoom,
+        bindings: [{ mouseButton: Enums.MouseBindings.Secondary }, { numTouchPoints: 2 }],
+      },
+      {
+        toolName: toolNames.StackScroll,
+        // RadiAnt-style default: left click drag also scrolls, in addition to the wheel.
+        bindings: [
+          { mouseButton: Enums.MouseBindings.Primary },
+          { mouseButton: Enums.MouseBindings.Wheel },
+          { numTouchPoints: 3 },
+        ],
+        configuration: {
+          // Drag/wheel forward (down) moves to higher slice numbers - confirmed
+          // with the user that the previous invert:true direction felt backward.
+          invert: false,
+        },
+      },
+    ],
+    passive: [
+      { toolName: toolNames.WindowLevel },
+      ...measurementTools,
+      {
+        toolName: 'CircularBrush',
+        parentTool: 'Brush',
+        configuration: {
+          activeStrategy: 'FILL_INSIDE_CIRCLE',
+          minRadius: MIN_SEGMENTATION_DRAWING_RADIUS,
+          maxRadius: MAX_SEGMENTATION_DRAWING_RADIUS,
+        },
+      },
+      {
+        toolName: toolNames.LabelmapSlicePropagation,
+      },
+      {
+        toolName: toolNames.MarkerLabelmap,
+      },
+      {
+        toolName: toolNames.RegionSegmentPlus,
+      },
+      {
+        toolName: 'CircularEraser',
+        parentTool: 'Brush',
+        configuration: {
+          activeStrategy: 'ERASE_INSIDE_CIRCLE',
+          minRadius: MIN_SEGMENTATION_DRAWING_RADIUS,
+          maxRadius: MAX_SEGMENTATION_DRAWING_RADIUS,
+        },
+      },
+      {
+        toolName: 'SphereBrush',
+        parentTool: 'Brush',
+        configuration: {
+          activeStrategy: 'FILL_INSIDE_SPHERE',
+          minRadius: MIN_SEGMENTATION_DRAWING_RADIUS,
+          maxRadius: MAX_SEGMENTATION_DRAWING_RADIUS,
+        },
+      },
+      {
+        toolName: 'SphereEraser',
+        parentTool: 'Brush',
+        configuration: {
+          activeStrategy: 'ERASE_INSIDE_SPHERE',
+          minRadius: MIN_SEGMENTATION_DRAWING_RADIUS,
+          maxRadius: MAX_SEGMENTATION_DRAWING_RADIUS,
+        },
+      },
+      {
+        toolName: 'ThresholdCircularBrush',
+        parentTool: 'Brush',
+        configuration: {
+          activeStrategy: 'THRESHOLD_INSIDE_CIRCLE',
+          minRadius: MIN_SEGMENTATION_DRAWING_RADIUS,
+          maxRadius: MAX_SEGMENTATION_DRAWING_RADIUS,
+        },
+      },
+      {
+        toolName: 'ThresholdSphereBrush',
+        parentTool: 'Brush',
+        configuration: {
+          activeStrategy: 'THRESHOLD_INSIDE_SPHERE',
+          minRadius: MIN_SEGMENTATION_DRAWING_RADIUS,
+          maxRadius: MAX_SEGMENTATION_DRAWING_RADIUS,
+        },
+      },
+      {
+        toolName: 'ThresholdCircularBrushDynamic',
+        parentTool: 'Brush',
+        configuration: {
+          activeStrategy: 'THRESHOLD_INSIDE_CIRCLE',
+          minRadius: MIN_SEGMENTATION_DRAWING_RADIUS,
+          maxRadius: MAX_SEGMENTATION_DRAWING_RADIUS,
+          threshold: {
+            isDynamic: true,
+            dynamicRadius: 3,
+          },
+        },
+      },
+      {
+        toolName: toolNames.SegmentBidirectional,
+      },
+      {
+        toolName: toolNames.SegmentSelect,
+      },
+      {
+        toolName: 'ThresholdSphereBrushDynamic',
+        parentTool: 'Brush',
+        configuration: {
+          activeStrategy: 'THRESHOLD_INSIDE_SPHERE',
+          minRadius: MIN_SEGMENTATION_DRAWING_RADIUS,
+          maxRadius: MAX_SEGMENTATION_DRAWING_RADIUS,
+          threshold: {
+            isDynamic: true,
+            dynamicRadius: 3,
+          },
+        },
+      },
+      {
+        toolName: toolNames.LabelMapEditWithContourTool,
+      },
+      { toolName: toolNames.CircleScissors },
+      { toolName: toolNames.RectangleScissors },
+      { toolName: toolNames.SphereScissors },
+      { toolName: toolNames.Magnify },
+      { toolName: toolNames.WindowLevelRegion },
+
+      { toolName: toolNames.UltrasoundDirectional },
+      {
+        toolName: toolNames.PlanarFreehandContourSegmentation,
+      },
+      { toolName: toolNames.LivewireContourSegmentation },
+      { toolName: toolNames.SculptorTool },
+      { toolName: toolNames.PlanarFreehandROI },
+      {
+        toolName: 'CatmullRomSplineROI',
+        parentTool: toolNames.SplineContourSegmentation,
+        configuration: {
+          spline: {
+            type: 'CATMULLROM',
+            enableTwoPointPreview: true,
+          },
+        },
+      },
+      {
+        toolName: 'LinearSplineROI',
+        parentTool: toolNames.SplineContourSegmentation,
+        configuration: {
+          spline: {
+            type: 'LINEAR',
+            enableTwoPointPreview: true,
+          },
+        },
+      },
+      {
+        toolName: 'BSplineROI',
+        parentTool: toolNames.SplineContourSegmentation,
+        configuration: {
+          spline: {
+            type: 'BSPLINE',
+            enableTwoPointPreview: true,
+          },
+        },
+      },
+    ],
+    disabled: [{ toolName: toolNames.ReferenceLines }, { toolName: toolNames.AdvancedMagnify }],
+  };
+
+  const updatedTools = commandsManager.run('initializeSegmentLabelTool', { tools });
+
+  return updatedTools;
+}
+
+function initDefaultToolGroup(extensionManager, toolGroupService, commandsManager, toolGroupId) {
+  const utilityModule = extensionManager.getModuleEntry(
+    '@ohif/extension-cornerstone.utilityModule.tools'
+  );
+  const tools = createTools({ commandsManager, utilityModule });
+  toolGroupService.createToolGroupAndAddTools(toolGroupId, tools);
+}
+
+function initMPRToolGroup(extensionManager, toolGroupService, commandsManager) {
+  const utilityModule = extensionManager.getModuleEntry(
+    '@ohif/extension-cornerstone.utilityModule.tools'
+  );
+  const servicesManager = extensionManager._servicesManager;
+  const { cornerstoneViewportService } = servicesManager.services;
+  const tools = createTools({ commandsManager, utilityModule });
+  tools.disabled.push(
+    {
+      toolName: utilityModule.exports.toolNames.Crosshairs,
+      configuration: {
+        // Bigger rotation/manipulation handle for desktop mouse use - default
+        // (3) is too small to reliably grab; the actual hit-test radius is
+        // patched separately (see patches/@cornerstonejs+tools+*.patch).
+        handleRadius: 7,
+        viewportIndicators: true,
+        viewportIndicatorsConfig: {
+          circleRadius: 5,
+          xOffset: 0.95,
+          yOffset: 0.05,
+        },
+        disableOnPassive: true,
+        autoPan: {
+          enabled: false,
+          panSize: 10,
+        },
+        getReferenceLineColor: viewportId => {
+          const viewportInfo = cornerstoneViewportService.getViewportInfo(viewportId);
+          const viewportOptions = viewportInfo?.viewportOptions;
+          if (viewportOptions) {
+            return (
+              colours[viewportOptions.id] ||
+              colorsByOrientation[viewportOptions.orientation] ||
+              '#0c0'
+            );
+          } else {
+            console.warn('missing viewport?', viewportId);
+            return '#0c0';
+          }
+        },
+      },
+    },
+    { toolName: utilityModule.exports.toolNames.ReferenceLines }
+  );
+  toolGroupService.createToolGroupAndAddTools('mpr', tools);
+}
+
+function initVolume3DToolGroup(extensionManager, toolGroupService) {
+  const utilityModule = extensionManager.getModuleEntry(
+    '@ohif/extension-cornerstone.utilityModule.tools'
+  );
+
+  const { toolNames, Enums } = utilityModule.exports;
+
+  const tools = {
+    active: [
+      {
+        toolName: toolNames.TrackballRotateTool,
+        bindings: [{ mouseButton: Enums.MouseBindings.Primary }],
+      },
+      {
+        toolName: toolNames.Zoom,
+        bindings: [{ mouseButton: Enums.MouseBindings.Secondary }, { numTouchPoints: 2 }],
+      },
+      {
+        toolName: toolNames.Pan,
+        bindings: [{ mouseButton: Enums.MouseBindings.Auxiliary }],
+      },
+    ],
+  };
+
+  toolGroupService.createToolGroupAndAddTools('volume3d', tools);
+}
+
+function initToolGroups(extensionManager, toolGroupService, commandsManager) {
+  initDefaultToolGroup(extensionManager, toolGroupService, commandsManager, 'default');
+  initMPRToolGroup(extensionManager, toolGroupService, commandsManager);
+  initVolume3DToolGroup(extensionManager, toolGroupService);
+}
+
+export default initToolGroups;
