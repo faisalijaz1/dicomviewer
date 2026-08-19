@@ -160,7 +160,7 @@ export const fusion: Types.HangingProtocol.Protocol = {
   id: 'fusion',
   name: i18n.t('Hps:PET/CT Fusion'),
   locked: true,
-  icon: 'layout-advanced-mpr',
+  icon: 'layout-advanced-fusion',
   isPreset: true,
   createdDate: '2026-07-28',
   modifiedDate: '2026-07-28',

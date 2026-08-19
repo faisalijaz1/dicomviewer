@@ -45,7 +45,7 @@ export const SegmentationHeader: React.FC<{
               variant="ghost"
               size="icon"
             >
-              <Icons.Info className="h-6 w-6" />
+              <Icons.Info className="h-[25px] w-[25px]" />
             </Button>
           </TooltipTrigger>
           <TooltipContent>

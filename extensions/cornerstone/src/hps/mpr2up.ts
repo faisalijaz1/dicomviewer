@@ -32,7 +32,7 @@ export const mpr2up: Types.HangingProtocol.Protocol = {
   id: 'mpr2up',
   name: i18n.t('Hps:Sagittal'),
   locked: true,
-  icon: 'layout-advanced-mpr',
+  icon: 'layout-advanced-sagittal',
   isPreset: true,
   createdDate: '2026-07-17',
   modifiedDate: '2026-07-17',

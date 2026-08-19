@@ -117,7 +117,7 @@ const ProgressDropdown = ({
             })}
           >
             <Icons.ArrowRight
-              className={classnames('text-foreground relative left-0.5 h-6 w-6', {
+              className={classnames('text-foreground relative left-0.5 h-[25px] w-[25px]', {
                 'text-foreground': canMoveNext,
                 'text-': !canMoveNext,
               })}

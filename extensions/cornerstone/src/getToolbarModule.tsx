@@ -13,6 +13,7 @@ import NavigationComponent from './components/NavigationComponent/NavigationComp
 import TrackingStatus from './components/TrackingStatus/TrackingStatus';
 import ViewportColorbarsContainer from './components/ViewportColorbar';
 import AdvancedRenderingControls from './components/AdvancedRenderingControls';
+import isHangingProtocolAvailable from './utils/isHangingProtocolAvailable';
 
 const getDisabledState = (disabledText?: string) => ({
   disabled: true,
@@ -29,6 +30,7 @@ export default function getToolbarModule({ servicesManager, extensionManager }: 
     displaySetService,
     viewportGridService,
     segmentationService,
+    hangingProtocolService,
   } = servicesManager.services;
 
   return [
@@ -429,6 +431,31 @@ export default function getToolbarModule({ servicesManager, extensionManager }: 
               disabledText || i18n.t('Buttons:Tool not available for this modality')
             );
           }
+        }
+      },
+    },
+    {
+      // Gates a toolbar button (e.g. the direct "PET/CT Fusion" button) on
+      // whether the NAMED hanging protocol is actually satisfiable by the
+      // study's currently-loaded display sets - reuses the exact same
+      // check the Layout dropdown's "Advanced" preset list uses, so a
+      // button that jumps straight to a protocol can never show as
+      // enabled while that same protocol shows disabled in the dropdown
+      // (previously the Fusion button had no such check at all and stayed
+      // clickable on CT-only studies with no PET series present).
+      name: 'evaluate.hangingProtocol.available',
+      evaluate: ({ protocolId, disabledText }) => {
+        const hp = hangingProtocolService.protocols?.get(protocolId);
+        const isAvailable = isHangingProtocolAvailable(
+          hp,
+          displaySetService,
+          hangingProtocolService
+        );
+
+        if (!isAvailable) {
+          return getDisabledState(
+            disabledText || i18n.t('Buttons:Not available for this study')
+          );
         }
       },
     },

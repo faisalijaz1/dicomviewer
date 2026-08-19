@@ -283,7 +283,7 @@ const toolbarButtons: Button[] = [
     id: 'rotate-180',
     uiType: 'ohif.toolButton',
     props: {
-      icon: 'tool-rotate-right',
+      icon: 'tool-rotate-180',
       label: i18n.t('Buttons:Rotate 180'),
       tooltip: i18n.t('Buttons:Rotate 180°'),
       commands: 'rotateViewport180',
@@ -870,7 +870,7 @@ const toolbarButtons: Button[] = [
     id: 'PetCtFusion',
     uiType: 'ohif.toolButton',
     props: {
-      icon: 'layout-advanced-mpr',
+      icon: 'layout-advanced-fusion',
       label: i18n.t('Buttons:PET/CT Fusion'),
       tooltip: i18n.t('Buttons:Switch to the PET/CT Fusion view'),
       commands: {
@@ -879,7 +879,20 @@ const toolbarButtons: Button[] = [
           protocolId: 'fusion',
         },
       },
-      evaluate: 'evaluate.action',
+      evaluate: [
+        'evaluate.action',
+        {
+          // Previously always enabled regardless of whether the study
+          // actually has PET data - now only enabled when the study has
+          // both a CT and a PT series, matching the same check the Layout
+          // dropdown's own "PET/CT Fusion" entry already used correctly.
+          name: 'evaluate.hangingProtocol.available',
+          protocolId: 'fusion',
+          disabledText: i18n.t(
+            'Buttons:PET/CT Fusion is only available when the study has both CT and PET series'
+          ),
+        },
+      ],
     },
   },
   {

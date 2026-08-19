@@ -29,12 +29,6 @@
   -ms-user-select: none;
 }
 
-/* Cornerstone sets canvas to image-rendering:pixelated which forces nearest-neighbour.
-   Override to auto so the GPU bilinear filter from setInterpolationType(LINEAR) is used. */
-.cornerstone-viewport-element canvas.cornerstone-canvas {
-  image-rendering: auto !important;
-}
-
 /* Prevent text selection on overlay elements */
 .noselect {
   user-select: none;

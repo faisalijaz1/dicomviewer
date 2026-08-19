@@ -451,7 +451,7 @@ function LeftControl({ min, step, value, setValue }) {
       onClick={decrement}
       className="text-primary h-full w-4 cursor-pointer p-0"
     >
-      <ChevronLeft className="h-4 w-4" />
+      <ChevronLeft className="h-[17px] w-[17px]" />
     </Button>
   );
 }
@@ -469,7 +469,7 @@ function RightControl({ max, step, value, setValue }) {
       onClick={increment}
       className="text-primary h-full w-4 cursor-pointer p-0"
     >
-      <ChevronRight className="h-4 w-4" />
+      <ChevronRight className="h-[17px] w-[17px]" />
     </Button>
   );
 }

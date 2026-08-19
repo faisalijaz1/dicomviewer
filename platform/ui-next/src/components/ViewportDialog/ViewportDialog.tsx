@@ -99,7 +99,7 @@ const ViewportDialog: React.FC<ViewportDialogProps> = ({
       <div className="flex grow items-center">
         <Icons.ByName
           name={icon}
-          className={classnames('h-5 w-5', color)}
+          className={classnames('h-[21px] w-[21px]', color)}
         />
         <span className="text-foreground ml-2 text-base">{message}</span>
       </div>

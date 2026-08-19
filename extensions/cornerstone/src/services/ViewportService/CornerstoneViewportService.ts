@@ -945,18 +945,19 @@ class CornerstoneViewportService extends PubSubService implements IViewportServi
 
     await viewport.setStack(imageIds, initialImageIndexToUse);
 
-    // All modalities: GPU bilinear interpolation only (no blocky pixels on
-    // upscale). This used to also apply an extra Gaussian smoothing pass on
-    // top of that for low-res modalities (PT/NM/US) to hide blockiness on
-    // upscale - but that made real diagnostic detail (e.g. small PET foci)
-    // look artificially smudged/low-quality compared to RadiAnt, which
-    // doesn't blur beyond standard bilinear resampling. Removed - bilinear
-    // interpolation alone is enough to avoid hard blocky pixels without
-    // discarding resolution the data actually has.
+    // REVERTED: forcing interpolationType: LINEAR here caused the exact
+    // same severe rendering corruption (regular vertical/horizontal
+    // banding, no recognizable anatomy) already found and reverted for
+    // volume viewports below - confirmed via a real large series (1895
+    // images) that kept showing corruption even after the volume-viewport
+    // version was reverted, meaning this stack-viewport copy of the same
+    // setting was the actual (or an additional) cause. A corrupted image
+    // is far more dangerous than a mildly blocky one for a diagnostic
+    // viewer, so this is reverted to cornerstone3D's own default
+    // interpolation until a safer fix can be verified against real large
+    // studies.
     viewport.setProperties({
       ...properties,
-      interpolationType: csEnums.InterpolationType.LINEAR,
-      smoothing: 0,
     });
     this.setPresentations(viewport.id, presentations, viewportInfo);
 
@@ -1061,6 +1062,33 @@ class CornerstoneViewportService extends PubSubService implements IViewportServi
       let volume = data.volume;
 
       const displaySet = displaySetService.getDisplaySetByUID(displaySetInstanceUID);
+
+      // A series can reach this point without going through hanging-protocol
+      // matching (e.g. the user manually swaps the active series on an
+      // already-volume-typed viewport pane), which is the only place that
+      // normally gates on isReconstructable. Building a volume texture out
+      // of a series cornerstone/OHIF has already determined isn't spatially
+      // reconstructable (missing ImagePositionPatient, mismatched instance
+      // geometry/orientation, a 2-image scout/localizer pair, etc.) doesn't
+      // fail loudly - it silently produces a garbled, banded reformat since
+      // the slices being stacked don't share a coherent 3D geometry. Refuse
+      // instead of rendering that.
+      if (displaySet && displaySet.isReconstructable === false) {
+        console.warn(
+          '[CornerstoneViewportService] Refusing to build a volume for a non-reconstructable display set',
+          displaySet.displaySetInstanceUID,
+          displaySet.SeriesDescription
+        );
+        const { uiNotificationService } = this.servicesManager.services;
+        uiNotificationService?.show({
+          title: 'Cannot display as MPR',
+          message: `"${displaySet.SeriesDescription || 'This series'}" cannot be reconstructed into a 3D volume (e.g. a scout/localizer image or missing slice position data). Select a different series.`,
+          type: 'warning',
+          duration: 6000,
+        });
+        continue;
+      }
+
       if (!volume && displaySet.images) {
         volume = csToolsUtils.getOrCreateImageVolume(displaySet.images.map(image => image.imageId));
       }

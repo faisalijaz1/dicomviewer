@@ -15,15 +15,15 @@ const disabledClasses =
 const sizeClasses = {
   default: {
     buttonSizeClass: 'w-10 h-10',
-    iconSizeClass: 'h-7 w-7',
+    iconSizeClass: 'h-[29px] w-[29px]',
   },
   small: {
     buttonSizeClass: 'w-8 h-8',
-    iconSizeClass: 'h-6 w-6',
+    iconSizeClass: 'h-[25px] w-[25px]',
   },
   tiny: {
     buttonSizeClass: 'w-6 h-6',
-    iconSizeClass: 'h-4 w-4',
+    iconSizeClass: 'h-[17px] w-[17px]',
   },
 };
 

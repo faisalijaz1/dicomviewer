@@ -83,7 +83,7 @@ export function DatePickerWithRange({
       <Popover.Popover>
         <Popover.PopoverTrigger asChild>
           <div className="relative w-full">
-            <CalendarIcon className="text-foreground absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 transform" />
+            <CalendarIcon className="text-foreground absolute right-2 top-1/2 h-[17px] w-[17px] -translate-y-1/2 transform" />
             <input
               id={`${id}-start`}
               type="text"
@@ -120,7 +120,7 @@ export function DatePickerWithRange({
       >
         <Popover.PopoverTrigger asChild>
           <div className="relative w-full">
-            <CalendarIcon className="text-foreground absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 transform" />
+            <CalendarIcon className="text-foreground absolute right-2 top-1/2 h-[17px] w-[17px] -translate-y-1/2 transform" />
             <input
               id={`${id}-end`}
               type="text"

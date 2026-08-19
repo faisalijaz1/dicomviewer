@@ -131,7 +131,7 @@ export const SegmentationTableRoot = (props: SegmentationTableProps) => {
               data-cy={`segmentation-config-toggle${dataCyTypeSuffix}`}
             >
               <Icons.Settings
-                className="text-primary h-4 w-4"
+                className="text-primary h-[17px] w-[17px]"
                 onClick={e => {
                   e.stopPropagation();
                   toggleShowConfig();

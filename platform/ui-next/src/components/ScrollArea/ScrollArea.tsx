@@ -71,12 +71,12 @@ const ScrollArea = React.forwardRef<
       <ScrollAreaPrimitive.Corner />
       {showArrows && showTopArrow && (
         <div className="from-background via-background/80 pointer-events-none absolute -top-1 left-0 right-0 flex h-8 items-center justify-center bg-gradient-to-b to-transparent">
-          <Icons.ChevronOpen className="text-foreground/50 h-8 w-8 rotate-180" />
+          <Icons.ChevronOpen className="text-foreground/50 h-[33px] w-[33px] rotate-180" />
         </div>
       )}
       {showArrows && showBottomArrow && (
         <div className="from-background via-background/80 pointer-events-none absolute -bottom-1 left-0 right-0 flex h-8 items-center justify-center bg-gradient-to-t to-transparent">
-          <Icons.ChevronOpen className="text-foreground/50 h-8 w-8" />
+          <Icons.ChevronOpen className="text-foreground/50 h-[33px] w-[33px]" />
         </div>
       )}
     </ScrollAreaPrimitive.Root>

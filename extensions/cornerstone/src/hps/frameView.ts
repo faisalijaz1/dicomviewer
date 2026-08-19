@@ -4,7 +4,7 @@ const frameView: Types.HangingProtocol.Protocol = {
   id: '@ohif/frameView',
   description: i18n.t('Hps:Frame view for the active series'),
   name: i18n.t('Hps:Frame View'),
-  icon: 'tool-stack-scroll',
+  icon: 'layout-advanced-frame-view',
   isPreset: true,
   toolGroupIds: ['default'],
   protocolMatchingRules: [],

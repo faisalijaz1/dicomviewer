@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { CheckIcon } from '@radix-ui/react-icons';
 import cloneDeep from 'lodash.clonedeep';
+import { ProCheck } from '../Icons/Sources/ProIcons';
 import {
   Command,
   CommandEmpty,
@@ -76,8 +76,8 @@ const LabellingFlow: React.FC<PropType> = ({
                   hide();
                 }}
               >
-                <CheckIcon
-                  className={cn('mr-2 h-4 w-4', value === item.value ? 'opacity-100' : 'opacity-0')}
+                <ProCheck
+                  className={cn('mr-2 h-[17px] w-[17px]', value === item.value ? 'opacity-100' : 'opacity-0')}
                 />
                 {item.label}
               </CommandItem>

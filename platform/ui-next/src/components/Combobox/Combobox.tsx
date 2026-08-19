@@ -1,8 +1,8 @@
 import * as React from 'react';
-import { Check, ChevronsUpDown } from 'lucide-react';
 
 import { cn } from '../../lib/utils';
 import { Button } from '../Button/Button';
+import { ProCaretSort, ProCheck } from '../Icons/Sources/ProIcons';
 import {
   Command,
   CommandEmpty,
@@ -30,7 +30,7 @@ export function Combobox({ data = [], placeholder = 'Select item...' }) {
           className="w-[200px] justify-between"
         >
           {value ? data.find(item => item.value === value)?.label : placeholder}
-          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+          <ProCaretSort className="ml-2 h-[17px] w-[17px] shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
       <PopoverContent className="w-[200px] p-0">
@@ -48,9 +48,9 @@ export function Combobox({ data = [], placeholder = 'Select item...' }) {
                     setOpen(false);
                   }}
                 >
-                  <Check
+                  <ProCheck
                     className={cn(
-                      'mr-2 h-4 w-4',
+                      'mr-2 h-[17px] w-[17px]',
                       value === item.value ? 'opacity-100' : 'opacity-0'
                     )}
                   />

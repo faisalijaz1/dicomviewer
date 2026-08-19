@@ -47,7 +47,7 @@ const SegmentationCollapsedDropdownMenu = ({ children }: { children: React.React
           size="icon"
           data-cy={`segmentation-collapsed-more-btn${dataCyTypeSuffix}`}
         >
-          <Icons.More className="h-6 w-6" />
+          <Icons.More className="h-[25px] w-[25px]" />
         </Button>
       </DropdownMenuTrigger>
       {children}
@@ -129,7 +129,7 @@ const SegmentationCollapsedInfo = () => {
           variant="ghost"
           size="icon"
         >
-          <Icons.Info className="h-6 w-6" />
+          <Icons.Info className="h-[25px] w-[25px]" />
         </Button>
       </TooltipTrigger>
       <TooltipContent

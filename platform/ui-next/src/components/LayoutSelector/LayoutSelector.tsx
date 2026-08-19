@@ -144,7 +144,7 @@ const Trigger = ({
     >
       <Icons.ByName
         name="tool-layout"
-        className="h-7 w-7"
+        className="h-[29px] w-[29px]"
       />
     </Button>
   );

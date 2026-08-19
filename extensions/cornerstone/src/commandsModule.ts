@@ -1633,15 +1633,19 @@ function commandsModule({
       }
       const { viewport } = enabledElement;
 
-      if (viewport instanceof StackViewport) {
-        if (direction) {
-          const { parallelScale } = viewport.getCamera();
-          viewport.setCamera({ parallelScale: parallelScale * scaleFactor });
-          viewport.render();
-        } else {
-          viewport.resetCamera();
-          viewport.render();
-        }
+      // Previously gated on `viewport instanceof StackViewport` - Fit to
+      // Window (direction: 0) silently did nothing for any MPR/volume/3D
+      // viewport as a result, since those aren't StackViewport instances.
+      // getCamera/setCamera/resetCamera/render are standard methods on
+      // every cornerstone3D viewport type, not stack-viewport-specific, so
+      // this now works the same way regardless of viewport type.
+      if (direction) {
+        const { parallelScale } = viewport.getCamera();
+        viewport.setCamera({ parallelScale: parallelScale * scaleFactor });
+        viewport.render();
+      } else {
+        viewport.resetCamera();
+        viewport.render();
       }
     },
 

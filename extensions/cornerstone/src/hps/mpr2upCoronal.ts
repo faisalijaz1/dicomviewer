@@ -32,7 +32,7 @@ export const mpr2upCoronal: Types.HangingProtocol.Protocol = {
   id: 'mpr2up-coronal',
   name: i18n.t('Hps:Coronal'),
   locked: true,
-  icon: 'layout-advanced-mpr',
+  icon: 'layout-advanced-coronal',
   isPreset: true,
   createdDate: '2026-08-07',
   modifiedDate: '2026-08-07',

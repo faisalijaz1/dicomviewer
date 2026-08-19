@@ -263,7 +263,7 @@ const InputNumberHorizontalControls = React.forwardRef<
         disabled={disabled}
         className="text-primary h-6 w-4 cursor-pointer p-0"
       >
-        <ChevronLeft className="h-4 w-4" />
+        <ChevronLeft className="h-[17px] w-[17px]" />
       </Button>
 
       {children}
@@ -275,7 +275,7 @@ const InputNumberHorizontalControls = React.forwardRef<
         disabled={disabled}
         className="text-primary h-6 w-4 cursor-pointer p-0"
       >
-        <ChevronRight className="h-4 w-4" />
+        <ChevronRight className="h-[17px] w-[17px]" />
       </Button>
     </div>
   );

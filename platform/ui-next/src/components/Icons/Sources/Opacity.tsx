@@ -3,103 +3,19 @@ import type { IconProps } from '../types';
 
 export const Opacity = (props: IconProps) => (
   <svg
-    width="24"
-    height="24"
-    viewBox="0 0 24 24"
+    width="25px"
+    height="25px"
+    viewBox="0 0 64 64"
     fill="none"
-    xmlns="http://www.w3.org/2000/svg"
+    stroke="currentColor"
+    strokeWidth="2.25"
+    strokeLinecap="round"
+    strokeLinejoin="round"
     {...props}
   >
-    <rect
-      x="5.5"
-      y="6"
-      width="13"
-      height="13"
-      rx="2.5"
-      stroke="currentColor"
-    />
-    <g opacity="0.6">
-      <rect
-        x="15.5"
-        y="15.5"
-        width="1.5"
-        height="1.5"
-        rx="0.75"
-        fill="currentColor"
-      />
-      <rect
-        x="12.75"
-        y="15.5"
-        width="1.5"
-        height="1.5"
-        rx="0.75"
-        fill="currentColor"
-      />
-      <rect
-        x="10"
-        y="15.5"
-        width="1.5"
-        height="1.5"
-        rx="0.75"
-        fill="currentColor"
-      />
-      <rect
-        x="7.25"
-        y="15.5"
-        width="1.5"
-        height="1.5"
-        rx="0.75"
-        fill="currentColor"
-      />
-      <rect
-        x="15.5"
-        y="13"
-        width="1.5"
-        height="1.5"
-        rx="0.75"
-        fill="currentColor"
-      />
-      <rect
-        x="12.75"
-        y="13"
-        width="1.5"
-        height="1.5"
-        rx="0.75"
-        fill="currentColor"
-      />
-      <rect
-        x="10"
-        y="13"
-        width="1.5"
-        height="1.5"
-        rx="0.75"
-        fill="currentColor"
-      />
-      <rect
-        x="15.5"
-        y="10.5"
-        width="1.5"
-        height="1.5"
-        rx="0.75"
-        fill="currentColor"
-      />
-      <rect
-        x="12.75"
-        y="10.5"
-        width="1.5"
-        height="1.5"
-        rx="0.75"
-        fill="currentColor"
-      />
-      <rect
-        x="15.5"
-        y="8"
-        width="1.5"
-        height="1.5"
-        rx="0.75"
-        fill="currentColor"
-      />
-    </g>
+    <rect x="12" y="19" width="28" height="28" rx="3" fill="currentColor" fillOpacity=".08" />
+    <rect x="20" y="13" width="28" height="28" rx="3" fill="currentColor" fillOpacity=".16" />
+    <rect x="28" y="21" width="24" height="24" rx="3" fill="currentColor" fillOpacity=".28" />
   </svg>
 );
 

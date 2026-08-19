@@ -3,50 +3,22 @@ import type { IconProps } from '../types';
 
 export const Export = (props: IconProps) => (
   <svg
-    width="24px"
-    height="24px"
-    viewBox="0 0 24 24"
+    width="25px"
+    height="25px"
+    viewBox="0 0 64 64"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2.25"
+    strokeLinecap="round"
+    strokeLinejoin="round"
     {...props}
   >
-    <g
-      id="Export"
-      stroke="none"
-      strokeWidth="1"
-      fill="none"
-      fillRule="evenodd"
-    >
-      <rect
-        id="Rectangle"
-        x="0"
-        y="0"
-        width="24"
-        height="24"
-      ></rect>
-      <line
-        x1="12"
-        y1="13.125"
-        x2="12"
-        y2="5"
-        id="Path"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      ></line>
-      <polyline
-        id="Path"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        points="9.1875 7.8125 12 5 14.8125 7.8125"
-      ></polyline>
-      <path
-        d="M13.875,10.000625 L16.375,10.000625 C16.720178,10.000625 17,10.280447 17,10.625625 L17,18.750625 C17,19.095803 16.720178,19.375625 16.375,19.375625 L7.625,19.375625 C7.27982203,19.375625 7,19.095803 7,18.750625 L7,10.625625 C7,10.280447 7.27982203,10.000625 7.625,10.000625 L10.125,10.000625"
-        id="Path"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      ></path>
-    </g>
+    <rect x="11" y="30" width="42" height="23" rx="4" />
+    <line x1="32" y1="44" x2="32" y2="11" />
+    <line x1="32" y1="11" x2="35.5" y2="17.062177826491073" />
+    <line x1="32" y1="11" x2="28.500000000000004" y2="17.062177826491073" />
+    <line x1="21" y1="21" x2="32" y2="11" />
+    <line x1="43" y1="21" x2="32" y2="11" />
   </svg>
 );
 

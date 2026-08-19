@@ -227,7 +227,7 @@ const DataRowComponent = React.forwardRef<HTMLDivElement, DataRowProps>(
               {hiddenLines.length > 0 && (
                 <div className="text-muted-foreground mt-1 flex items-center text-sm">
                   <span>...</span>
-                  <Icons.Info className="mr-1 h-5 w-5" />
+                  <Icons.Info className="mr-1 h-[21px] w-[21px]" />
                 </div>
               )}
             </div>
@@ -337,12 +337,12 @@ const DataRowComponent = React.forwardRef<HTMLDivElement, DataRowProps>(
                 onToggleVisibility(e);
               }}
             >
-              {isVisible ? <Icons.Hide className="h-6 w-6" /> : <Icons.Show className="h-6 w-6" />}
+              {isVisible ? <Icons.Hide className="h-[25px] w-[25px]" /> : <Icons.Show className="h-[25px] w-[25px]" />}
             </Button>
 
             {/* Lock Icon (if needed) */}
             {isLocked && !disableEditing && !isActionHidden('Lock') && (
-              <Icons.Lock className="text-muted-foreground h-6 w-6" />
+              <Icons.Lock className="text-muted-foreground h-[25px] w-[25px]" />
             )}
 
             {/* Status Components */}
@@ -365,7 +365,7 @@ const DataRowComponent = React.forwardRef<HTMLDivElement, DataRowProps>(
                     dataCY="actionsMenuTrigger"
                     onClick={e => e.stopPropagation()} // Prevent row selection on button click
                   >
-                    <Icons.More className="h-6 w-6" />
+                    <Icons.More className="h-[25px] w-[25px]" />
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent
@@ -495,7 +495,7 @@ const StatusWarning: React.FC<{ tooltip?: string }> = ({ tooltip }) => (
     icon={
       <Icons.ByName
         name="status-alert"
-        className="h-4 w-4 text-yellow-500"
+        className="h-[17px] w-[17px] text-yellow-500"
       />
     }
     defaultTooltip="Warning"
@@ -505,7 +505,7 @@ const StatusWarning: React.FC<{ tooltip?: string }> = ({ tooltip }) => (
 const StatusSuccess: React.FC<{ tooltip?: string }> = ({ tooltip }) => (
   <StatusIndicator
     tooltip={tooltip}
-    icon={<Icons.Checked className="h-4 w-4 text-green-500" />}
+    icon={<Icons.Checked className="h-[17px] w-[17px] text-green-500" />}
     defaultTooltip="Success"
   />
 );
@@ -516,7 +516,7 @@ const StatusError: React.FC<{ tooltip?: string }> = ({ tooltip }) => (
     icon={
       <Icons.ByName
         name="status-error"
-        className="h-4 w-4 text-red-500"
+        className="h-[17px] w-[17px] text-red-500"
       />
     }
     defaultTooltip="Error"
@@ -526,7 +526,7 @@ const StatusError: React.FC<{ tooltip?: string }> = ({ tooltip }) => (
 const StatusInfo: React.FC<{ tooltip?: string }> = ({ tooltip }) => (
   <StatusIndicator
     tooltip={tooltip}
-    icon={<Icons.Info className="text-primary h-4 w-4" />}
+    icon={<Icons.Info className="text-primary h-[17px] w-[17px]" />}
     defaultTooltip="Info"
   />
 );

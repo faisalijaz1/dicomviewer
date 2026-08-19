@@ -3,41 +3,20 @@ import type { IconProps } from '../types';
 
 export const Copy = (props: IconProps) => (
   <svg
-    width="24px"
-    height="24px"
-    viewBox="0 0 24 24"
+    width="25px"
+    height="25px"
+    viewBox="0 0 64 64"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2.25"
+    strokeLinecap="round"
+    strokeLinejoin="round"
     {...props}
   >
-    <g
-      id="Copy"
-      stroke="none"
-      strokeWidth="1"
-      fill="none"
-      fillRule="evenodd"
-    >
-      <rect
-        id="Rectangle"
-        x="0"
-        y="0"
-        width="24"
-        height="24"
-      ></rect>
-      <rect
-        id="Rectangle"
-        stroke="currentColor"
-        x="8.95205173"
-        y="4.5"
-        width="10"
-        height="10"
-        rx="2"
-      ></rect>
-      <path
-        d="M7.05569885,9.5 L5.5,9.5 C4.67157288,9.5 4,10.1715729 4,11 L4,17.8271183 C4,18.6555454 4.67157288,19.3271183 5.5,19.3271183 L12.4520517,19.3271183 C13.2804789,19.3271183 13.9520517,18.6555454 13.9520517,17.8271183 L13.9520517,16.3489489 L13.9520517,16.3489489"
-        id="Path-4"
-        stroke="currentColor"
-        strokeLinecap="round"
-      ></path>
-    </g>
+    <rect x="19" y="13" width="30" height="36" rx="4" />
+    <rect x="13" y="19" width="30" height="36" rx="4" />
+    <line x1="23" y1="29" x2="35" y2="29" strokeWidth="1.5" />
+    <line x1="23" y1="35" x2="37" y2="35" strokeWidth="1.5" />
   </svg>
 );
 

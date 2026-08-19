@@ -40,9 +40,9 @@ const Clipboard: React.FC<ClipboardProps> = ({ children }) => {
       className="text-foreground"
       title="Copy"
     >
-      {copyState === 'idle' && <Icons.Copy className="h-6 w-6" />}
-      {copyState === 'success' && <Icons.FeedbackComplete className="h-6 w-6 text-foreground" />}
-      {copyState === 'error' && <Icons.StatusError className="h-6 w-6 text-foreground" />}
+      {copyState === 'idle' && <Icons.Copy className="h-[25px] w-[25px]" />}
+      {copyState === 'success' && <Icons.FeedbackComplete className="h-[25px] w-[25px] text-foreground" />}
+      {copyState === 'error' && <Icons.StatusError className="h-[25px] w-[25px] text-foreground" />}
     </Button>
   );
 };

@@ -73,14 +73,6 @@ window.config = {
             alt: 'SKM',
             className: 'h-[72%] w-[72%] translate-x-[0.5px] translate-y-[1px] object-contain',
           })
-        ),
-        React.createElement(
-          'div',
-          {
-            className:
-              'truncate whitespace-nowrap text-[13px] font-semibold tracking-[-0.01em] text-white',
-          },
-          'SKM DICOM Viewer'
         )
       );
     },

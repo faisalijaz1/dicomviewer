@@ -41,9 +41,9 @@ export const AddSegmentRow: React.FC<{ children?: React.ReactNode }> = ({ childr
   );
 
   const Icon = allSegmentsVisible ? (
-    <Icons.Hide className="h-6 w-6" />
+    <Icons.Hide className="h-[25px] w-[25px]" />
   ) : (
-    <Icons.Show className="h-6 w-6" />
+    <Icons.Show className="h-[25px] w-[25px]" />
   );
 
   const allowAddSegment = showAddSegment && !disableEditing;

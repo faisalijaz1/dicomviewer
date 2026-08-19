@@ -5,7 +5,7 @@ export const LoadingSpinner = (props: IconProps) => (
   <svg
     role="status"
     aria-label="Loading"
-    className={`h-5 w-5 animate-spin ${props.className}`}
+    className={`h-[21px] w-[21px] animate-spin ${props.className}`}
     width="24px"
     height="24px"
     viewBox="0 0 24 24"

@@ -1,8 +1,8 @@
 import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
-import { Cross2Icon } from '@radix-ui/react-icons';
 
 import { cn } from '../../lib/utils';
+import { ProCloseX } from '../Icons/Sources/ProIcons';
 import { useDraggable } from './useDraggable';
 
 interface DialogContextValue {
@@ -115,7 +115,7 @@ const DialogContent = React.forwardRef<
       {children}
       {!unstyled && (
         <DialogPrimitive.Close className="ring-offset-background focus:ring-ring data-[state=open]:bg-accent data-[state=open]:text-muted-foreground absolute right-4 top-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:pointer-events-none">
-          <Cross2Icon className="text-primary h-4 w-4" />
+          <ProCloseX className="text-primary h-[17px] w-[17px]" />
           <span className="sr-only">Close</span>
         </DialogPrimitive.Close>
       )}

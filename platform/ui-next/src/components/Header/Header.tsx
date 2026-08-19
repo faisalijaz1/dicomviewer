@@ -87,7 +87,7 @@ function ScrollableToolbar({ children }: { children: ReactNode }) {
           aria-label="Scroll toolbar left"
           onClick={() => scrollBy(-SCROLL_STEP_PX)}
         >
-          <Icons.ChevronLeft className="h-4 w-4" />
+          <Icons.ChevronLeft className="h-[17px] w-[17px]" />
         </Button>
       )}
       <div
@@ -104,7 +104,7 @@ function ScrollableToolbar({ children }: { children: ReactNode }) {
           aria-label="Scroll toolbar right"
           onClick={() => scrollBy(SCROLL_STEP_PX)}
         >
-          <Icons.ChevronRight className="h-4 w-4" />
+          <Icons.ChevronRight className="h-[17px] w-[17px]" />
         </Button>
       )}
     </div>
@@ -153,7 +153,7 @@ function Header({
               onClick={onClickReturn}
               data-cy="return-to-work-list"
             >
-              {isReturnEnabled && <Icons.ArrowLeft className="text-primary h-6 w-6 flex-shrink-0" />}
+              {isReturnEnabled && <Icons.ArrowLeft className="text-primary h-[25px] w-[25px] flex-shrink-0" />}
             </div>
             {/*
               min-w-0 lets the logo/app-name (which itself uses truncate + min-w-0,
@@ -203,7 +203,7 @@ function Header({
                         className="flex items-center gap-2 py-2"
                       >
                         {IconComponent && (
-                          <span className="flex h-4 w-4 items-center justify-center">
+                          <span className="flex h-[17px] w-[17px] items-center justify-center">
                             <Icons.ByName name={option.icon} />
                           </span>
                         )}
