@@ -1,7 +1,6 @@
 import OHIF, { errorHandler } from '@ohif/core';
 import React from 'react';
 import { vec3 } from 'gl-matrix';
-import vtkPiecewiseFunction from '@kitware/vtk.js/Common/DataModel/PiecewiseFunction';
 
 import * as cornerstone from '@cornerstonejs/core';
 import * as cornerstoneTools from '@cornerstonejs/tools';
@@ -36,6 +35,11 @@ import initContextMenu from './initContextMenu';
 import initDoubleClick from './initDoubleClick';
 import initViewTiming from './utils/initViewTiming';
 import { colormaps } from './utils/colormaps';
+import {
+  findNearestPlaneIndex,
+  computeVolumeFocalPointShift,
+  type StackPlaneCandidate,
+} from './utils/radiant3DCursorNavigation';
 import { SegmentationRepresentations } from '@cornerstonejs/tools/enums';
 import { useLutPresentationStore } from './stores/useLutPresentationStore';
 import { usePositionPresentationStore } from './stores/usePositionPresentationStore';
@@ -43,6 +47,7 @@ import { useSegmentationPresentationStore } from './stores/useSegmentationPresen
 import { imageRetrieveMetadataProvider } from '@cornerstonejs/core/utilities';
 import { initializeWebWorkerProgressHandler } from './utils/initWebWorkerProgressHandler';
 import computeRobustVOIRange from './utils/computeRobustVOIRange';
+import { hasRealSUVData, applyRobustPTVolumeVOI } from './utils/applyRobustPTVolumeVOI';
 
 const { registerColormap } = csUtilities.colormap;
 
@@ -130,11 +135,6 @@ export default async function init({
   // volume viewports like the PET/CT Fusion viewport (VOLUME_LOADED). A
   // volume viewport can hold multiple actors (CT + PT in fusion) with
   // independent VOIs, so this only ever touches the PT one, by volumeId.
-  const hasRealSUVData = (imageId: string) => {
-    const scalingFactor = metaData.get('scalingModule', imageId);
-    return Boolean(scalingFactor?.suvbw);
-  };
-
   document.addEventListener(
     EVENTS.STACK_NEW_IMAGE,
     (evt: CustomEvent) => {
@@ -159,131 +159,10 @@ export default async function init({
     true // capture phase - this cornerstone event does not bubble
   );
 
-  const applyRobustPTVolumeVOI = (volume: any, attemptsLeft: number) => {
-    const imageIds: string[] = volume?.imageIds || [];
-    if (!imageIds.length) {
-      return;
-    }
-
-    // The volume's own aggregate voxelManager (getCompleteScalarDataArray)
-    // depends on ALL of its per-slice images having already been decoded
-    // into the volume's internal slice map - under this app's interleaved
-    // ('nth') load strategy, images load out of sequential order, so slice
-    // 0 specifically (what that method probes to determine array length)
-    // can remain unloaded far longer than other slices, leaving it stuck
-    // reporting a 0-length array indefinitely. Sampling directly from the
-    // plain image cache instead - the same cache.getImage() +
-    // image.voxelManager.getScalarData() pattern already used successfully
-    // elsewhere in this codebase (generateTimeIntensityCurve.ts) - only
-    // needs SOME slices to be individually cached already, not the whole
-    // volume assembled, and is far more likely to have data ready soon.
-    const sampleCount = Math.min(12, imageIds.length);
-    const step = Math.max(1, Math.floor(imageIds.length / sampleCount));
-    const samples: ArrayLike<number>[] = [];
-    for (let i = 0; i < imageIds.length; i += step) {
-      const cachedImage = cornerstone.cache.getImage(imageIds[i]);
-      let scalarData;
-      try {
-        scalarData = cachedImage?.voxelManager?.getScalarData?.();
-      } catch (e) {
-        continue;
-      }
-      if (scalarData?.length) {
-        samples.push(scalarData);
-      }
-    }
-
-    if (!samples.length) {
-      if (attemptsLeft > 0) {
-        setTimeout(() => applyRobustPTVolumeVOI(volume, attemptsLeft - 1), 800);
-      }
-      return;
-    }
-
-    const totalLength = samples.reduce((sum, arr) => sum + arr.length, 0);
-    const merged = new Float32Array(totalLength);
-    let offset = 0;
-    samples.forEach(arr => {
-      merged.set(arr as ArrayLike<number>, offset);
-      offset += arr.length;
-    });
-
-    const range = computeRobustVOIRange(merged, 90, 99.9);
-    if (!range) {
-      return;
-    }
-
-    // RadiAnt-style: only genuinely elevated/focal uptake should show any
-    // color. This range was previously reused as the OPACITY ramp's domain
-    // too - but a whole-body scan's normal physiologic uptake (brain,
-    // myocardium, bladder, liver) occupies real anatomical volume, so a
-    // 90th-percentile-based opacity start colored those normal organs as
-    // well, not just disease foci - visible as color smeared across most
-    // of the body instead of focal hot-spots (and, since that soft color
-    // blends over the sharp CT everywhere it appears, as an overall
-    // "blurry" look to the whole fused image, not just the PET layer).
-    // A separate, much stricter percentile range - only the top ~2% of
-    // voxel values - keeps ordinary organ-level uptake transparent while
-    // still showing real focal findings. Falls back to the grayscale
-    // range if this stricter one can't be computed (e.g. too few samples).
-    const opacityRange = computeRobustVOIRange(merged, 98, 99.9) ?? range;
-
-    // cornerstone3D's colormap opacity ramp ({value, opacity} points) feeds
-    // a VTK piecewise function using ABSOLUTE raw pixel values, not a 0-1
-    // fraction of the VOI window (see BaseVolumeViewport.js setOpacity():
-    // `ofun.addPoint(value, opacity)`) - fusion.ts's static PT_COLORMAP
-    // assumes true SUV-scaled data (values 0-10ish), so for this raw-count
-    // fallback (values in the tens of thousands) essentially every real
-    // pixel falls past the ramp's last point, rendering at uniformly high
-    // opacity ("solid red speckle across the whole image"). Scaling the
-    // ramp to the real data range fixes that, but going through
-    // cornerstone3D's own setOpacity()/setProperties({colormap}) wrapper -
-    // even opacity alone, colormap.name omitted - was observed to also
-    // blank out the OTHER volume sharing this viewport (the CT layer went
-    // fully flat/gray). That wrapper's only extra behavior beyond the raw
-    // VTK call is dispatching a COLORMAP_MODIFIED event and updating some
-    // viewportProperties bookkeeping, neither of which should touch a
-    // different actor - but empirically, going through it did. Setting the
-    // piecewise function directly on the volume's own VTK actor instead
-    // sidesteps that wrapper (and whatever in it was responsible)
-    // entirely, while still only ever touching this one actor.
-    let applied = 0;
-    cornerstone.getRenderingEngines().forEach(renderingEngine => {
-      renderingEngine.getViewports().forEach(viewport => {
-        if (viewport.getAllVolumeIds?.()?.includes(volume.volumeId)) {
-          viewport.setProperties({ voiRange: range }, volume.volumeId);
-
-          try {
-            const actorEntry = viewport.getActor?.(volume.volumeId);
-            const volumeActor = actorEntry?.actor;
-            if (volumeActor?.getProperty) {
-              const { lower, upper } = opacityRange;
-              const span = upper - lower || 1;
-              const ofun = vtkPiecewiseFunction.newInstance();
-              ofun.addPoint(lower, 0);
-              ofun.addPoint(lower + span * 0.7, 0);
-              ofun.addPoint(lower + span * 0.85, 0.25);
-              ofun.addPoint(upper, 0.6);
-              volumeActor.getProperty().setScalarOpacity(0, ofun);
-            }
-          } catch (e) {
-            // Best-effort - the grayscale windowing above already applied
-            // is the safe fallback if this fails for any reason.
-          }
-
-          viewport.render();
-          applied++;
-        }
-      });
-    });
-    // The viewport actor for this volume may not have been created yet
-    // even though the volume itself has loaded enough slices to sample -
-    // retry so the correction still lands once it exists.
-    if (!applied && attemptsLeft > 0) {
-      setTimeout(() => applyRobustPTVolumeVOI(volume, attemptsLeft - 1), 800);
-    }
-  };
-
+  // hasRealSUVData/applyRobustPTVolumeVOI extracted to
+  // ./utils/applyRobustPTVolumeVOI.ts so extensions/cornerstone's
+  // toggleFusion command can reuse the exact same raw-count fallback
+  // logic instead of blindly applying the SUV-0-5-calibrated default.
   eventTarget.addEventListener(EVENTS.VOLUME_LOADED, (evt: CustomEvent) => {
     const volume = evt.detail?.volume;
     const firstImageId = volume?.imageIds?.[0];
@@ -430,35 +309,19 @@ export default async function init({
             // only, so it lands on the slice containing the clicked point
             // without panning its in-plane view sideways. Matches
             // cornerstone-tools' own CrosshairsTool
-            // (_applyDeltaShiftToViewportCamera) exactly.
+            // (_applyDeltaShiftToViewportCamera) exactly - see
+            // computeVolumeFocalPointShift's unit tests for the math.
             const camera = viewport.getCamera();
-            const { focalPoint, position, viewPlaneNormal } = camera;
-            const delta = [
-              worldPos[0] - focalPoint[0],
-              worldPos[1] - focalPoint[1],
-              worldPos[2] - focalPoint[2],
-            ];
-            const dot =
-              delta[0] * viewPlaneNormal[0] +
-              delta[1] * viewPlaneNormal[1] +
-              delta[2] * viewPlaneNormal[2];
-            const projected = [
-              viewPlaneNormal[0] * dot,
-              viewPlaneNormal[1] * dot,
-              viewPlaneNormal[2] * dot,
-            ];
-            viewport.setCamera({
-              focalPoint: [
-                focalPoint[0] + projected[0],
-                focalPoint[1] + projected[1],
-                focalPoint[2] + projected[2],
-              ],
-              position: [
-                position[0] + projected[0],
-                position[1] + projected[1],
-                position[2] + projected[2],
-              ],
+            if (!camera.focalPoint || !camera.position || !camera.viewPlaneNormal) {
+              // Missing camera geometry - nothing sensible to navigate to.
+              return;
+            }
+            const { focalPoint, position } = computeVolumeFocalPointShift(worldPos, {
+              focalPoint: camera.focalPoint,
+              position: camera.position,
+              viewPlaneNormal: camera.viewPlaneNormal,
             });
+            viewport.setCamera({ focalPoint, position });
             viewport.render();
             return;
           }
@@ -468,8 +331,7 @@ export default async function init({
             return;
           }
 
-          let bestIndex = -1;
-          let bestDistance = Infinity;
+          const candidates: StackPlaneCandidate[] = [];
           for (let i = 0; i < imageIds.length; i++) {
             const imagePlaneModule = metaData.get('imagePlaneModule', imageIds[i]);
             const ipp = imagePlaneModule?.imagePositionPatient;
@@ -479,18 +341,12 @@ export default async function init({
               continue;
             }
             const normal = vec3.cross(vec3.create(), rowCosines, columnCosines);
-            const delta = [worldPos[0] - ipp[0], worldPos[1] - ipp[1], worldPos[2] - ipp[2]];
-            const distance = Math.abs(
-              delta[0] * normal[0] + delta[1] * normal[1] + delta[2] * normal[2]
-            );
-            if (distance < bestDistance) {
-              bestDistance = distance;
-              bestIndex = i;
-            }
+            candidates.push({ index: i, origin: ipp, normal: normal as [number, number, number] });
           }
 
-          if (bestIndex >= 0 && bestIndex !== viewport.getCurrentImageIdIndex?.()) {
-            viewport.setImageIdIndex(bestIndex);
+          const nearest = findNearestPlaneIndex(worldPos, candidates);
+          if (nearest && nearest.index !== viewport.getCurrentImageIdIndex?.()) {
+            viewport.setImageIdIndex(nearest.index);
           }
         });
       });
@@ -517,24 +373,14 @@ export default async function init({
     handleSimpleCrosshairMovedOrPlaced
   );
 
-  // RadiAnt 3D Cursor manual: "It disappears once you release the mouse
-  // button (unless permanently toggled [via Q])." Ctrl+Shift+Click is a
-  // momentary spatial-reference check, not a persistent marker - only the
-  // Q-toggled mode (SimpleCrosshair bound to the plain Primary button,
-  // see modes/basic/src/initToolGroups.ts) should leave a lasting mark.
-  // Track whether the mousedown that started this interaction had
-  // Ctrl+Shift held; if so, remove the crosshair annotation it produced as
-  // soon as the button is released.
-  let temporaryCrosshairGesture = false;
-
-  document.addEventListener(
-    'mousedown',
-    (evt: MouseEvent) => {
-      temporaryCrosshairGesture = evt.button === 0 && evt.ctrlKey && evt.shiftKey;
-    },
-    true
-  );
-
+  // RadiAnt 3D Cursor is a TEMPORARY point-correlation gesture, full stop -
+  // it disappears on mouse-up regardless of how it was activated. Q assigns
+  // the tool to the plain Primary mouse button (so you don't have to hold
+  // Ctrl+Shift every time), it does NOT make the rendered marker persist
+  // after release - "permanently assigning the tool means permanently
+  // assigning the mouse binding, not permanently rendering the crosshair."
+  // (An earlier revision of this handler kept the marker on screen for
+  // Q-toggled placements, which was wrong - fixed here.)
   document.addEventListener(
     'mouseup',
     () => {
@@ -550,19 +396,14 @@ export default async function init({
       // just the removal call) to a follow-up macrotask lets that same
       // native mouseup event finish propagating - and cornerstone's own
       // handling with it - first.
-      const wasTemporaryGesture = temporaryCrosshairGesture;
-      temporaryCrosshairGesture = false;
       setTimeout(() => {
-        if (wasTemporaryGesture && lastSimpleCrosshairAnnotationUID) {
+        if (lastSimpleCrosshairAnnotationUID) {
           cornerstoneTools.annotation.state.removeAnnotation(lastSimpleCrosshairAnnotationUID);
           lastSimpleCrosshairAnnotationUID = null;
           cornerstone.getRenderingEngines().forEach(engine => engine.render());
         }
       }, 0);
-      // Restores reference lines whenever a SimpleCrosshair drag ends,
-      // whether it was the momentary Ctrl+Shift+Click gesture or a
-      // Q-toggled permanent placement - both hide them the same way via
-      // hideReferenceLinesForCrosshairGesture() above.
+      // Restores reference lines whenever a SimpleCrosshair drag ends.
       restoreReferenceLinesAfterCrosshairGesture();
     },
     true

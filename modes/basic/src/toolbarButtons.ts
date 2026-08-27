@@ -896,6 +896,24 @@ const toolbarButtons: Button[] = [
     },
   },
   {
+    // RadiAnt-style Fusion toggle: overlays PET on the ACTIVE CT viewport
+    // in place (preserving position/zoom/pan/rotation/flip), unlike
+    // PetCtFusion above which switches the whole layout to the dedicated
+    // fusion hanging protocol. Both are legitimate, complementary
+    // workflows - this is the "one click fusion on what I'm already
+    // looking at" path, that one is the "compare CT | PET | Fusion
+    // side-by-side" path.
+    id: 'Fusion',
+    uiType: 'ohif.toolButton',
+    props: {
+      icon: 'layout-advanced-fusion',
+      label: i18n.t('Buttons:Fusion'),
+      tooltip: i18n.t('Buttons:Overlay PET on the active CT viewport'),
+      commands: 'toggleFusion',
+      evaluate: ['evaluate.action', 'evaluate.fusion.toggleable'],
+    },
+  },
+  {
     id: 'Layout',
     uiType: 'ohif.layoutSelector',
     props: {

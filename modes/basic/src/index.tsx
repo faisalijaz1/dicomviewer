@@ -468,6 +468,7 @@ export const toolbarSections = {
     'divider3',
     'Capture',
     'TimeIntensityCurve',
+    'Fusion',
     'PetCtFusion',
     'TagBrowser',
     'AdvancedMagnify',

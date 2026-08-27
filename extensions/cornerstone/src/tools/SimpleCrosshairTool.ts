@@ -197,6 +197,27 @@ class SimpleCrosshairTool extends ProbeTool {
         { color: resolvedColor, fill: resolvedColor, width: 1 }
       );
 
+      // RadiAnt 3D Cursor manual: while active, shows the world coordinate
+      // in mm. Only on the "home" viewport - the one the point is actually
+      // being placed/dragged in - not on every viewport it's echoed into,
+      // which would be visual noise and (for off-plane viewports) a
+      // coordinate that doesn't correspond to anything currently on screen
+      // there.
+      if (isHomeViewport) {
+        drawing.drawTextBox(
+          svgDrawingHelper,
+          annotationUID,
+          `${annotationUID}-coords`,
+          [
+            `X: ${point[0].toFixed(2)} mm`,
+            `Y: ${point[1].toFixed(2)} mm`,
+            `Z: ${point[2].toFixed(2)} mm`,
+          ],
+          [x + ARM_GAP + ARM_LENGTH + 6, y - ARM_GAP - ARM_LENGTH],
+          { color: resolvedColor, background: 'rgba(0, 0, 0, 0.65)' }
+        );
+      }
+
       renderStatus = true;
     }
 

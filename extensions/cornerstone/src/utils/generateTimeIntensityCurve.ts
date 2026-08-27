@@ -33,6 +33,11 @@ export interface TimeIntensityPoint {
   time: number;
   seriesTime?: string;
   seriesNumber?: number;
+  /** Identifies which sibling series this point came from - used to resolve
+   * a user-chosen baseline (from the series-selection dialog) back to its
+   * position in `points`, since a phase that fails to load/read is skipped
+   * and would otherwise desync a raw index into the sibling list. */
+  displaySetInstanceUID?: string;
   value: number;
   /**
    * RadiAnt TIC manual step 7: "A new panel will be added. It contains the
@@ -243,18 +248,37 @@ export default async function generateTimeIntensityCurve({
   currentDisplaySet,
   worldPoint,
   roi,
+  series,
+  baselineDisplaySetInstanceUID,
 }: {
   displaySetService: AppTypes.DisplaySetService;
   currentDisplaySet: any;
   worldPoint: [number, number, number];
   roi?: TimeIntensityRoi;
+  /**
+   * Pre-selected/ordered dynamic-phase series - e.g. the subset the user
+   * kept checked in the series-selection dialog (RadiAnt: "Allow the user
+   * to include or exclude a series"). When provided, used directly instead
+   * of re-running findDynamicSiblingSeries, so an excluded series actually
+   * stays excluded from the generated curve rather than silently
+   * reappearing because the confirm step and the generation step each
+   * independently re-derived the "same" sibling list.
+   */
+  series?: any[];
+  /**
+   * The series the user picked as the temporal baseline (elapsed time = 0)
+   * in the selection dialog. Falls back to the first phase actually
+   * present in `points` (not necessarily index 0 of the input series list,
+   * since an earlier phase can fail to load/read and get skipped).
+   */
+  baselineDisplaySetInstanceUID?: string;
 }): Promise<{
   points: TimeIntensityPoint[];
   seriesDescription: string;
   sampleCount: number;
   usesRealTime: boolean;
 } | null> {
-  const siblings = findDynamicSiblingSeries(displaySetService, currentDisplaySet);
+  const siblings = series ?? findDynamicSiblingSeries(displaySetService, currentDisplaySet);
 
   if (siblings.length < 2) {
     return null;
@@ -423,6 +447,7 @@ export default async function generateTimeIntensityCurve({
       time: points.length,
       seriesTime: bestInstance.SeriesTime,
       seriesNumber: ds.SeriesNumber,
+      displaySetInstanceUID: ds.displaySetInstanceUID,
       value,
       thumbnailDataUrl: renderCropThumbnail(
         image,
@@ -449,7 +474,20 @@ export default async function generateTimeIntensityCurve({
   // misleading than a consistent index axis for all of them.
   const usesRealTime = acquisitionSecondsByPoint.every(seconds => seconds != null);
   if (usesRealTime) {
-    const baselineSeconds = acquisitionSecondsByPoint[0] as number;
+    // Resolve the user's chosen baseline (from the series-selection dialog)
+    // to its actual position in `points` by displaySetInstanceUID, not a
+    // raw index into the input series list - a phase that failed to
+    // load/read is skipped above, which would otherwise desync a plain
+    // index. Falls back to the first phase actually present when no
+    // baseline was specified, or the specified one didn't make it into
+    // `points` (e.g. it was the phase that failed to load).
+    const baselineIndex = baselineDisplaySetInstanceUID
+      ? Math.max(
+          0,
+          points.findIndex(p => p.displaySetInstanceUID === baselineDisplaySetInstanceUID)
+        )
+      : 0;
+    const baselineSeconds = acquisitionSecondsByPoint[baselineIndex] as number;
     points.forEach((point, index) => {
       point.time = (acquisitionSecondsByPoint[index] as number) - baselineSeconds;
     });

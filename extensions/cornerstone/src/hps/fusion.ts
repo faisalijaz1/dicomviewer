@@ -4,9 +4,9 @@ import i18n from 'i18next';
 // PT window/level as SUV 0-5 (matches this app's default PT window/level
 // presets) - a reasonable starting point for the fused overlay; the
 // radiologist can still adjust window/level on the PT layer normally.
-const PT_VOI = { windowWidth: 5, windowCenter: 2.5 };
-const PT_WINDOW_LOWER = PT_VOI.windowCenter - PT_VOI.windowWidth / 2; // 0
-const PT_WINDOW_UPPER = PT_VOI.windowCenter + PT_VOI.windowWidth / 2; // 5
+export const PT_VOI = { windowWidth: 5, windowCenter: 2.5 };
+export const PT_WINDOW_LOWER = PT_VOI.windowCenter - PT_VOI.windowWidth / 2; // 0
+export const PT_WINDOW_UPPER = PT_VOI.windowCenter + PT_VOI.windowWidth / 2; // 5
 const PT_WINDOW_SPAN = PT_WINDOW_UPPER - PT_WINDOW_LOWER;
 
 // Standard nuclear-medicine "hot iron"-style overlay: transparent at low
@@ -30,7 +30,7 @@ const PT_WINDOW_SPAN = PT_WINDOW_UPPER - PT_WINDOW_LOWER;
 // SUV metadata - common on this hospital's PACS - is handled separately,
 // by the percentile-based runtime VOI/opacity correction in init.tsx's
 // applyRobustPTVolumeVOI, which only engages when SUV metadata is absent.)
-const PT_COLORMAP = {
+export const PT_COLORMAP = {
   name: 'hot_iron',
   opacity: [
     { value: PT_WINDOW_LOWER, opacity: 0 },

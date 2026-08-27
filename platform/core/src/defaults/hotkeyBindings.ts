@@ -353,10 +353,13 @@ const bindings = [
   },
   {
     // RadiAnt: "Enable fusion: Click the Fusion button on the toolbar or
-    // press Ctrl + Alt + F".
-    commandName: 'setHangingProtocol',
-    commandOptions: { protocolId: 'fusion' },
-    label: 'PET/CT Fusion',
+    // press Ctrl + Alt + F". This toggles PET onto the ACTIVE CT viewport
+    // in place, preserving its exact camera state - previously bound to
+    // 'setHangingProtocol'/'fusion', which switched the whole layout
+    // instead of toggling an overlay (that dedicated compare-layout is
+    // still reachable via the separate PetCtFusion toolbar button).
+    commandName: 'toggleFusion',
+    label: 'Fusion',
     keys: ['ctrl+alt+f'],
     isEditable: true,
   },

@@ -7,6 +7,7 @@ import {
   Types as CoreTypes,
   BaseVolumeViewport,
   getRenderingEngines,
+  cache,
 } from '@cornerstonejs/core';
 import {
   ToolGroupManager,
@@ -25,7 +26,7 @@ import * as cornerstoneTools from '@cornerstonejs/tools';
 import * as labelmapInterpolation from '@cornerstonejs/labelmap-interpolation';
 import { ONNXSegmentationController } from '@cornerstonejs/ai';
 
-import { Types as OhifTypes, utils } from '@ohif/core';
+import { Types as OhifTypes, utils, DicomMetadataStore } from '@ohif/core';
 import {
   callInputDialogAutoComplete,
   createReportAsync,
@@ -43,6 +44,9 @@ import { togglePatientInfoVisible } from './utils/patientInfoVisibility';
 import generateTimeIntensityCurve, {
   findDynamicSiblingSeries,
 } from './utils/generateTimeIntensityCurve';
+import { findCompatiblePTOverlay, findActiveCTDisplaySet } from './utils/findCompatibleFusionOverlay';
+import { PT_COLORMAP, PT_WINDOW_LOWER, PT_WINDOW_UPPER } from './hps/fusion';
+import { hasRealSUVData, applyRobustPTVolumeVOI } from './utils/applyRobustPTVolumeVOI';
 import TimeIntensityCurveModal from './components/TimeIntensityCurve/TimeIntensityCurveModal';
 import TimeIntensityCurveConfirmModal from './components/TimeIntensityCurve/TimeIntensityCurveConfirmModal';
 import toggleVOISliceSync from './utils/toggleVOISliceSync';
@@ -184,6 +188,115 @@ function commandsModule({
 
   function _getActiveViewportEnabledElement() {
     return getActiveViewportEnabledElement(viewportGridService);
+  }
+
+  // Private SOPClassUid for chart data - matches the one
+  // extensions/default's chartSOPClassHandler.ts and cornerstone-dynamic-
+  // volume's updateSegmentationsChartDisplaySet.ts already use, so this
+  // synthetic instance is picked up by the exact same existing SOP class
+  // handler / LineChartViewport pipeline rather than inventing a second one.
+  const TIC_CHART_SOP_CLASS_UID = '1.9.451.13215.7.3.2.7.6.1';
+  const TIC_CHART_MODALITY = 'CHT';
+
+  /**
+   * Places the generated Time-Intensity Curve as a real chart panel in the
+   * viewport grid (RadiAnt shows the TIC as its own panel, not a dialog),
+   * reusing the same synthetic-"CHT"-instance mechanism the dynamic-volume
+   * extension's segmentation-over-time chart already relies on: register a
+   * fake DICOM instance with Modality 'CHT' and a `chartData` payload via
+   * DicomMetadataStore, which the existing chartSOPClassHandler picks up
+   * and turns into a real display set rendered by LineChartViewport - no
+   * new viewport-module registration needed.
+   *
+   * Only does this when the grid already has more than one pane open
+   * (returns false otherwise, so the caller falls back to the modal) -
+   * with a single pane open there's no "spare" cell to put a chart into
+   * without displacing the one image the radiologist is actively viewing,
+   * and this command has no layout-changing authority of its own.
+   */
+  function _placeTimeIntensityCurveInGrid(result: {
+    points: Array<{ time: number; value: number }>;
+    seriesDescription: string;
+    usesRealTime: boolean;
+  }): boolean {
+    const gridState = viewportGridService.getState();
+    const viewportEntries = Array.from(gridState.viewports.entries());
+    if (viewportEntries.length < 2) {
+      return false;
+    }
+
+    // Map order approximates layout order (row-major) for every grid this
+    // app actually builds (see modes/basic's layout presets) - the last
+    // entry is the bottom-right pane, matching RadiAnt's own placement.
+    const [targetViewportId] = viewportEntries[viewportEntries.length - 1];
+
+    const { date: seriesDate, time: seriesTime } = (() => {
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      return {
+        date: `${now.getFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}`,
+        time: `${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`,
+      };
+    })();
+
+    const seriesInstanceUID = utils.guid();
+    const instance = {
+      SOPClassUID: TIC_CHART_SOP_CLASS_UID,
+      Modality: TIC_CHART_MODALITY,
+      SOPInstanceUID: utils.guid(),
+      SeriesDate: seriesDate,
+      SeriesTime: seriesTime,
+      SeriesInstanceUID: seriesInstanceUID,
+      StudyInstanceUID: utils.guid(),
+      SeriesNumber: 9001,
+      SeriesDescription: 'Time-Intensity Curve',
+      // RadiAnt reference style: black background (handled by LineChart's
+      // own dark theme), thin yellow axes, green curve line.
+      chartData: {
+        series: [
+          {
+            label: result.seriesDescription,
+            points: result.points.map(p => [p.time, p.value]),
+            color: '#39ff14',
+          },
+        ],
+        axis: {
+          x: { label: result.usesRealTime ? 'Time (s)' : 'Time phase' },
+          y: { label: 'Mean signal intensity' },
+        },
+      },
+    };
+
+    const seriesMetadata = {
+      StudyInstanceUID: instance.StudyInstanceUID,
+      SeriesInstanceUID: instance.SeriesInstanceUID,
+      SeriesDescription: instance.SeriesDescription,
+      SeriesNumber: instance.SeriesNumber,
+      SeriesTime: instance.SeriesTime,
+      SOPClassUID: instance.SOPClassUID,
+      Modality: instance.Modality,
+    };
+
+    DicomMetadataStore.addSeriesMetadata([seriesMetadata], true);
+    DicomMetadataStore.addInstances([instance], true);
+
+    // The SOP class handler above creates the display set synchronously in
+    // response to addInstances (event-driven, no promise to await), so it's
+    // already registered with displaySetService by the time this runs.
+    const chartDisplaySet = displaySetService
+      .getActiveDisplaySets()
+      .find(ds => ds.SeriesInstanceUID === seriesInstanceUID);
+
+    if (!chartDisplaySet) {
+      return false;
+    }
+
+    viewportGridService.setDisplaySetsForViewport({
+      viewportId: targetViewportId,
+      displaySetInstanceUIDs: [chartDisplaySet.displaySetInstanceUID],
+    });
+
+    return true;
   }
 
   function _getViewportEnabledElement(viewportId: string) {
@@ -1532,7 +1645,10 @@ function commandsModule({
         return;
       }
 
-      const runGenerateTimeIntensityCurve = async () => {
+      const runGenerateTimeIntensityCurve = async (
+        selectedSeries: any[],
+        baselineDisplaySetInstanceUID: string
+      ) => {
         uiNotificationService?.show({
           title: 'Time-Intensity Curve',
           message: 'Generating curve - this reads every time-phase image and can take a moment...',
@@ -1544,6 +1660,8 @@ function commandsModule({
           currentDisplaySet,
           worldPoint,
           roi,
+          series: selectedSeries,
+          baselineDisplaySetInstanceUID,
         });
 
         if (!result) {
@@ -1556,17 +1674,28 @@ function commandsModule({
           return;
         }
 
-        uiModalService?.show({
-          title: 'Time-Intensity Curve',
-          content: TimeIntensityCurveModal,
-          contentProps: {
-            points: result.points,
-            seriesDescription: result.seriesDescription,
-            sampleCount: result.sampleCount,
-            usesRealTime: result.usesRealTime,
-          },
-          containerClassName: 'max-w-3xl p-4',
-        });
+        // Prefer a real viewport-grid panel (RadiAnt shows the TIC as its
+        // own panel, not a temporary dialog) when the grid already has more
+        // than one pane open - the realistic case for this workflow, since
+        // generating a TIC requires viewing at least 2 dynamic-phase series
+        // in the first place. With only a single pane open there's nowhere
+        // to put a chart without displacing the one image the radiologist
+        // is looking at, so fall back to the modal instead of forcing a
+        // layout change they didn't ask for.
+        const placedInGrid = _placeTimeIntensityCurveInGrid(result);
+        if (!placedInGrid) {
+          uiModalService?.show({
+            title: 'Time-Intensity Curve',
+            content: TimeIntensityCurveModal,
+            contentProps: {
+              points: result.points,
+              seriesDescription: result.seriesDescription,
+              sampleCount: result.sampleCount,
+              usesRealTime: result.usesRealTime,
+            },
+            containerClassName: 'max-w-3xl p-4',
+          });
+        }
       };
 
       uiModalService?.show({
@@ -1579,6 +1708,152 @@ function commandsModule({
         containerClassName: 'max-w-2xl p-4',
       });
     },
+
+    /**
+     * RadiAnt-style PET/CT Fusion toggle: overlays a compatible PT volume
+     * onto the ACTIVE CT viewport in place - unlike the pre-existing
+     * 'setHangingProtocol' fusion.ts protocol (still available separately
+     * for the optional PET | CT | Fusion 3-up comparison layout), this
+     * does NOT switch layouts or recreate the viewport, so the current
+     * anatomical position, zoom, pan, rotation and flip state are
+     * untouched. Calling it again on an already-fused viewport removes
+     * just the PET actor and returns to CT-only, at the same camera state.
+     */
+    toggleFusion: async () => {
+      const enabledElement = _getActiveViewportEnabledElement();
+      if (!enabledElement) {
+        uiNotificationService?.show({
+          title: 'PET/CT Fusion',
+          message: 'Activate a viewport first.',
+          type: 'warning',
+        });
+        return;
+      }
+
+      const { viewport, viewportId } = enabledElement;
+
+      if (!(viewport instanceof VolumeViewport)) {
+        uiNotificationService?.show({
+          title: 'PET/CT Fusion',
+          message: 'Fusion requires a reconstructable (MPR/volume) viewport.',
+          type: 'warning',
+        });
+        return;
+      }
+
+      // Toggle OFF: a PT volume actor is already present on this viewport -
+      // remove just that actor and leave the CT actor/camera exactly as-is.
+      // Actor lookup is by the actor entry's referencedId (the volumeId it
+      // was created from), not viewport.getActor(volumeId) - that method
+      // actually keys by actorUID, which only coincidentally equals the
+      // volumeId in some call paths.
+      const existingPtVolumeId = viewport
+        .getAllVolumeIds()
+        .find(id => cache.getVolume(id)?.metadata?.Modality === 'PT');
+
+      if (existingPtVolumeId) {
+        const actorEntry = viewport
+          .getActors()
+          .find(entry => entry.referencedId === existingPtVolumeId);
+        if (actorEntry) {
+          viewport.removeVolumeActors([actorEntry.uid], true);
+        }
+        return;
+      }
+
+      // Toggle ON: find the CT display set currently shown in this viewport.
+      const gridState = viewportGridService.getState();
+      const gridViewport = gridState.viewports.get(viewportId);
+      const loadedDisplaySets = (gridViewport?.displaySetInstanceUIDs || []).map(uid =>
+        displaySetService.getDisplaySetByUID(uid)
+      );
+      const ctDisplaySet = findActiveCTDisplaySet(loadedDisplaySets);
+
+      if (!ctDisplaySet) {
+        uiNotificationService?.show({
+          title: 'PET/CT Fusion',
+          message: 'The active viewport must show a CT series before fusion can be enabled.',
+          type: 'warning',
+        });
+        return;
+      }
+
+      const ptDisplaySet = findCompatiblePTOverlay(
+        ctDisplaySet,
+        displaySetService.getActiveDisplaySets()
+      );
+
+      if (!ptDisplaySet) {
+        uiNotificationService?.show({
+          title: 'PET/CT Fusion',
+          message:
+            'No volumetric PET series suitable for fusion was found - a compatible series must share this CT’s patient coordinate system and cannot be a MIP, scout, localizer, or secondary-capture series.',
+          type: 'warning',
+          duration: 6000,
+        });
+        return;
+      }
+
+      // Preserve the exact camera state - addVolumes() itself doesn't
+      // reset it, but this guards against any downstream render triggering
+      // a recenter, and matches the explicit "do not reset position, zoom,
+      // pan, rotation, or flip state" requirement.
+      const capturedCamera = viewport.getCamera();
+
+      try {
+        const ptVolume = cstUtils.getOrCreateImageVolume(
+          (ptDisplaySet as any).images.map((image: any) => image.imageId)
+        );
+        if (!ptVolume.loadStatus?.loaded && typeof ptVolume.load === 'function') {
+          ptVolume.load();
+        }
+
+        await viewport.addVolumes([{ volumeId: ptVolume.volumeId }], true);
+
+        // Scoped to just the PT volumeId - setProperties({colormap}) WITHOUT
+        // a volumeId on a multi-actor viewport has been observed elsewhere
+        // in this codebase (see applyRobustPTVolumeVOI's comment) to also
+        // blank out the other actor sharing the viewport.
+        //
+        // The static PT_VOI (SUV 0-5) range only means anything for a
+        // series with real SUV metadata - this hospital's PACS commonly
+        // has raw-count PT data with no usable SUV metadata at all, and
+        // applying the SUV-calibrated range/opacity ramp to that pushes
+        // essentially every real pixel past the ramp's last point,
+        // rendering at uniformly high opacity: the "solid blue/color wash
+        // across the whole image, no anatomy visible" symptom. Check for
+        // real SUV data first and use the same percentile-based fallback
+        // the rest of the app already relies on when it's absent, instead
+        // of assuming every PET series is SUV-scaled.
+        const firstPtImageId = ptVolume.imageIds?.[0];
+        if (firstPtImageId && hasRealSUVData(firstPtImageId)) {
+          viewport.setProperties(
+            { colormap: PT_COLORMAP, voiRange: { lower: PT_WINDOW_LOWER, upper: PT_WINDOW_UPPER } },
+            ptVolume.volumeId
+          );
+        } else {
+          // Colormap only here - applyRobustPTVolumeVOI computes and
+          // applies the correct voiRange + opacity ramp for this
+          // viewport (and any other viewport already sharing this same
+          // cached volume) once enough of the volume's images are
+          // decoded to sample from.
+          viewport.setProperties({ colormap: PT_COLORMAP }, ptVolume.volumeId);
+          applyRobustPTVolumeVOI(ptVolume, 15);
+        }
+
+        viewport.setCamera(capturedCamera);
+        viewport.render();
+      } catch (error) {
+        console.error('[PET/CT Fusion] toggleFusion failed', error);
+        uiNotificationService?.show({
+          title: 'PET/CT Fusion',
+          message: "Couldn't fuse this PET series with the active CT view.",
+          type: 'error',
+          duration: 6000,
+        });
+      }
+    },
+
     invertViewport: ({ element }) => {
       let enabledElement;
 
@@ -3179,6 +3454,9 @@ function commandsModule({
     },
     generateTimeIntensityCurve: {
       commandFn: actions.generateTimeIntensityCurve,
+    },
+    toggleFusion: {
+      commandFn: actions.toggleFusion,
     },
     resetViewport: {
       commandFn: actions.resetViewport,

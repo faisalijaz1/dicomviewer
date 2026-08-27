@@ -1,4 +1,5 @@
 import { Enums } from '@cornerstonejs/tools';
+import { cache, VolumeViewport } from '@cornerstonejs/core';
 import i18n from '@ohif/i18n';
 import { utils } from '@ohif/ui-next';
 import { ViewportDataOverlayMenuWrapper } from './components/ViewportDataOverlaySettingMenu/ViewportDataOverlayMenuWrapper';
@@ -14,6 +15,7 @@ import TrackingStatus from './components/TrackingStatus/TrackingStatus';
 import ViewportColorbarsContainer from './components/ViewportColorbar';
 import AdvancedRenderingControls from './components/AdvancedRenderingControls';
 import isHangingProtocolAvailable from './utils/isHangingProtocolAvailable';
+import { findActiveCTDisplaySet, findCompatiblePTOverlay } from './utils/findCompatibleFusionOverlay';
 
 const getDisabledState = (disabledText?: string) => ({
   disabled: true,
@@ -457,6 +459,52 @@ export default function getToolbarModule({ servicesManager, extensionManager }: 
             disabledText || i18n.t('Buttons:Not available for this study')
           );
         }
+      },
+    },
+    {
+      // Drives the RadiAnt-style Fusion toolbar button's enabled/disabled
+      // and active (toggled-on) state - live, from the active viewport's
+      // actual actor list, not a separately-tracked flag that could drift
+      // out of sync with what's really rendered.
+      name: 'evaluate.fusion.toggleable',
+      evaluate: () => {
+        const viewportId = viewportGridService.getActiveViewportId();
+        const viewport = cornerstoneViewportService.getCornerstoneViewport(viewportId);
+
+        if (!(viewport instanceof VolumeViewport)) {
+          return getDisabledState(i18n.t('Buttons:Fusion requires an MPR/volume viewport'));
+        }
+
+        const hasPTActor = viewport
+          .getAllVolumeIds()
+          .some(id => cache.getVolume(id)?.metadata?.Modality === 'PT');
+
+        if (hasPTActor) {
+          // Already fused - button stays enabled (so it can be toggled
+          // off) and shows the active state.
+          return { disabled: false, isActive: true, isToggled: true };
+        }
+
+        const displaySetUIDs = viewportGridService.getDisplaySetsUIDsForViewport(viewportId);
+        const displaySets = displaySetUIDs?.map(uid => displaySetService.getDisplaySetByUID(uid));
+        const ctDisplaySet = findActiveCTDisplaySet(displaySets || []);
+
+        if (!ctDisplaySet) {
+          return getDisabledState(i18n.t('Buttons:Fusion requires a CT series in this viewport'));
+        }
+
+        const ptOverlay = findCompatiblePTOverlay(
+          ctDisplaySet,
+          displaySetService.getActiveDisplaySets()
+        );
+
+        if (!ptOverlay) {
+          return getDisabledState(
+            i18n.t('Buttons:No compatible PET series found for this CT')
+          );
+        }
+
+        return { disabled: false, isActive: false, isToggled: false };
       },
     },
     {

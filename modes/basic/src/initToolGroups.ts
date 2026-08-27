@@ -244,6 +244,20 @@ function initMPRToolGroup(extensionManager, toolGroupService, commandsManager) {
           invert: false,
         },
       },
+      {
+        toolName: toolNames.SimpleCrosshair,
+        // Was missing from this tool group entirely (only 'default' had
+        // it) - the RadiAnt-style 3D Cursor (Ctrl+Shift+Click, or Q to
+        // assign it to the plain Primary button) silently did nothing in
+        // MPR/reformat viewports, exactly where cross-plane point
+        // correlation (axial/sagittal/coronal) matters most.
+        bindings: [
+          {
+            mouseButton: Enums.MouseBindings.Primary,
+            modifierKey: Enums.KeyboardBindings.ShiftCtrl,
+          },
+        ],
+      },
     ],
     passive: [
       { toolName: toolNames.WindowLevel },
@@ -354,6 +368,17 @@ function initVolume3DToolGroup(extensionManager, toolGroupService) {
       {
         toolName: toolNames.Pan,
         bindings: [{ mouseButton: Enums.MouseBindings.Auxiliary }, { numTouchPoints: 3 }],
+      },
+      {
+        toolName: toolNames.SimpleCrosshair,
+        // Was missing from this tool group entirely (only 'default' had
+        // it) - see the same addition in initMPRToolGroup above.
+        bindings: [
+          {
+            mouseButton: Enums.MouseBindings.Primary,
+            modifierKey: Enums.KeyboardBindings.ShiftCtrl,
+          },
+        ],
       },
     ],
   };
