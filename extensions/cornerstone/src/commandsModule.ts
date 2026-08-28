@@ -1622,9 +1622,27 @@ function commandsModule({
           'SimpleCrosshair',
           viewport.element
         );
-        worldPoint =
-          simpleCrosshairAnnotations?.[0]?.data?.handles?.points?.[0] ??
-          viewport.getCamera().focalPoint;
+        const crosshairPoint = simpleCrosshairAnnotations?.[0]?.data?.handles?.points?.[0];
+
+        if (!crosshairPoint) {
+          // Previously fell back silently to viewport.getCamera().focalPoint
+          // (whatever happens to be centered, with no deliberate user
+          // action behind it) - sampling that raw point across every phase
+          // of a real dynamic series is unreliable (it can land on
+          // background/air on some phases) and, worse, gave no indication
+          // anything was wrong when it failed - the dialog would open and
+          // "Generating..." would appear, then nothing. Require an actual
+          // ROI or placed point instead of guessing one.
+          uiNotificationService?.show({
+            title: 'Time-Intensity Curve',
+            message: 'Draw an Elliptical ROI (or place a 3D Cursor point) over the finding first.',
+            type: 'warning',
+            duration: 6000,
+          });
+          return;
+        }
+
+        worldPoint = crosshairPoint;
       }
 
       // RadiAnt: "Review the automatically selected series in the dialog
@@ -1649,51 +1667,86 @@ function commandsModule({
         selectedSeries: any[],
         baselineDisplaySetInstanceUID: string
       ) => {
-        uiNotificationService?.show({
+        // autoClose:false (no duration) - this reads every time-phase image
+        // over the network and can legitimately take well over the default
+        // 2s toast duration. With the default duration, the toast was
+        // vanishing long before generation finished, which is exactly what
+        // reads as "shows Generating... then nothing happens": the work was
+        // still running silently in the background with no visible sign of
+        // it. Explicitly hidden below once the promise settles either way.
+        const loadingToastId = uiNotificationService?.show({
           title: 'Time-Intensity Curve',
           message: 'Generating curve - this reads every time-phase image and can take a moment...',
           type: 'info',
+          autoClose: false,
         });
 
-        const result = await generateTimeIntensityCurve({
-          displaySetService,
-          currentDisplaySet,
-          worldPoint,
-          roi,
-          series: selectedSeries,
-          baselineDisplaySetInstanceUID,
-        });
+        // Wrapped in try/catch so ANY failure past this point (a bad pixel
+        // read, the synthetic chart-display-set creation, viewport-grid
+        // placement) surfaces as a visible notification instead of the
+        // "Generating..." toast just quietly never being followed by
+        // anything - an uncaught rejection in this async callback (invoked
+        // from the confirm modal's onClick) has no other listener to
+        // report it to the user.
+        try {
+          const result = await generateTimeIntensityCurve({
+            displaySetService,
+            currentDisplaySet,
+            worldPoint,
+            roi,
+            series: selectedSeries,
+            baselineDisplaySetInstanceUID,
+          });
 
-        if (!result) {
+          uiNotificationService?.hide(loadingToastId);
+
+          if (!result) {
+            uiNotificationService?.show({
+              title: 'Time-Intensity Curve',
+              message: "Couldn't read pixel data for the detected series - nothing to plot.",
+              type: 'warning',
+              duration: 6000,
+            });
+            return;
+          }
+
+          // Prefer a real viewport-grid panel (RadiAnt shows the TIC as its
+          // own panel, not a temporary dialog) when the grid already has
+          // more than one pane open - the realistic case for this
+          // workflow, since generating a TIC requires viewing at least 2
+          // dynamic-phase series in the first place. With only a single
+          // pane open there's nowhere to put a chart without displacing
+          // the one image the radiologist is looking at, so fall back to
+          // the modal instead of forcing a layout change they didn't ask
+          // for.
+          let placedInGrid = false;
+          try {
+            placedInGrid = _placeTimeIntensityCurveInGrid(result);
+          } catch (gridError) {
+            console.error('[TIC] Failed to place chart in viewport grid, falling back to modal:', gridError);
+          }
+
+          if (!placedInGrid) {
+            uiModalService?.show({
+              title: 'Time-Intensity Curve',
+              content: TimeIntensityCurveModal,
+              contentProps: {
+                points: result.points,
+                seriesDescription: result.seriesDescription,
+                sampleCount: result.sampleCount,
+                usesRealTime: result.usesRealTime,
+              },
+              containerClassName: 'max-w-3xl p-4',
+            });
+          }
+        } catch (error) {
+          uiNotificationService?.hide(loadingToastId);
+          console.error('[TIC] generateTimeIntensityCurve failed:', error);
           uiNotificationService?.show({
             title: 'Time-Intensity Curve',
-            message: "Couldn't read pixel data for the detected series - nothing to plot.",
-            type: 'warning',
-            duration: 6000,
-          });
-          return;
-        }
-
-        // Prefer a real viewport-grid panel (RadiAnt shows the TIC as its
-        // own panel, not a temporary dialog) when the grid already has more
-        // than one pane open - the realistic case for this workflow, since
-        // generating a TIC requires viewing at least 2 dynamic-phase series
-        // in the first place. With only a single pane open there's nowhere
-        // to put a chart without displacing the one image the radiologist
-        // is looking at, so fall back to the modal instead of forcing a
-        // layout change they didn't ask for.
-        const placedInGrid = _placeTimeIntensityCurveInGrid(result);
-        if (!placedInGrid) {
-          uiModalService?.show({
-            title: 'Time-Intensity Curve',
-            content: TimeIntensityCurveModal,
-            contentProps: {
-              points: result.points,
-              seriesDescription: result.seriesDescription,
-              sampleCount: result.sampleCount,
-              usesRealTime: result.usesRealTime,
-            },
-            containerClassName: 'max-w-3xl p-4',
+            message: `Curve generation failed: ${error?.message || 'unknown error'}. See browser console for details.`,
+            type: 'error',
+            duration: 8000,
           });
         }
       };

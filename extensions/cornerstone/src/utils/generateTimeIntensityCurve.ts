@@ -69,19 +69,121 @@ export interface TimeIntensityRoi {
  * so the confirmation step and the actual curve generation both use
  * exactly the same detection/ordering logic.
  */
+/**
+ * Strips every run of digits out of a SeriesDescription to get a
+ * normalized "template" - the phase number scanners embed in a dynamic/
+ * perfusion/cardiac-phase series' name isn't reliably at the end
+ * ("SEGMENT 10% 0.00s Cardiac 0.5 CE" has it in the middle, followed by
+ * more text), so a trailing-only strip misses this real pattern. Removing
+ * every digit run instead collapses "SEGMENT 0% 0.00s Cardiac 0.5 CE",
+ * "SEGMENT 10% 0.00s Cardiac 0.5 CE", ... "SEGMENT 90% 0.00s Cardiac 0.5
+ * CE" all down to the same template, while "Dyn 1"/"Dyn 2",
+ * "PHASE01"/"PHASE02" etc. still collapse identically too (that pattern
+ * is a strict subset of this one). Returns null for a description with no
+ * digits at all, so two different non-numbered descriptions never loosely
+ * match just because both happen to have nothing to strip.
+ */
+function _seriesDescriptionTemplate(description?: string): string | null {
+  if (!description) {
+    return null;
+  }
+  if (!/\d/.test(description)) {
+    return null;
+  }
+  const template = description
+    .replace(/\d+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  return template || null;
+}
+
+/**
+ * Extracts the first number embedded in a SeriesDescription, for ordering
+ * phases when neither SeriesTime nor SeriesNumber is usable - seen in
+ * practice on real cardiac-phase reconstructions where every phase in the
+ * series shares SeriesNumber 0 and has no SeriesTime at all, but the
+ * percentage through the cardiac cycle ("SEGMENT 10% ...", "SEGMENT 90%
+ * ...") is the only thing that actually orders them. Returns null when the
+ * description has no number to extract.
+ */
+function _extractLeadingNumber(description?: string): number | null {
+  if (!description) {
+    return null;
+  }
+  const match = /\d+(\.\d+)?/.exec(description);
+  return match ? parseFloat(match[0]) : null;
+}
+
+/**
+ * Geometry safety net for the stem-based fallback match below: requires
+ * matching Frame of Reference (when both series have one) and matching
+ * Rows/Columns (when both have them) before two similarly-named series are
+ * ever treated as phases of the same acquisition - a shared naming stem
+ * alone isn't enough to safely average pixels across them.
+ */
+function _isGeometryCompatible(a: any, b: any): boolean {
+  const instanceA = a.instances?.[0];
+  const instanceB = b.instances?.[0];
+  if (!instanceA || !instanceB) {
+    return false;
+  }
+  if (
+    instanceA.FrameOfReferenceUID &&
+    instanceB.FrameOfReferenceUID &&
+    instanceA.FrameOfReferenceUID !== instanceB.FrameOfReferenceUID
+  ) {
+    return false;
+  }
+  if (
+    instanceA.Rows != null &&
+    instanceB.Rows != null &&
+    instanceA.Columns != null &&
+    instanceB.Columns != null &&
+    (instanceA.Rows !== instanceB.Rows || instanceA.Columns !== instanceB.Columns)
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export function findDynamicSiblingSeries(
   displaySetService: AppTypes.DisplaySetService,
   currentDisplaySet: any
 ): any[] {
   const allDisplaySets = displaySetService.getActiveDisplaySets();
 
-  const siblings = allDisplaySets.filter(
+  const sameStudyAndModality = allDisplaySets.filter(
     ds =>
       ds.StudyInstanceUID === currentDisplaySet.StudyInstanceUID &&
       ds.Modality === currentDisplaySet.Modality &&
-      ds.SeriesDescription === currentDisplaySet.SeriesDescription &&
       ds.instances?.length
   );
+
+  // Preferred: exact SeriesDescription match (unambiguous, no risk of
+  // grouping unrelated series).
+  let siblings = sameStudyAndModality.filter(
+    ds => ds.SeriesDescription === currentDisplaySet.SeriesDescription
+  );
+
+  // Fallback: same naming "template" with every digit run stripped, gated
+  // on matching geometry - covers real dynamic/perfusion/cardiac-phase
+  // series where every phase has a slightly different description (a
+  // phase number or percentage embedded somewhere in it) rather than an
+  // identical one.
+  if (siblings.length < 2) {
+    const currentTemplate = _seriesDescriptionTemplate(currentDisplaySet.SeriesDescription);
+    if (currentTemplate) {
+      const templateMatches = sameStudyAndModality.filter(
+        ds =>
+          _seriesDescriptionTemplate(ds.SeriesDescription) === currentTemplate &&
+          _isGeometryCompatible(ds, currentDisplaySet)
+      );
+      if (templateMatches.length >= 2) {
+        siblings = templateMatches;
+      }
+    }
+  }
 
   siblings.sort((a, b) => {
     const timeA = a.instances?.[0]?.SeriesTime;
@@ -89,7 +191,20 @@ export function findDynamicSiblingSeries(
     if (timeA && timeB && timeA !== timeB) {
       return timeA < timeB ? -1 : 1;
     }
-    return (a.SeriesNumber || 0) - (b.SeriesNumber || 0);
+    if (a.SeriesNumber !== b.SeriesNumber) {
+      return (a.SeriesNumber || 0) - (b.SeriesNumber || 0);
+    }
+    // SeriesTime absent/equal AND SeriesNumber absent/equal (seen in
+    // practice: every phase of a real cardiac-phase reconstruction shares
+    // SeriesNumber 0 with no SeriesTime at all) - fall back to whatever
+    // number is actually embedded in the description itself, since that's
+    // the only thing left that genuinely orders the phases.
+    const numberA = _extractLeadingNumber(a.SeriesDescription);
+    const numberB = _extractLeadingNumber(b.SeriesDescription);
+    if (numberA != null && numberB != null && numberA !== numberB) {
+      return numberA - numberB;
+    }
+    return 0;
   });
 
   return siblings;
@@ -324,7 +439,23 @@ export default async function generateTimeIntensityCurve({
     let image = cache.getImage(imageId);
     if (!image) {
       try {
-        image = await imageLoader.loadAndCacheImage(imageId);
+        // A network/decoder failure normally rejects this promise (caught
+        // below), but a race against a hard timeout is needed too: a
+        // failed HTTP request can end up routed through cornerstone's
+        // CORNERSTONE_IMAGE_LOAD_FAILED handling, which on this app's
+        // build throws inside the errorInterceptor before it reaches
+        // whatever would reject the underlying load promise - leaving it
+        // permanently pending instead of rejected. Without this timeout,
+        // one bad phase image (a dropped connection, an HTTP/2 hiccup)
+        // hangs curve generation forever with no visible error - exactly
+        // the "shows Generating... then nothing happens" symptom this was
+        // added to fix.
+        image = await Promise.race([
+          imageLoader.loadAndCacheImage(imageId),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`Timed out loading ${imageId}`)), 20000)
+          ),
+        ]);
       } catch (e) {
         continue;
       }
