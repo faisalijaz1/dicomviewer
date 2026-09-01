@@ -1544,12 +1544,64 @@ function commandsModule({
       const siblingSeries = findDynamicSiblingSeries(displaySetService, currentDisplaySet);
 
       if (siblingSeries.length < 2) {
+        // TEMPORARY diagnostic logging - dumps only technical series-level
+        // metadata (no patient name/MRN/DOB) for every series in this
+        // study sharing the current one's Modality, so the actual naming/
+        // geometry pattern that's defeating findDynamicSiblingSeries'
+        // matching can be read directly from the console instead of
+        // guessed at blindly. Logged as a single pre-stringified string
+        // (not a live object/array reference) so a plain copy-paste of
+        // the console text captures the full content - Chrome shows
+        // object/array arguments as a collapsed "Object"/"Array(N)"
+        // preview that only expands to real data when clicked, which
+        // doesn't survive a straight text copy. Remove once TIC series-
+        // matching is confirmed working against this study's naming
+        // pattern.
+        const candidatePool = displaySetService
+          .getActiveDisplaySets()
+          .filter(
+            ds =>
+              ds.StudyInstanceUID === currentDisplaySet.StudyInstanceUID &&
+              ds.Modality === currentDisplaySet.Modality
+          );
+        // eslint-disable-next-line no-console
+        console.log(
+          '[TIC diagnostic]\n' +
+            JSON.stringify(
+              {
+                currentSeries: {
+                  StudyInstanceUID: currentDisplaySet.StudyInstanceUID,
+                  Modality: currentDisplaySet.Modality,
+                  SeriesDescription: currentDisplaySet.SeriesDescription,
+                  SeriesNumber: currentDisplaySet.SeriesNumber,
+                },
+                candidatePool: candidatePool.map(ds => {
+                  const firstInstance = ds.instances?.[0];
+                  return {
+                    SeriesDescription: ds.SeriesDescription,
+                    SeriesNumber: ds.SeriesNumber,
+                    instanceCount: ds.instances?.length,
+                    SeriesTime: firstInstance?.SeriesTime,
+                    AcquisitionTime: firstInstance?.AcquisitionTime,
+                    FrameOfReferenceUID: firstInstance?.FrameOfReferenceUID,
+                    Rows: firstInstance?.Rows,
+                    Columns: firstInstance?.Columns,
+                    PixelSpacing: firstInstance?.PixelSpacing,
+                    SliceThickness: firstInstance?.SliceThickness,
+                  };
+                }),
+              },
+              null,
+              2
+            )
+        );
+
         uiNotificationService?.show({
           title: 'Time-Intensity Curve',
           message:
-            "This series doesn't look like a multi-phase perfusion/DCE acquisition (need at least 2 series sharing this series description) - nothing to plot.",
+            "This series doesn't look like a multi-phase perfusion/DCE acquisition (need at least 2 series sharing this series description) - nothing to plot. See browser console for the detected series list.",
           type: 'warning',
-          duration: 6000,
+          autoClose: false,
         });
         return;
       }
