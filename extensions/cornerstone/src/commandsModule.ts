@@ -26,7 +26,7 @@ import * as cornerstoneTools from '@cornerstonejs/tools';
 import * as labelmapInterpolation from '@cornerstonejs/labelmap-interpolation';
 import { ONNXSegmentationController } from '@cornerstonejs/ai';
 
-import { Types as OhifTypes, utils, DicomMetadataStore } from '@ohif/core';
+import { Types as OhifTypes, utils } from '@ohif/core';
 import {
   callInputDialogAutoComplete,
   createReportAsync,
@@ -188,115 +188,6 @@ function commandsModule({
 
   function _getActiveViewportEnabledElement() {
     return getActiveViewportEnabledElement(viewportGridService);
-  }
-
-  // Private SOPClassUid for chart data - matches the one
-  // extensions/default's chartSOPClassHandler.ts and cornerstone-dynamic-
-  // volume's updateSegmentationsChartDisplaySet.ts already use, so this
-  // synthetic instance is picked up by the exact same existing SOP class
-  // handler / LineChartViewport pipeline rather than inventing a second one.
-  const TIC_CHART_SOP_CLASS_UID = '1.9.451.13215.7.3.2.7.6.1';
-  const TIC_CHART_MODALITY = 'CHT';
-
-  /**
-   * Places the generated Time-Intensity Curve as a real chart panel in the
-   * viewport grid (RadiAnt shows the TIC as its own panel, not a dialog),
-   * reusing the same synthetic-"CHT"-instance mechanism the dynamic-volume
-   * extension's segmentation-over-time chart already relies on: register a
-   * fake DICOM instance with Modality 'CHT' and a `chartData` payload via
-   * DicomMetadataStore, which the existing chartSOPClassHandler picks up
-   * and turns into a real display set rendered by LineChartViewport - no
-   * new viewport-module registration needed.
-   *
-   * Only does this when the grid already has more than one pane open
-   * (returns false otherwise, so the caller falls back to the modal) -
-   * with a single pane open there's no "spare" cell to put a chart into
-   * without displacing the one image the radiologist is actively viewing,
-   * and this command has no layout-changing authority of its own.
-   */
-  function _placeTimeIntensityCurveInGrid(result: {
-    points: Array<{ time: number; value: number }>;
-    seriesDescription: string;
-    usesRealTime: boolean;
-  }): boolean {
-    const gridState = viewportGridService.getState();
-    const viewportEntries = Array.from(gridState.viewports.entries());
-    if (viewportEntries.length < 2) {
-      return false;
-    }
-
-    // Map order approximates layout order (row-major) for every grid this
-    // app actually builds (see modes/basic's layout presets) - the last
-    // entry is the bottom-right pane, matching RadiAnt's own placement.
-    const [targetViewportId] = viewportEntries[viewportEntries.length - 1];
-
-    const { date: seriesDate, time: seriesTime } = (() => {
-      const now = new Date();
-      const pad = (n: number) => String(n).padStart(2, '0');
-      return {
-        date: `${now.getFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}`,
-        time: `${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`,
-      };
-    })();
-
-    const seriesInstanceUID = utils.guid();
-    const instance = {
-      SOPClassUID: TIC_CHART_SOP_CLASS_UID,
-      Modality: TIC_CHART_MODALITY,
-      SOPInstanceUID: utils.guid(),
-      SeriesDate: seriesDate,
-      SeriesTime: seriesTime,
-      SeriesInstanceUID: seriesInstanceUID,
-      StudyInstanceUID: utils.guid(),
-      SeriesNumber: 9001,
-      SeriesDescription: 'Time-Intensity Curve',
-      // RadiAnt reference style: black background (handled by LineChart's
-      // own dark theme), thin yellow axes, green curve line.
-      chartData: {
-        series: [
-          {
-            label: result.seriesDescription,
-            points: result.points.map(p => [p.time, p.value]),
-            color: '#39ff14',
-          },
-        ],
-        axis: {
-          x: { label: result.usesRealTime ? 'Time (s)' : 'Time phase' },
-          y: { label: 'Mean signal intensity' },
-        },
-      },
-    };
-
-    const seriesMetadata = {
-      StudyInstanceUID: instance.StudyInstanceUID,
-      SeriesInstanceUID: instance.SeriesInstanceUID,
-      SeriesDescription: instance.SeriesDescription,
-      SeriesNumber: instance.SeriesNumber,
-      SeriesTime: instance.SeriesTime,
-      SOPClassUID: instance.SOPClassUID,
-      Modality: instance.Modality,
-    };
-
-    DicomMetadataStore.addSeriesMetadata([seriesMetadata], true);
-    DicomMetadataStore.addInstances([instance], true);
-
-    // The SOP class handler above creates the display set synchronously in
-    // response to addInstances (event-driven, no promise to await), so it's
-    // already registered with displaySetService by the time this runs.
-    const chartDisplaySet = displaySetService
-      .getActiveDisplaySets()
-      .find(ds => ds.SeriesInstanceUID === seriesInstanceUID);
-
-    if (!chartDisplaySet) {
-      return false;
-    }
-
-    viewportGridService.setDisplaySetsForViewport({
-      viewportId: targetViewportId,
-      displaySetInstanceUIDs: [chartDisplaySet.displaySetInstanceUID],
-    });
-
-    return true;
   }
 
   function _getViewportEnabledElement(viewportId: string) {
@@ -1710,35 +1601,28 @@ function commandsModule({
             return;
           }
 
-          // Prefer a real viewport-grid panel (RadiAnt shows the TIC as its
-          // own panel, not a temporary dialog) when the grid already has
-          // more than one pane open - the realistic case for this
-          // workflow, since generating a TIC requires viewing at least 2
-          // dynamic-phase series in the first place. With only a single
-          // pane open there's nowhere to put a chart without displacing
-          // the one image the radiologist is looking at, so fall back to
-          // the modal instead of forcing a layout change they didn't ask
-          // for.
-          let placedInGrid = false;
-          try {
-            placedInGrid = _placeTimeIntensityCurveInGrid(result);
-          } catch (gridError) {
-            console.error('[TIC] Failed to place chart in viewport grid, falling back to modal:', gridError);
-          }
-
-          if (!placedInGrid) {
-            uiModalService?.show({
-              title: 'Time-Intensity Curve',
-              content: TimeIntensityCurveModal,
-              contentProps: {
-                points: result.points,
-                seriesDescription: result.seriesDescription,
-                sampleCount: result.sampleCount,
-                usesRealTime: result.usesRealTime,
-              },
-              containerClassName: 'max-w-3xl p-4',
-            });
-          }
+          // Always shown as a modal. Placing the chart directly into the
+          // viewport grid (as a real 'CHT' display set routed to
+          // LineChartViewport) was attempted here, but proved unreliable
+          // across real multi-pane clinical layouts - even with the
+          // required mode-level viewport route registered, the target pane
+          // could still be left blank with no error surfaced, and that
+          // failure mode is silent (no toast, nothing to react to). The
+          // modal has been verified working correctly and consistently
+          // across every layout, so it's used unconditionally rather than
+          // risking a silent blank pane in the one code path that hasn't
+          // been made reliable.
+          uiModalService?.show({
+            title: 'Time-Intensity Curve',
+            content: TimeIntensityCurveModal,
+            contentProps: {
+              points: result.points,
+              seriesDescription: result.seriesDescription,
+              sampleCount: result.sampleCount,
+              usesRealTime: result.usesRealTime,
+            },
+            containerClassName: 'max-w-3xl p-4',
+          });
         } catch (error) {
           uiNotificationService?.hide(loadingToastId);
           console.error('[TIC] generateTimeIntensityCurve failed:', error);
