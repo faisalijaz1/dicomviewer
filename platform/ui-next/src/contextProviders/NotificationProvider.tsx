@@ -65,6 +65,7 @@ const NotificationProvider = ({
       allowDuplicates = false,
       deduplicationInterval: optionsDeduplicationInterval,
       action,
+      autoClose = true,
     } = newNotification;
 
     // Use the provider's deduplicationInterval by default, but allow it to be overridden per notification
@@ -123,8 +124,15 @@ const NotificationProvider = ({
     }
 
     // Show the notification with action if provided
+    // autoClose was accepted as an option (and documented as such in
+    // UINotificationService.show()) but never actually read here - every
+    // toast used `duration` (defaulting to 2000ms) regardless of
+    // autoClose:false, which is what let a "this can take a moment" toast
+    // vanish long before genuinely slow work (e.g. Time-Intensity Curve
+    // generation) had finished. Sonner (the underlying toast lib) treats
+    // duration: Infinity as "stays open until explicitly dismissed".
     const toastOptions = {
-      duration,
+      duration: autoClose === false ? Infinity : duration,
       position,
       description: message,
       id: options.id, // Use provided ID if available
