@@ -132,9 +132,18 @@ function createDicomWebApi(dicomWebConfig: DicomWebConfig, servicesManager) {
   dicomWebConfig.bulkDataURI ||= { enabled: true };
 
   const implementation = {
-    initialize: ({ params, query }) => {
+    // Async so an onConfiguration hook can do real network work (e.g.
+    // resolving a custom URL param like storagePath into a real
+    // StudyInstanceUID via a lookup call) before the viewer route tries to
+    // load anything - Mode.tsx already awaits this initialize() call before
+    // reading getStudyInstanceUIDs(), so an onConfiguration that returns a
+    // Promise (and mutates the passed-in `query` with the resolved UID) is
+    // fully supported without any other changes. A plain synchronous
+    // onConfiguration (the common case) still works unchanged - awaiting a
+    // non-Promise value just resolves immediately to that same value.
+    initialize: async ({ params, query }) => {
       if (dicomWebConfig.onConfiguration && typeof dicomWebConfig.onConfiguration === 'function') {
-        dicomWebConfig = dicomWebConfig.onConfiguration(dicomWebConfig, {
+        dicomWebConfig = await dicomWebConfig.onConfiguration(dicomWebConfig, {
           params,
           query,
         });
