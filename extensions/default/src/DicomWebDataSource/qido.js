@@ -173,7 +173,15 @@ function mapParams(params, options = {}) {
     limit: params.limit || 101,
     offset: params.offset || 0,
     fuzzymatching: options.supportsFuzzyMatching === true,
-    includefield: commaSeparatedFields, // serverSupportsQIDOIncludeField ? commaSeparatedFields : 'all',
+    // Only omitted when a config explicitly opts out via
+    // qidoSupportsIncludeField: false, for a server that doesn't support
+    // this parameter. Previously always sent regardless of that config
+    // flag (a serverSupportsQIDOIncludeField ? ... : 'all' conditional sat
+    // here in a comment, never actually wired up) - fixed to genuinely
+    // respect the flag. Every config that leaves it unset keeps the
+    // previous default of always sending it, so this doesn't change
+    // behavior for servers that already work.
+    includefield: options.supportsIncludeField === false ? undefined : commaSeparatedFields,
   };
 
   // build the StudyDate range parameter
