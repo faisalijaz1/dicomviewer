@@ -1,20 +1,29 @@
 /**
  * OHIF Viewer v3 — SKM PACS configuration
  *
- * Place this file along with the OHIF build output.
- * Run OHIF with: OHIF_APP_CONFIG=app-config.js yarn start
+ * IMPORTANT: this project's production build (`npx yarn run build:viewer`
+ * from platform/app, served via the repo's ohif-static-server.js) INLINES
+ * this file's content directly into dist/index.html at build time - it is
+ * NOT fetched separately at runtime the way a plain `app-config.js` script
+ * tag normally would be. Editing this file and only copying it into
+ * dist/app-config.js has NO EFFECT on what the browser actually loads;
+ * a full rebuild is required for any change here to take effect.
+ * (The OHIF_APP_CONFIG env var / `yarn start` workflow mentioned in some
+ * upstream OHIF docs is a different run method not used by this project.)
  *
  * DICOMweb endpoint: pacs-dicom-service, reverse-proxied at
  * https://192.192.8.173 (standard HTTPS port, no port suffix)
  * (WADO-RS / QIDO-RS served at /wado/rs)
  *
  * How to deploy OHIF for this project:
- *   1. git clone https://github.com/OHIF/Viewers.git ohif
+ *   1. git clone https://bitbucket.org/skmch/skmch-dicom-viewer.git ohif
  *   2. cd ohif
  *   3. yarn install
- *   4. Copy this file to ohif/platform/app/public/app-config.js
- *   5. yarn run dev (or yarn run build for production)
- *   6. OHIF will be available at http://localhost:3000
+ *   4. Edit this file directly at ohif/platform/app/public/app-config.js
+ *   5. cd platform/app && npx yarn run build:viewer (rebuilds dist/,
+ *      inlining this file's content)
+ *   6. From the repo root: node ohif-static-server.js
+ *      (set PORT=3000 first to choose the port)
  */
 
 // ---------------------------------------------------------------------------
@@ -38,7 +47,7 @@
 // Change HOST/PORT here only if the backend moves - nothing else below
 // needs to change.
 const EMR_BACKEND_PROTOCOL = 'http';
-const EMR_BACKEND_HOST = '192.192.9.67';
+const EMR_BACKEND_HOST = '192.192.8.173';
 const EMR_BACKEND_PORT = '9095';
 
 const emrStoragePath = new URLSearchParams(window.location.search).get('storagePath');
