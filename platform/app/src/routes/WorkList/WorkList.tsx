@@ -454,12 +454,21 @@ function WorkList({
               // mode.routeName
               // mode.routes[x].path
               // Don't specify default data source, and it should just be picked up... (this may not currently be the case)
-              // How do we know which params to pass? Today, it's just StudyInstanceUIDs and configUrl if exists
               const query = new URLSearchParams();
               if (filterValues.configUrl) {
                 query.append('configUrl', filterValues.configUrl);
               }
-              query.append('StudyInstanceUIDs', studyInstanceUid);
+              // Opening a study from the worklist goes through the same
+              // storagePath route the EMR uses (see app-config.js), built
+              // here from this study's own modality/date/accession instead
+              // of a StudyInstanceUID - the Java backend resolves it to the
+              // real study, exactly as it does for an EMR-launched tab.
+              // CT studies live under CTRaw; every other modality under
+              // pacs_data1.
+              const studyModalities = (modalities || '').replaceAll('/', '\\').split('\\');
+              const storageFolder = studyModalities.includes('CT') ? 'CTRaw' : 'pacs_data1';
+              const storagePath = `\\\\192.192.8.173\\${storageFolder}\\${date}\\${accession}`;
+              query.append('storagePath', storagePath);
               preserveQueryParameters(query);
 
               const modeRelativeUrl = `${mode.routeName}${dataPath || ''}?${query.toString()}`;
