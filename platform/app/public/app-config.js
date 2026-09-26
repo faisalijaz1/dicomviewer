@@ -125,7 +125,17 @@ window.config = {
     thumbnail: 2,
     prefetch: 30,
   },
- 
+
+  // Hard cap on the Cornerstone image cache (decoded pixel data held in
+  // browser memory). Without this the cache grows unbounded as a radiologist
+  // scrolls a huge CT (6,000+ slices), climbing past Chrome's ~4 GB tab limit
+  // and crashing the tab (OOM). With a cap, the oldest slices are evicted once
+  // the limit is reached, so memory plateaus instead of climbing to a crash.
+  // 2 GB leaves headroom under Chrome's limit while still caching plenty of
+  // slices for smooth scrolling. Read in extensions/cornerstone/src/init.tsx
+  // -> cornerstone.cache.setMaxCacheSize(). Value is in BYTES (2 * 1024^3).
+  maxCacheSize: 2147483648,
+
 
 
   showStudyList: true,
