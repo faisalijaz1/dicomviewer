@@ -123,7 +123,13 @@ window.config = {
   maxNumRequests: {
     interaction: 30,
     thumbnail: 2,
-    prefetch: 30,
+    prefetch: 40,
+  },
+  studyPrefetcher: {
+  enabled: true,
+  displaySetsCount: 10,        // prefetch all series in the study, not just the open one
+  maxNumPrefetchRequests: 40,  // background concurrency (local can go higher)
+  order: 'closest',            // load nearest-to-current slice first, then outward
   },
 
   // Hard cap on the Cornerstone image cache (decoded pixel data held in
