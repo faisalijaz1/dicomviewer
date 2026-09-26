@@ -125,12 +125,7 @@ window.config = {
     thumbnail: 2,
     prefetch: 30,
   },
-  studyPrefetcher: {
-    enabled: true,
-    displaySetsCount: 1,
-    maxNumPrefetchRequests: 25,
-    order: 'closest',
-  },
+ 
 
 
   showStudyList: true,
