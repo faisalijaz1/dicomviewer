@@ -207,12 +207,12 @@ window.config = {
   // loading; if the PACS server shows strain under multi-user load, dial
   // these back down rather than increasing further.
   maxNumRequests: {
-    interaction: 30,
+    interaction: 8,
     thumbnail: 2,
-    prefetch: 30,
+    prefetch: 8,
   },
   studyPrefetcher: {
-    enabled: true,
+    enabled: false,
     displaySetsCount: 1,
     maxNumPrefetchRequests: 25,
     order: 'closest',
