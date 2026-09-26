@@ -302,9 +302,32 @@ class StudyPrefetcherService extends PubSubService {
     // layout events fire mid-load) - displaySetInstanceUIDs is undefined in
     // that window, not an empty array, which crashed the .length check
     // below.
-    const displaySetUpdated = this._setActiveDisplaySetsUIDs(
-      activeViewport.displaySetInstanceUIDs ?? []
-    );
+    // Collect the display sets currently DISPLAYED across all viewports (panes),
+    // focused viewport FIRST, then every other visible pane. This is what lets a
+    // Ctrl+click side-by-side comparison prefetch the focused series first (full
+    // speed) and then automatically fill the other visible pane — while still never
+    // prefetching series that are only sitting in the thumbnail list (not displayed).
+    // (displaySetInstanceUIDs can be undefined for a viewport that exists in the grid
+    // before the hanging protocol assigns it a display set — guard it.)
+    const orderedDisplaySetUIDs: string[] = [];
+    const seenDisplaySetUIDs = new Set<string>();
+    const addDisplaySetUIDs = (uids?: string[]) => {
+      (uids ?? []).forEach(uid => {
+        if (uid && !seenDisplaySetUIDs.has(uid)) {
+          seenDisplaySetUIDs.add(uid);
+          orderedDisplaySetUIDs.push(uid);
+        }
+      });
+    };
+
+    addDisplaySetUIDs(activeViewport.displaySetInstanceUIDs);
+    for (const [viewportId, viewport] of viewports) {
+      if (viewportId !== activeViewportId) {
+        addDisplaySetUIDs(viewport.displaySetInstanceUIDs);
+      }
+    }
+
+    const displaySetUpdated = this._setActiveDisplaySetsUIDs(orderedDisplaySetUIDs);
 
     if (forceRestart || displaySetUpdated) {
       this._restartPrefetching();
@@ -402,12 +425,27 @@ class StudyPrefetcherService extends PubSubService {
     // series never completed and the whole study stalled partway (~51%). Loading the
     // active series first preserves the original prioritisation (current series before
     // others) without needing that hard gate.
-    const activeDisplaySets = displaySets.filter(ds => uidsSet.has(ds.displaySetInstanceUID));
+    // Build the active/displayed series in focused-first order (the order of
+    // _activeDisplaySetsInstanceUIDs), NOT the study's display-set order, so the
+    // focused pane's series is prefetched before the other visible pane(s).
+    const displaySetByUID = new Map(displaySets.map(ds => [ds.displaySetInstanceUID, ds]));
+    const activeDisplaySets = activeDisplaySetsInstanceUIDs
+      .map(uid => displaySetByUID.get(uid))
+      .filter((ds): ds is DisplaySet => !!ds);
+
     const neighbourDisplaySets = fnGetDisplaySets
       .call(this, displaySets, activeDisplaySetIndex)
       .filter(ds => !uidsSet.has(ds.displaySetInstanceUID));
 
-    return [...activeDisplaySets, ...neighbourDisplaySets].slice(0, displaySetsCount);
+    // ALL displayed (active) series are always prefetched — displaySetsCount must never
+    // slice a visible pane off (that would leave a side-by-side comparison pane unloaded).
+    // displaySetsCount limits only EXTRA, non-displayed neighbouring series. So with
+    // displaySetsCount:1 -> displayed series only (0 extra neighbours): one open pane =
+    // just that series; two open panes (Ctrl+click) = both, focused-first, loaded
+    // sequentially (focused fills first, then the other pane).
+    const extraNeighbourCount = Math.max(0, displaySetsCount - activeDisplaySets.length);
+
+    return [...activeDisplaySets, ...neighbourDisplaySets.slice(0, extraNeighbourCount)];
   }
 
   private _getDisplaySets() {

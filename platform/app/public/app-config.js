@@ -127,7 +127,14 @@ window.config = {
   },
   studyPrefetcher: {
   enabled: true,
-  displaySetsCount: 10,        // prefetch all series in the study, not just the open one
+  // Prefetch ONLY the series currently open in the viewport (active series).
+  // With our StudyPrefetcherService change the active series is first in the
+  // prefetch list, so displaySetsCount:1 = active series only — it loads fully
+  // and eagerly (instant scrolling), but other series are NOT pulled over the
+  // network until the user actually opens them (opening a series makes it active
+  // and re-triggers prefetch for it). Raise this number to also pre-pull that
+  // many nearest neighbouring series if desired.
+  displaySetsCount: 1,
   maxNumPrefetchRequests: 20,  // background concurrency (local can go higher)
   order: 'closest',            // load nearest-to-current slice first, then outward
   },
