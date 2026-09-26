@@ -328,18 +328,6 @@ class StudyPrefetcherService extends PubSubService {
     return true;
   }
 
-  private _areActiveDisplaySetsLoaded() {
-    const { _activeDisplaySetsInstanceUIDs: displaySetsInstanceUIDs } = this;
-
-    return (
-      displaySetsInstanceUIDs.length &&
-      displaySetsInstanceUIDs.every(
-        displaySetsInstanceUID =>
-          this._displaySetLoadingStates.get(displaySetsInstanceUID).loadingProgress >= 1
-      )
-    );
-  }
-
   private _getClosestDisplaySets(displaySets: DisplaySet[], activeDisplaySetIndex: number) {
     const sortedDisplaySets = [];
     let previousIndex = activeDisplaySetIndex - 1;
@@ -406,12 +394,20 @@ class StudyPrefetcherService extends PubSubService {
     // Creates a `Set` to look for UIDs in O(1) instead of O(n)
     const uidsSet = new Set(activeDisplaySetsInstanceUIDs);
 
-    // Remove any active displaySet that may still be in the activeDisplaySetsInstanceUIDs.
-    // That may happen when activeDisplaySetsInstanceUIDs has more than one element.
-    return fnGetDisplaySets
+    // Include the active display set(s) FIRST, then the neighbouring series in the
+    // configured order. The active series MUST be in the prefetch queue: the viewport's
+    // own stack prefetch loads only part of it and then stops, and nothing else drives
+    // it to 100%. Previously the active set was excluded here AND _sendNextRequests
+    // refused to load other series until the active set was fully loaded — so the active
+    // series never completed and the whole study stalled partway (~51%). Loading the
+    // active series first preserves the original prioritisation (current series before
+    // others) without needing that hard gate.
+    const activeDisplaySets = displaySets.filter(ds => uidsSet.has(ds.displaySetInstanceUID));
+    const neighbourDisplaySets = fnGetDisplaySets
       .call(this, displaySets, activeDisplaySetIndex)
-      .filter(ds => !uidsSet.has(ds.displaySetInstanceUID))
-      .slice(0, displaySetsCount);
+      .filter(ds => !uidsSet.has(ds.displaySetInstanceUID));
+
+    return [...activeDisplaySets, ...neighbourDisplaySets].slice(0, displaySetsCount);
   }
 
   private _getDisplaySets() {
@@ -594,10 +590,13 @@ class StudyPrefetcherService extends PubSubService {
       return;
     }
 
-    // Does not send any prefetch request until the active display sets are loaded
-    if (!this._areActiveDisplaySetsLoaded()) {
-      return;
-    }
+    // NOTE: previously this returned early until the active display set was 100% loaded.
+    // Combined with the active series being excluded from the queue and only partially
+    // loaded by the viewport's stack prefetch, that gate caused a permanent stall (study
+    // stuck ~51%). The active series is now enqueued FIRST (see
+    // _getSortedDisplaySetsToPrefetch), so "closest" ordering already prioritises it and
+    // the gate is unnecessary — removing it lets the entire study load eagerly without
+    // deadlocking.
 
     const { _pendingRequests: pendingRequests, _inflightRequests: inflightRequests } = this;
     const { maxNumPrefetchRequests } = this.config;
