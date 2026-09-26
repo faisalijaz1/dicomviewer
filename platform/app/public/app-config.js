@@ -26,6 +26,7 @@
  *      (set PORT=3000 first to choose the port)
  */
 
+
 // ---------------------------------------------------------------------------
 // EMR integration (Java PACS backend)
 //
@@ -137,8 +138,64 @@ const dataSourceConfiguration = emrStoragePath
       omitQuotationForMultipartRequest: true,
     };
 
+const urlParams = new URLSearchParams(window.location.search);
+const storagePath = urlParams.get('storagePath');
+const studyUIDs = urlParams.get('StudyInstanceUIDs');
+
+// ─── STORAGEPATH INTERCEPTOR ────────────────────────────────────────────────
+// OHIF's DICOMweb client makes many internal calls (series list, metadata,
+// pixel data) without carrying storagePath.  We patch fetch + XHR here so
+// every request to our backend automatically carries the storagePath the page
+// was opened with.  The backend keeps storagePath as required per our plan.
+if (storagePath) {
+  var _encodedPath = encodeURIComponent(storagePath);
+  var _backendPattern = '/wado/';
+
+  // Patch fetch()
+  var _origFetch = window.fetch;
+  window.fetch = function(url, opts) {
+    if (typeof url === 'string' && url.indexOf(_backendPattern) !== -1) {
+      url = url + (url.indexOf('?') !== -1 ? '&' : '?') + 'storagePath=' + _encodedPath;
+    }
+    return _origFetch.call(this, url, opts);
+  };
+
+  // Patch XMLHttpRequest.open()
+  var _origXhrOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url) {
+    if (typeof url === 'string' && url.indexOf(_backendPattern) !== -1) {
+      url = url + (url.indexOf('?') !== -1 ? '&' : '?') + 'storagePath=' + _encodedPath;
+    }
+    return _origXhrOpen.apply(this, arguments.length === 2 ? [method, url] : Array.from(arguments).map(function(a, i) { return i === 1 ? url : a; }));
+  };
+}
+
+// ─── AUTO-REDIRECT ──────────────────────────────────────────────────────────
+// When the EMR opens /viewer?storagePath=\\..., fetch the StudyInstanceUID
+// from the backend and redirect OHIF to the correct viewer URL with the UID.
+// (storagePath stays in the URL so the interceptor above keeps injecting it.)
+if (storagePath && !studyUIDs && window.location.pathname.indexOf('/viewer') !== -1) {
+  // The interceptor already added storagePath to this fetch automatically
+  fetch('https://192.192.8.173/wado/rs/studies')
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      if (data && data.length > 0 && data[0]['0020000D'] && data[0]['0020000D'].Value) {
+        var studyUID = data[0]['0020000D'].Value[0];
+        window.location.replace(
+          '/viewer?StudyInstanceUIDs=' + encodeURIComponent(studyUID) +
+          '&storagePath=' + encodeURIComponent(storagePath)
+        );
+      } else {
+        alert('No DICOM study found in this storage folder:\n' + storagePath);
+      }
+    })
+    .catch(function(err) { console.error('SKM PACS: failed to fetch study metadata', err); });
+}
+
+
 window.config = {
   routerBasename: '/',
+  pacsApiUrl: window.location.origin, // forces secure same-origin HTTPS requests
   extensions: [],
   modes: [],
 
@@ -150,10 +207,17 @@ window.config = {
   // loading; if the PACS server shows strain under multi-user load, dial
   // these back down rather than increasing further.
   maxNumRequests: {
-    interaction: 24,
+    interaction: 30,
     thumbnail: 2,
     prefetch: 30,
   },
+  studyPrefetcher: {
+    enabled: true,
+    displaySetsCount: 1,
+    maxNumPrefetchRequests: 25,
+    order: 'closest',
+  },
+
 
   showStudyList: true,
   showLoadingIndicator: true,

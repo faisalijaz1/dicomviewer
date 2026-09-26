@@ -46,7 +46,12 @@ export default function initWADOImageLoader(
       return xhrRequestHeaders;
     },
     errorInterceptor: error => {
-      errorHandler.getHTTPErrorHandler(error);
+        if (errorHandler && typeof errorHandler.getHTTPErrorHandler === 'function') {
+        const handler = errorHandler.getHTTPErrorHandler();
+        if (typeof handler === 'function') {
+          handler(error);
+        }
+      }
     },
   });
 }
