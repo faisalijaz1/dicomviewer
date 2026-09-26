@@ -27,116 +27,30 @@
  */
 
 
-// ---------------------------------------------------------------------------
-// EMR integration (Java PACS backend)
-//
-// The EMR opens a new browser tab pointed at:
-//   http://<this-viewer>/viewer?storagePath=\\192.192.1.100\pacs_storage\2023\10\24\ACC12345
-// storagePath identifies the study on the hospital's file-based PACS storage.
-// The Java backend below resolves it to the real StudyInstanceUID/
-// SeriesInstanceUID and serves standard QIDO-RS/WADO-RS from there - the
-// EMR developer never needs to know DICOM UIDs at all.
-//
-// storagePath is sent as a URL PATH SEGMENT (.../wado/rs/<storagePath>/studies),
-// not a query parameter - OHIF's DICOMweb client always builds request URLs
-// as `root + '/studies'`, `root + '/series'`, etc, so a value baked into the
-// root as a query string would end up with "/studies" appended onto the
-// query value itself instead of being its own path, which the backend can't
-// parse. As a path segment it composes correctly with every request
-// automatically, no extra code needed per-endpoint.
-//
-// Change HOST/PORT here only if the backend moves - nothing else below
-// needs to change.
-const EMR_BACKEND_PROTOCOL = 'http';
-const EMR_BACKEND_HOST = '192.192.8.173';
-const EMR_BACKEND_PORT = '9095';
-
-const emrStoragePath = new URLSearchParams(window.location.search).get('storagePath');
-
-const emrBackendRoot = emrStoragePath
-  ? `${EMR_BACKEND_PROTOCOL}://${EMR_BACKEND_HOST}:${EMR_BACKEND_PORT}/wado/rs/${encodeURIComponent(emrStoragePath)}`
-  : null;
-
-// The viewer route only knows how to open a study from a StudyInstanceUIDs
-// URL param (the EMR's storagePath is meaningless to it) - so before the
-// viewer tries to load anything, this queries QIDO-RS at the storagePath-
-// scoped root above (which the Java backend resolves down to exactly the
-// one matching study) and injects the real StudyInstanceUID into the URL's
-// query params. `query` here is the SAME URLSearchParams instance Mode.tsx
-// reads right after this to decide what to open, so setting it here is
-// enough - no other plumbing needed, every other request already uses the
-// storagePath-scoped qidoRoot/wadoRoot regardless of the resolved UID.
-async function resolveEmrStorageStudy(config, { query }) {
-  try {
-    const response = await fetch(`${emrBackendRoot}/studies`, {
-      headers: { Accept: 'application/dicom+json' },
-    });
-    if (!response.ok) {
-      console.error(
-        `[EMR] QIDO lookup for storagePath failed: ${response.status} ${response.statusText}`
-      );
-      return config;
-    }
-    const studies = await response.json();
-    const studyInstanceUID = studies?.[0]?.['0020000D']?.Value?.[0];
-    if (!studyInstanceUID) {
-      console.error('[EMR] QIDO lookup for storagePath returned no study - nothing to open.', studies);
-      return config;
-    }
-    query.set('StudyInstanceUIDs', studyInstanceUID);
-  } catch (error) {
-    console.error('[EMR] Failed to resolve storagePath to a study:', error);
-  }
-  return config;
-}
-
-// Fallback data source: the original SKM PACS connection, unchanged, used
-// only when this tab was opened WITHOUT a storagePath (e.g. testing the
-// viewer directly, or browsing the worklist) - the EMR-driven path above is
-// now the primary way studies are opened.
-const dataSourceConfiguration = emrStoragePath
-  ? {
-      friendlyName: 'EMR Study (Java PACS backend)',
-      name: 'EMR',
-      qidoRoot: emrBackendRoot,
-      wadoRoot: emrBackendRoot,
-      qidoSupportsIncludeField: false,
-      supportsReject: false,
-      // Standard multipart WADO-RS retrieval - this backend implements
-      // QIDO-RS/WADO-RS only, no separate single-file WADO-URI endpoint.
-      imageRendering: 'wadors',
-      thumbnailRendering: 'wadors',
-      enableStudyLazyLoad: true,
-      supportsFuzzyMatching: false,
-      supportsWildcard: true,
-      staticWado: false,
-      singlepart: 'pdf,video',
-      omitQuotationForMultipartRequest: true,
-      onConfiguration: resolveEmrStorageStudy,
-    }
-  : {
-      friendlyName: 'SKM PACS',
-      name: 'SKM',
-      // WADO URI — single-file retrieve, no multipart, most reliable with Cornerstone
-      wadoUriRoot: 'https://192.192.8.173/wado/uri',
-      // WADO-RS / QIDO-RS base
-      qidoRoot: 'https://192.192.8.173/wado/rs',
-      wadoRoot: 'https://192.192.8.173/wado/rs',
-      qidoSupportsIncludeField: false,
-      supportsReject: false,
-      // wadouri uses GET /wado/uri?requestType=WADO&objectUID=...&contentType=application/dicom
-      // This returns a single DICOM file — much simpler than WADO-RS multipart
-      imageRendering: 'wadouri',
-      thumbnailRendering: 'wadouri',
-      // Lazy series metadata: first series opens fast, rest load in background.
-      // Pixel data (WADO-URI) is always loaded on-demand via Cornerstone prefetch.
-      enableStudyLazyLoad: true,
-      supportsFuzzyMatching: false,
-      supportsWildcard: true,
-      staticWado: false,
-      singlepart: 'pdf,video',
-      omitQuotationForMultipartRequest: true,
-    };
+// Standard SKM PACS data source for production
+const dataSourceConfiguration = {
+  friendlyName: 'SKM PACS',
+  name: 'SKM',
+  // WADO URI — single-file retrieve, no multipart, most reliable with Cornerstone
+  wadoUriRoot: 'https://192.192.8.173/wado/uri',
+  // WADO-RS / QIDO-RS base
+  qidoRoot: 'https://192.192.8.173/wado/rs',
+  wadoRoot: 'https://192.192.8.173/wado/rs',
+  qidoSupportsIncludeField: false,
+  supportsReject: false,
+  // wadouri uses GET /wado/uri?requestType=WADO&objectUID=...&contentType=application/dicom
+  // This returns a single DICOM file — much simpler than WADO-RS multipart
+  imageRendering: 'wadouri',
+  thumbnailRendering: 'wadouri',
+  // Lazy series metadata: first series opens fast, rest load in background.
+  // Pixel data (WADO-URI) is always loaded on-demand via Cornerstone prefetch.
+  enableStudyLazyLoad: true,
+  supportsFuzzyMatching: false,
+  supportsWildcard: true,
+  staticWado: false,
+  singlepart: 'pdf,video',
+  omitQuotationForMultipartRequest: true,
+};
 
 const urlParams = new URLSearchParams(window.location.search);
 const storagePath = urlParams.get('storagePath');
