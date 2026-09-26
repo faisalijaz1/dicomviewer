@@ -121,14 +121,14 @@ window.config = {
   // loading; if the PACS server shows strain under multi-user load, dial
   // these back down rather than increasing further.
   maxNumRequests: {
-    interaction: 30,
+    interaction: 20,
     thumbnail: 2,
-    prefetch: 40,
+    prefetch: 20,
   },
   studyPrefetcher: {
   enabled: true,
   displaySetsCount: 10,        // prefetch all series in the study, not just the open one
-  maxNumPrefetchRequests: 40,  // background concurrency (local can go higher)
+  maxNumPrefetchRequests: 20,  // background concurrency (local can go higher)
   order: 'closest',            // load nearest-to-current slice first, then outward
   },
 
