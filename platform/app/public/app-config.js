@@ -151,9 +151,17 @@ window.config = {
     // background full-series pull. Kept modest because more concurrency does not
     // raise throughput here (already delivery-bound), and it lets the image you
     // are looking at win bandwidth for smooth scroll.
-    interaction: 8,
-    thumbnail: 2,
-    prefetch: 20,
+    // ── PIPELINE-FEED FIX 2026-09-28 ──────────────────────────────────────
+    // Performance profile proved the client is IDLE ~58% during load (network
+    // ~36% used, CPU not pegged) → the pipe is STARVED, not delivery-bound.
+    // Earlier "24 vs 40 = no change" was measured while decode was the wall;
+    // that wall is gone (web workers), so concurrency now matters. Pushed hard
+    // to keep many requests in flight over the HTTP/2 connection. REQUIRES
+    // nginx on http2 (h1 caps the browser at 6 conns/host and nullifies this).
+    // ORIGINAL: interaction 8, thumbnail 2, prefetch 20.
+    interaction: 16,
+    thumbnail: 4,
+    prefetch: 48,
   },
   studyPrefetcher: {
   enabled: true,
@@ -165,7 +173,9 @@ window.config = {
   // and re-triggers prefetch for it). Raise this number to also pre-pull that
   // many nearest neighbouring series if desired.
   displaySetsCount: 1,
-  maxNumPrefetchRequests: 20,
+  // Raised 20 → 48 to match maxNumRequests.prefetch (pipeline-feed fix 2026-09-28).
+  // ORIGINAL: maxNumPrefetchRequests: 20,
+  maxNumPrefetchRequests: 48,
   order: 'closest',            // load nearest-to-current slice first, then outward
   // Give the first (visible) image a clear runway before the background prefetch
   // flood starts, so time-to-first-image stays low instead of the first image
