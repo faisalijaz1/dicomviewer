@@ -121,13 +121,16 @@ window.config = {
   // loading; if the PACS server shows strain under multi-user load, dial
   // these back down rather than increasing further.
   maxNumRequests: {
-    // TEMP DIAGNOSTIC (2026-09-27): lowered to confirm the browser
-    // ERR_INSUFFICIENT_RESOURCES storm stops at low concurrency. The real fix is
-    // server-side per-image latency (Elasticsearch lookup per image); once that
-    // is fast these go back up to ~16/20 without storming. See VIEWER-PERFORMANCE-PLAN.md.
-    interaction: 6,
+    // Concurrent HTTP requests from the viewer to the PACS, per priority class.
+    // Bottleneck is the client-facing transfer, not the server (NAS read + ES
+    // are both fast once gzip-on-DICOM was removed). 'interaction' = the slice
+    // you're actively viewing/scrolling (highest priority); 'prefetch' = the
+    // background full-series pull. Kept modest because more concurrency does not
+    // raise throughput here (already delivery-bound), and it lets the image you
+    // are looking at win bandwidth for smooth scroll.
+    interaction: 8,
     thumbnail: 2,
-    prefetch: 24,
+    prefetch: 20,
   },
   studyPrefetcher: {
   enabled: true,
@@ -139,8 +142,14 @@ window.config = {
   // and re-triggers prefetch for it). Raise this number to also pre-pull that
   // many nearest neighbouring series if desired.
   displaySetsCount: 1,
-  maxNumPrefetchRequests: 24,  // TEMP DIAGNOSTIC (2026-09-27): matches maxNumRequests.prefetch above
+  maxNumPrefetchRequests: 20,
   order: 'closest',            // load nearest-to-current slice first, then outward
+  // Give the first (visible) image a clear runway before the background prefetch
+  // flood starts, so time-to-first-image stays low instead of the first image
+  // sharing the HTTP/2 connection with 20 concurrent prefetch downloads. Only
+  // the initial study-open is delayed; series switches restart immediately.
+  // Tune: raise if TTFI still competes, lower/0 to disable.
+  prefetchStartDelayMs: 1000,
   },
 
   // Hard cap on the Cornerstone image cache (decoded pixel data held in

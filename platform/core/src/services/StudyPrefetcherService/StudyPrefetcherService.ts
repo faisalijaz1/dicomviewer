@@ -52,6 +52,16 @@ type StudyPrefetcherConfig = {
   maxNumPrefetchRequests: number;
   /* Display sets prefetching order (closest, downward and upward) */
   order: StudyPrefetchOrder;
+  /**
+   * Delay (ms) before the initial background prefetch flood starts after the
+   * viewer opens (VIEWPORTS_READY). Gives the viewport's first image — loaded at
+   * higher 'interaction' priority — a clear run at the network so time-to-first-
+   * image stays low, instead of competing with maxNumPrefetchRequests concurrent
+   * prefetch downloads over the shared HTTP/2 connection. 0 = original behaviour
+   * (start immediately). Only the initial open is delayed; series switches still
+   * restart prefetch immediately.
+   */
+  prefetchStartDelayMs?: number;
 };
 
 type DisplaySetLoadingState = {
@@ -108,6 +118,7 @@ class StudyPrefetcherService extends PubSubService {
   private _pendingRequests: ImageRequest[] = [];
   private _inflightRequests = new Map<string, ImageRequest>();
   private _isRunning = false;
+  private _startDelayTimer: ReturnType<typeof setTimeout> | null = null;
   private _displaySetLoadingStates = new Map<string, DisplaySetLoadingState>();
   private _imageIdsToDisplaySetsMap = new Map<string, Set<string>>();
   private config: StudyPrefetcherConfig = {
@@ -128,6 +139,8 @@ class StudyPrefetcherService extends PubSubService {
     maxNumPrefetchRequests: 10,
     /* Display sets prefetching order (closest, downward and upward) */
     order: StudyPrefetchOrder.downward,
+    /* Delay (ms) before the initial prefetch flood — 0 = original behaviour */
+    prefetchStartDelayMs: 0,
   };
 
   // Properties set by Cornerstone extension (initStudyPrefetcherService)
@@ -176,6 +189,12 @@ class StudyPrefetcherService extends PubSubService {
    */
   public onModeExit(): void {
     this._removeEventListeners();
+    // Cancel a pending initial-prefetch delay timer (it may still be waiting if
+    // the user navigated away during the delay window, before _isRunning=true).
+    if (this._startDelayTimer) {
+      clearTimeout(this._startDelayTimer);
+      this._startDelayTimer = null;
+    }
     this._stopPrefetching();
   }
 
@@ -246,7 +265,22 @@ class StudyPrefetcherService extends PubSubService {
       ViewportGridService.EVENTS.VIEWPORTS_READY,
       () => {
         this._syncWithActiveViewport();
-        this._startPrefetching();
+        // Delay the initial prefetch flood so the viewport's first image (higher
+        // 'interaction' priority) gets a clear run at the shared HTTP/2 connection
+        // instead of competing with maxNumPrefetchRequests concurrent prefetch
+        // downloads — keeps time-to-first-image low. 0 = start immediately.
+        const delay = this.config.prefetchStartDelayMs ?? 0;
+        if (delay > 0) {
+          if (this._startDelayTimer) {
+            clearTimeout(this._startDelayTimer);
+          }
+          this._startDelayTimer = setTimeout(() => {
+            this._startDelayTimer = null;
+            this._startPrefetching();
+          }, delay);
+        } else {
+          this._startPrefetching();
+        }
       }
     );
 
