@@ -125,9 +125,9 @@ window.config = {
     // ERR_INSUFFICIENT_RESOURCES storm stops at low concurrency. The real fix is
     // server-side per-image latency (Elasticsearch lookup per image); once that
     // is fast these go back up to ~16/20 without storming. See VIEWER-PERFORMANCE-PLAN.md.
-    interaction: 6,
+    interaction: 30,
     thumbnail: 2,
-    prefetch: 24,
+    prefetch: 40,
   },
   studyPrefetcher: {
   enabled: true,
@@ -139,7 +139,7 @@ window.config = {
   // and re-triggers prefetch for it). Raise this number to also pre-pull that
   // many nearest neighbouring series if desired.
   displaySetsCount: 1,
-  maxNumPrefetchRequests: 24,  // TEMP DIAGNOSTIC (2026-09-27): matches maxNumRequests.prefetch above
+  maxNumPrefetchRequests: 40,  // TEMP DIAGNOSTIC (2026-09-27): matches maxNumRequests.prefetch above
   order: 'closest',            // load nearest-to-current slice first, then outward
   },
 
