@@ -120,6 +120,22 @@ window.config = {
   extensions: [],
   modes: [],
 
+  // ── DECODE PARALLELISM FIX 2026-09-28 ──────────────────────────────────────
+  // OS-level profiling proved the 32s load is CLIENT-SIDE DECODE-BOUND: during
+  // load, Chrome pegged ~2.4 CPU cores while the gigabit LAN sat ~70% idle
+  // (~33 MB/s). The browser can't pull pixels faster than it can decode them
+  // (~63 slices/s = ~16ms/slice). Server/NAS/HTTP-2 changes cannot help this.
+  //
+  // This value was previously UNSET, so initWADOImageLoader.js computed
+  //   Math.min(hardwareConcurrency - 1, undefined) === NaN
+  // and the DICOM image loader fell back to only a couple of decode workers.
+  // Setting it high lets that same min() resolve to (hardwareConcurrency - 1),
+  // i.e. use nearly every CPU core for parallel decode. On an 8-core box this
+  // goes from ~2-3 workers to 7 → roughly 2-3x decode throughput, which is the
+  // path from ~32s toward the 15-20s target. It auto-scales per machine (a
+  // 4-core box still caps at 3); one core is always left free for the UI.
+  maxNumberOfWebWorkers: 16,
+
   // RadiAnt-style: load current slice first, prefetch neighbours while scrolling.
   // These control concurrent HTTP requests FROM EACH VIEWER TO THE PACS SERVER -
   // unlike decode (which runs in the browser's own web workers, no server
