@@ -121,9 +121,13 @@ window.config = {
   // loading; if the PACS server shows strain under multi-user load, dial
   // these back down rather than increasing further.
   maxNumRequests: {
-    interaction: 20,
+    // TEMP DIAGNOSTIC (2026-09-27): lowered to confirm the browser
+    // ERR_INSUFFICIENT_RESOURCES storm stops at low concurrency. The real fix is
+    // server-side per-image latency (Elasticsearch lookup per image); once that
+    // is fast these go back up to ~16/20 without storming. See VIEWER-PERFORMANCE-PLAN.md.
+    interaction: 6,
     thumbnail: 2,
-    prefetch: 24,
+    prefetch: 6,
   },
   studyPrefetcher: {
   enabled: true,
@@ -135,7 +139,7 @@ window.config = {
   // and re-triggers prefetch for it). Raise this number to also pre-pull that
   // many nearest neighbouring series if desired.
   displaySetsCount: 1,
-  maxNumPrefetchRequests: 24,  // background concurrency (local can go higher)
+  maxNumPrefetchRequests: 6,  // TEMP DIAGNOSTIC (2026-09-27): matches maxNumRequests.prefetch above
   order: 'closest',            // load nearest-to-current slice first, then outward
   },
 
