@@ -40,8 +40,18 @@ const dataSourceConfiguration = {
   supportsReject: false,
   // wadouri uses GET /wado/uri?requestType=WADO&objectUID=...&contentType=application/dicom
   // This returns a single DICOM file — much simpler than WADO-RS multipart
-  imageRendering: 'wadouri',
-  thumbnailRendering: 'wadouri',
+  //
+  // ── A/B TEST 2026-09-28: switch to WADO-RS per-frame retrieval to measure it
+  // against wadouri on the LAN. wadors fetches raw pixel frames from
+  // /wado/rs/.../instances/{sop}/frames/1 (backend retrieveFrame, now matched to
+  // the wadouri fast path). NOTE: this is still ONE request per frame (~2001),
+  // not a series bulk fetch. To restore the proven wadouri path, swap the two
+  // pairs of lines below back.
+  // ORIGINAL (restore these two lines to revert):
+  // imageRendering: 'wadouri',
+  // thumbnailRendering: 'wadouri',
+  imageRendering: 'wadors',
+  thumbnailRendering: 'wadors',
   // Lazy series metadata: first series opens fast, rest load in background.
   // Pixel data (WADO-URI) is always loaded on-demand via Cornerstone prefetch.
   enableStudyLazyLoad: true,
