@@ -107,6 +107,13 @@ declare global {
         compute?: number;
       };
       maxNumberOfWebWorkers?: number;
+      // SKM-BULK 2026-09-28 (Fix 3): batch pixel retrieval config. See
+      // extensions/cornerstone/src/skmBulkImageLoader.ts and app-config.js.
+      skmBulkLoader?: {
+        enabled?: boolean;
+        chunkSize?: number;
+        maxConcurrentChunks?: number;
+      };
       acceptHeader?: string[];
       investigationalUseDialog?: {
         option: 'always' | 'never' | 'configure';

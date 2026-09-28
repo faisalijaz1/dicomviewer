@@ -28,6 +28,9 @@ import initCornerstoneTools from './initCornerstoneTools';
 import { connectToolsToMeasurementService } from './initMeasurementService';
 import initCineService from './initCineService';
 import initStudyPrefetcherService from './initStudyPrefetcherService';
+// SKM-BULK 2026-09-28 (Fix 3): batch pixel retrieval to collapse ~2001 per-slice
+// round-trips into ~40 chunk requests. Gated by appConfig.skmBulkLoader.enabled.
+import { registerSkmBulkImageLoader, initSkmBulkDriver } from './skmBulkImageLoader';
 import interleaveCenterLoader from './utils/interleaveCenterLoader';
 import nthLoader from './utils/nthLoader';
 import interleaveTopToBottom from './utils/interleaveTopToBottom';
@@ -548,6 +551,21 @@ export default async function init({
 
   initCineService(servicesManager);
   initStudyPrefetcherService(servicesManager);
+
+  // SKM-BULK 2026-09-28 (Fix 3): register the bulk-capable dicomweb image loader
+  // and the chunk driver. Both are no-ops unless appConfig.skmBulkLoader.enabled
+  // is true, and the loader always falls back to the normal per-slice network
+  // path on any miss/error — so image quality and behaviour are unchanged when
+  // off, and never compromised when on. Must run AFTER initWADOImageLoader()
+  // (line above) so it overrides the default 'dicomweb' loader.
+  if (appConfig?.skmBulkLoader?.enabled) {
+    // Only start the chunk driver if the custom loader actually activated;
+    // otherwise the driver would bulk-fetch chunks nothing can consume.
+    const bulkReady = registerSkmBulkImageLoader();
+    if (bulkReady) {
+      initSkmBulkDriver(servicesManager, extensionManager, appConfig.skmBulkLoader);
+    }
+  }
 
   measurementService.subscribe(measurementService.EVENTS.JUMP_TO_MEASUREMENT, evt => {
     const { measurement } = evt;

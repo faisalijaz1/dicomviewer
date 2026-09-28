@@ -163,8 +163,29 @@ window.config = {
     thumbnail: 4,
     prefetch: 48,
   },
+  // ── SKM-BULK 2026-09-28 (Fix 3) ───────────────────────────────────────────
+  // Batch pixel retrieval: one request pulls ~50 slices instead of 50 separate
+  // round-trips, removing the per-request latency gaps that were the LAN wall
+  // (client, server, storage and network were all measured idle). Bytes are the
+  // SAME uncompressed DICOM files as /wado/uri and are decoded by Cornerstone's
+  // own pipeline — identical pixels, no compression, no quality change.
+  //   enabled            : master on/off (set false to instantly revert to the
+  //                        proven per-slice wadouri path).
+  //   chunkSize          : slices per bulk request (50 = ~40 requests for 2001).
+  //   maxConcurrentChunks: bulk requests in flight; bounds transient memory to
+  //                        ~maxConcurrentChunks * chunkSize slices (~100 MB).
+  skmBulkLoader: {
+    enabled: true,
+    chunkSize: 50,
+    maxConcurrentChunks: 4,
+  },
+
   studyPrefetcher: {
-  enabled: true,
+  // Disabled while skmBulkLoader is ON — the bulk driver loads the full series,
+  // so the old per-slice prefetcher would only race it and cause network
+  // fallbacks. If you set skmBulkLoader.enabled=false, set this back to true.
+  // ORIGINAL: enabled: true,
+  enabled: false,
   // Prefetch ONLY the series currently open in the viewport (active series).
   // With our StudyPrefetcherService change the active series is first in the
   // prefetch list, so displaySetsCount:1 = active series only — it loads fully
