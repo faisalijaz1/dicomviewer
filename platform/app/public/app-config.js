@@ -248,7 +248,7 @@ window.config = {
   // deviceMemory reports TOTAL installed RAM, not FREE RAM (no browser API exposes
   // free RAM), so pick this ceiling for the fleet's guaranteed-min spec.
   // Value is in BYTES (8 * 1024^3).
-  maxCacheSize: 8589934592,
+  maxCacheSize: 2147483648,
 
 
 
