@@ -174,10 +174,16 @@ window.config = {
   //   chunkSize          : slices per bulk request (50 = ~40 requests for 2001).
   //   maxConcurrentChunks: bulk requests in flight; bounds transient memory to
   //                        ~maxConcurrentChunks * chunkSize slices (~100 MB).
+  // SKM-BULK 2026-09-28 (perf): with the backend now reading each chunk's files
+  // in parallel (shared 48-thread pool), the storage side is what saturates the
+  // 1 Gbps link. Keep chunkSize modest and run a few chunks concurrently so
+  // several HTTP/2 streams overlap and the pipe stays full end-to-end. Transient
+  // memory ≈ maxConcurrentChunks * chunkSize slices (~6*20*0.5MB ≈ 60 MB).
+  // ORIGINAL: chunkSize: 30, maxConcurrentChunks: 4
   skmBulkLoader: {
     enabled: true,
-    chunkSize: 30,
-    maxConcurrentChunks: 4,
+    chunkSize: 20,
+    maxConcurrentChunks: 6,
   },
 
   studyPrefetcher: {
