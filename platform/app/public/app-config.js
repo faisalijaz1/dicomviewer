@@ -191,7 +191,11 @@ window.config = {
   // so the old per-slice prefetcher would only race it and cause network
   // fallbacks. If you set skmBulkLoader.enabled=false, set this back to true.
   // ORIGINAL: enabled: true,
-  enabled: false,
+  // SKM 2026-09-28: bulk is now DISABLED again, so the prefetcher MUST be ON —
+  // otherwise nothing eagerly loads the series and the centre spinner stalls
+  // when the progress bar completes (the regression that reappeared). Keep this
+  // = !skmBulkLoader.enabled: exactly one of the two loads the full series.
+  enabled: true,
   // Prefetch ONLY the series currently open in the viewport (active series).
   // With our StudyPrefetcherService change the active series is first in the
   // prefetch list, so displaySetsCount:1 = active series only — it loads fully
