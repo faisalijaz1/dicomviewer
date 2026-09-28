@@ -190,12 +190,14 @@ export function registerSkmBulkImageLoader(): boolean {
 
 /** Fetch one chunk of slices from the backend and parse the framed response. */
 async function fetchChunk(sops: string[], storagePath: string): Promise<Map<string, ArrayBuffer | null>> {
-  const url = `${window.location.origin}/wado/bulk?storagePath=${encodeURIComponent(storagePath)}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sopUIDs: sops }),
-  });
+  // GET (same-origin) so no Origin header is sent → no Spring Security CORS
+  // rejection, and it's covered by the existing `GET /wado/** permitAll` rule.
+  // The SOP list goes in a comma-separated query param; chunkSize is kept small
+  // so the URL stays well within header limits.
+  const url =
+    `${window.location.origin}/wado/bulk?storagePath=${encodeURIComponent(storagePath)}` +
+    `&sopUIDs=${sops.map(encodeURIComponent).join(',')}`;
+  const res = await fetch(url, { method: 'GET' });
   if (!res.ok) {
     throw new Error(`bulk http ${res.status}`);
   }
@@ -311,7 +313,7 @@ export function initSkmBulkDriver(
   }
   driverInitialized = true;
 
-  const chunkSize = config?.chunkSize ?? 50;
+  const chunkSize = config?.chunkSize ?? 30;
   const maxConcurrentChunks = config?.maxConcurrentChunks ?? 4;
 
   const run = () => {

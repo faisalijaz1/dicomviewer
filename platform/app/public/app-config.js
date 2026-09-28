@@ -176,7 +176,7 @@ window.config = {
   //                        ~maxConcurrentChunks * chunkSize slices (~100 MB).
   skmBulkLoader: {
     enabled: true,
-    chunkSize: 50,
+    chunkSize: 30,
     maxConcurrentChunks: 4,
   },
 
