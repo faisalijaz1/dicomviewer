@@ -62,6 +62,21 @@ type StudyPrefetcherConfig = {
    * restart prefetch immediately.
    */
   prefetchStartDelayMs?: number;
+  /**
+   * ── SKM 2026-09-28: concurrent multi-viewport prefetch ──────────────────
+   * When multiple panes/studies are open (Ctrl+click), interleave every open
+   * series' image requests (round-robin) so all viewport progress bars advance
+   * together, and scale the in-flight request cap by the number of open panes so
+   * the focused study is not slowed by sharing a fixed 48-slot budget. Only helps
+   * to the extent the storage/network has spare capacity.
+   * Default false = ORIGINAL behaviour (one series fully, then the next).
+   * TO REMOVE THIS FEATURE: delete these two fields, the SKM blocks in
+   * _loadDisplaySets and _sendNextRequests, and the _enqueueDisplaySetImagesInterleaved
+   * and _effectiveMaxPrefetchRequests methods.
+   */
+  skmConcurrentPanes?: boolean;
+  /* Hard ceiling for the pane-scaled cap. Default = maxNumPrefetchRequests * 2. */
+  skmConcurrentPanesMaxRequests?: number;
 };
 
 type DisplaySetLoadingState = {
@@ -141,6 +156,9 @@ class StudyPrefetcherService extends PubSubService {
     order: StudyPrefetchOrder.downward,
     /* Delay (ms) before the initial prefetch flood — 0 = original behaviour */
     prefetchStartDelayMs: 0,
+    /* SKM 2026-09-28: concurrent multi-viewport prefetch — off by default. */
+    skmConcurrentPanes: false,
+    skmConcurrentPanesMaxRequests: undefined,
   };
 
   // Properties set by Cornerstone extension (initStudyPrefetcherService)
@@ -561,7 +579,63 @@ class StudyPrefetcherService extends PubSubService {
     const { displaySets, displaySetsToPrefetch } = this._getDisplaySets();
 
     displaySets.forEach(displaySet => this._addDisplaySetLoadingState(displaySet));
-    displaySetsToPrefetch.forEach(displaySet => this._enqueueDisplaySetImagesRequests(displaySet));
+
+    // ── SKM 2026-09-28: concurrent multi-viewport prefetch ──────────────────
+    // With >1 open series, interleave their image requests (round-robin) so the
+    // in-flight slots span ALL open series and every viewport's progress advances
+    // together, instead of loading one series fully before the next starts.
+    // Guarded by config.skmConcurrentPanes (default false = original behaviour).
+    // TO REMOVE: delete this if/else and keep only the original forEach line below.
+    if (this.config.skmConcurrentPanes && displaySetsToPrefetch.length > 1) {
+      this._enqueueDisplaySetImagesInterleaved(displaySetsToPrefetch);
+    } else {
+      displaySetsToPrefetch.forEach(displaySet => this._enqueueDisplaySetImagesRequests(displaySet));
+    }
+    // ── end SKM ─────────────────────────────────────────────────────────────
+  }
+
+  // ── SKM 2026-09-28: round-robin enqueue across open series (see _loadDisplaySets).
+  // Delete this whole method when removing the concurrent-panes feature.
+  private _enqueueDisplaySetImagesInterleaved(displaySets: DisplaySet[]) {
+    const perSet = displaySets.map(ds => ({
+      displaySetInstanceUID: ds.displaySetInstanceUID,
+      imageIds: this._getImageIdsForDisplaySet(ds),
+    }));
+    const maxLen = perSet.reduce((m, s) => Math.max(m, s.imageIds.length), 0);
+    for (let i = 0; i < maxLen; i++) {
+      for (const set of perSet) {
+        const imageId = set.imageIds[i];
+        if (imageId === undefined) {
+          continue;
+        }
+        if (this.cache.isImageCached(imageId)) {
+          this._moveImageIdToLoadedSet(imageId);
+          continue;
+        }
+        this._pendingRequests.push({
+          displaySetInstanceUID: set.displaySetInstanceUID,
+          imageId,
+          aborted: false,
+        });
+      }
+    }
+  }
+
+  // ── SKM 2026-09-28: effective in-flight cap. When skmConcurrentPanes is on it
+  // scales maxNumPrefetchRequests by the number of open (displayed) series so a
+  // second pane uses spare bandwidth rather than halving the focused study's
+  // budget, bounded by skmConcurrentPanesMaxRequests (default = base * 2).
+  // When off it returns exactly config.maxNumPrefetchRequests (original behaviour).
+  // Delete this method (and revert its call site in _sendNextRequests to
+  // this.config.maxNumPrefetchRequests) to remove the feature.
+  private _effectiveMaxPrefetchRequests(): number {
+    const base = this.config.maxNumPrefetchRequests;
+    if (!this.config.skmConcurrentPanes) {
+      return base;
+    }
+    const panes = Math.max(1, this._activeDisplaySetsInstanceUIDs?.length || 1);
+    const ceiling = this.config.skmConcurrentPanesMaxRequests || base * 2;
+    return Math.min(base * panes, ceiling);
   }
 
   private _moveImageIdToLoadedSet(imageId: string): boolean {
@@ -671,7 +745,9 @@ class StudyPrefetcherService extends PubSubService {
     // deadlocking.
 
     const { _pendingRequests: pendingRequests, _inflightRequests: inflightRequests } = this;
-    const { maxNumPrefetchRequests } = this.config;
+    // SKM 2026-09-28: pane-scaled cap when skmConcurrentPanes is on; otherwise
+    // === this.config.maxNumPrefetchRequests (original). See _effectiveMaxPrefetchRequests.
+    const maxNumPrefetchRequests = this._effectiveMaxPrefetchRequests();
 
     if (!pendingRequests.length || inflightRequests.size >= maxNumPrefetchRequests) {
       return;

@@ -214,6 +214,17 @@ window.config = {
   // the initial study-open is delayed; series switches restart immediately.
   // Tune: raise if TTFI still competes, lower/0 to disable.
   prefetchStartDelayMs: 1000,
+  // SKM 2026-09-28: concurrent multi-viewport prefetch. When >1 study/pane is
+  // open (Ctrl+click), interleave every open series so all viewport progress
+  // bars advance together, and scale the in-flight cap by the number of open
+  // panes so the focused study is not slowed by sharing a fixed 48-slot budget
+  // (bounded by skmConcurrentPanesMaxRequests). Only helps to the extent the
+  // storage/network has spare capacity. Set to false to revert to the original
+  // "one series fully, then the next" behaviour — no other change needed.
+  skmConcurrentPanes: true,
+  // Ceiling for the pane-scaled cap (default = maxNumPrefetchRequests * 2 = 96).
+  // Keep it near the level proven safe against the storage share.
+  skmConcurrentPanesMaxRequests: 96,
   },
 
   // Hard cap on the Cornerstone image cache (decoded pixel data held in

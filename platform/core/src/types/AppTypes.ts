@@ -152,6 +152,10 @@ declare global {
         displaySetsCount: number;
         maxNumPrefetchRequests: number;
         order: 'closest' | 'downward' | 'upward';
+        prefetchStartDelayMs?: number;
+        // SKM 2026-09-28: concurrent multi-viewport prefetch (see StudyPrefetcherService).
+        skmConcurrentPanes?: boolean;
+        skmConcurrentPanesMaxRequests?: number;
       };
     }
 
