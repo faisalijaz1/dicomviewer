@@ -59,6 +59,15 @@ function extractSop(imageId: string): string | null {
   return m ? decodeURIComponent(m[1]) : null;
 }
 
+/** Extract the SeriesInstanceUID (seriesUID=...) from a dicomweb wadouri imageId. */
+function extractSeries(imageId: string): string | null {
+  if (!imageId) {
+    return null;
+  }
+  const m = imageId.match(/seriesUID=([^&]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
 function getStoragePath(): string | null {
   try {
     return new URLSearchParams(window.location.search).get('storagePath');
@@ -189,13 +198,20 @@ export function registerSkmBulkImageLoader(): boolean {
 }
 
 /** Fetch one chunk of slices from the backend and parse the framed response. */
-async function fetchChunk(sops: string[], storagePath: string): Promise<Map<string, ArrayBuffer | null>> {
+async function fetchChunk(
+  sops: string[],
+  seriesUID: string,
+  storagePath: string
+): Promise<Map<string, ArrayBuffer | null>> {
   // GET (same-origin) so no Origin header is sent → no Spring Security CORS
   // rejection, and it's covered by the existing `GET /wado/** permitAll` rule.
-  // The SOP list goes in a comma-separated query param; chunkSize is kept small
-  // so the URL stays well within header limits.
+  // seriesUID lets the backend resolve filenames via one getInstancesBySeriesUID
+  // query per series (the same lookup the metadata endpoint uses). The SOP list
+  // goes in a comma-separated query param; chunkSize is kept small so the URL
+  // stays well within header limits.
   const url =
     `${window.location.origin}/wado/bulk?storagePath=${encodeURIComponent(storagePath)}` +
+    `&seriesUID=${encodeURIComponent(seriesUID)}` +
     `&sopUIDs=${sops.map(encodeURIComponent).join(',')}`;
   const res = await fetch(url, { method: 'GET' });
   if (!res.ok) {
@@ -242,6 +258,14 @@ async function driveDisplaySet(
   chunkSize: number,
   maxConcurrentChunks: number
 ): Promise<void> {
+  // All imageIds in a display set share one series; take it from the first.
+  const seriesUID = extractSeries(imageIds[0]);
+  if (!seriesUID) {
+    // eslint-disable-next-line no-console
+    console.warn('[SKM-BULK] could not extract seriesUID; skipping bulk for this display set');
+    return;
+  }
+
   const chunks: string[][] = [];
   for (let i = 0; i < imageIds.length; i += chunkSize) {
     chunks.push(imageIds.slice(i, i + chunkSize));
@@ -256,7 +280,7 @@ async function driveDisplaySet(
         continue;
       }
       try {
-        const map = await fetchChunk(mySops, storagePath);
+        const map = await fetchChunk(mySops, seriesUID, storagePath);
         for (const id of my) {
           const sop = extractSop(id);
           if (!sop) {
