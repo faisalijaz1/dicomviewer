@@ -209,9 +209,20 @@ async function fetchChunk(
   // query per series (the same lookup the metadata endpoint uses). The SOP list
   // goes in a comma-separated query param; chunkSize is kept small so the URL
   // stays well within header limits.
+  //
+  // SKM-BULK 2026-09-28 (fix): do NOT append storagePath here. app-config.js
+  // installs a global fetch/XHR interceptor that appends `&storagePath=<enc>`
+  // to EVERY `/wado/*` request. Appending it here too made the backend receive
+  // storagePath twice, which Spring binds as a single comma-joined value
+  // ("X,X"); normalizeAndValidateStoragePath then built a bogus path
+  // (`\\host\dir,\host\dir\file`) and every slice failed with
+  // NoSuchFileException → 100% fallback to /wado/uri. Letting the interceptor
+  // add it exactly once matches how /wado/uri (which works) is built.
+  // NOTE: `storagePath` is still received as an arg for API stability but is
+  // intentionally not placed in the URL.
+  void storagePath;
   const url =
-    `${window.location.origin}/wado/bulk?storagePath=${encodeURIComponent(storagePath)}` +
-    `&seriesUID=${encodeURIComponent(seriesUID)}` +
+    `${window.location.origin}/wado/bulk?seriesUID=${encodeURIComponent(seriesUID)}` +
     `&sopUIDs=${sops.map(encodeURIComponent).join(',')}`;
   const res = await fetch(url, { method: 'GET' });
   if (!res.ok) {
