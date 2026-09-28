@@ -420,11 +420,43 @@ export default async function init({
     },
   });
 
-  // For debugging large datasets, otherwise prefer the defaults
-  const { maxCacheSize } = appConfig;
-  if (maxCacheSize) {
-    cornerstone.cache.setMaxCacheSize(maxCacheSize);
+  // ── SKM 2026-09-28 (OOM guard) ──────────────────────────────────────────
+  // Cap the Cornerstone image/volume cache at the SMALLER of the configured
+  // value and a fraction of THIS workstation's RAM. A fixed 2 GB cap crashes
+  // low-memory clients (e.g. a 16 GB box already at ~97% from other clinical
+  // apps, leaving <1 GB free) when a huge CT is opened: decoded pixels + tab +
+  // GPU overhead exceed physical RAM → tab OOM. Scaling to the device keeps our
+  // footprint safe, and LRU eviction then plateaus memory instead of climbing
+  // to a crash. navigator.deviceMemory is coarse (0.25..8, capped at 8 even on
+  // bigger machines), so 20% of it is a conservative budget.
+  // TO REVERT: replace this whole block with
+  //   const { maxCacheSize } = appConfig;
+  //   if (maxCacheSize) cornerstone.cache.setMaxCacheSize(maxCacheSize);
+  let effectiveCacheSize = appConfig.maxCacheSize;
+  try {
+    const gb = 1024 * 1024 * 1024;
+    const deviceMemGb = (navigator as any).deviceMemory || 4; // undefined → assume 4 GB
+    const memBudget = Math.floor(deviceMemGb * 0.2 * gb);     // 20% of reported RAM
+    if (memBudget > 0) {
+      effectiveCacheSize = effectiveCacheSize
+        ? Math.min(effectiveCacheSize, memBudget)
+        : memBudget;
+    }
+  } catch (e) {
+    /* fall back to the configured value */
   }
+  if (effectiveCacheSize) {
+    cornerstone.cache.setMaxCacheSize(effectiveCacheSize);
+    // eslint-disable-next-line no-console
+    console.log(
+      '[SKM] Cornerstone cache cap =',
+      Math.round(effectiveCacheSize / (1024 * 1024)),
+      'MB (deviceMemory =',
+      (navigator as any).deviceMemory,
+      'GB)'
+    );
+  }
+  // ── end SKM ─────────────────────────────────────────────────────────────
 
   initCornerstoneTools();
 
