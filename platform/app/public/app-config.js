@@ -232,10 +232,23 @@ window.config = {
   // scrolls a huge CT (6,000+ slices), climbing past Chrome's ~4 GB tab limit
   // and crashing the tab (OOM). With a cap, the oldest slices are evicted once
   // the limit is reached, so memory plateaus instead of climbing to a crash.
-  // 2 GB leaves headroom under Chrome's limit while still caching plenty of
-  // slices for smooth scrolling. Read in extensions/cornerstone/src/init.tsx
-  // -> cornerstone.cache.setMaxCacheSize(). Value is in BYTES (2 * 1024^3).
-  maxCacheSize: 2147483648,
+  // Read in extensions/cornerstone/src/init.tsx -> setMaxCacheSize(), where the
+  // EFFECTIVE cap = min(this value, 20% of navigator.deviceMemory). This value is
+  // a CEILING; the 20%-of-RAM rule is what actually scales the cache to the
+  // machine (and safely shrinks it on smaller boxes).
+  //
+  // Configured for the LIVE reading workstations (min 32 GB RAM), NOT this dev
+  // box (2026-09-28):
+  //   32 GB machine -> min(8 GB, 20% * 32 = 6.4 GB) = 6.4 GB  (caches ~6k-12k
+  //                    decoded CT slices — essentially every study stays fully
+  //                    cached, instant scrolling, no re-fetch), ~25 GB left free.
+  //   >=40 GB       -> 8 GB (this ceiling).
+  //   16 GB (dev)   -> min(8 GB, 3.2 GB) = 3.2 GB (auto-scaled down; if a starved
+  //                    dev box still OOMs, lower this value locally only).
+  // deviceMemory reports TOTAL installed RAM, not FREE RAM (no browser API exposes
+  // free RAM), so pick this ceiling for the fleet's guaranteed-min spec.
+  // Value is in BYTES (8 * 1024^3).
+  maxCacheSize: 8589934592,
 
 
 
