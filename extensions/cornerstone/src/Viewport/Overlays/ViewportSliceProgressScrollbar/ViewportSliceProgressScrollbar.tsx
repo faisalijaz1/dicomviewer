@@ -188,7 +188,12 @@ function ViewportSliceProgressScrollbar({
       */}
       <div
         aria-hidden={!showBadge}
-        className="bg-black/75 shadow-black/60 pointer-events-none absolute right-1 top-1 z-20 flex items-center gap-1 rounded-full border border-white/10 px-2 py-0.5 shadow-lg backdrop-blur-sm transition-all duration-300 ease-out"
+        // SKM 2026-09-29: border/glow switched from generic white/black to the
+        // same `highlight` cyan now used by the scrollbar fill below, so the
+        // badge and bar read as ONE cohesive loading system rather than two
+        // independently-styled pieces. ORIGINAL: "border-white/10 shadow-lg"
+        // (with the shadow color left as the default black/60).
+        className="bg-black/75 pointer-events-none absolute right-1 top-1 z-20 flex items-center gap-1 rounded-full border border-highlight/30 px-2 py-0.5 shadow-[0_0_8px_rgba(90,204,230,0.35)] backdrop-blur-sm transition-all duration-300 ease-out"
         style={{
           opacity: showBadge ? 1 : 0,
           transform: showBadge ? 'translateY(0)' : 'translateY(-4px)',
@@ -222,11 +227,26 @@ function ViewportSliceProgressScrollbar({
         >
           <SmartScrollbarTrack>
             {isFullMode && showLoadedFill && (
+              // SKM 2026-09-29: was a flat, low-contrast `bg-neutral/25`/`/50`
+              // (a desaturated grey) — barely visible against the near-black
+              // viewport and read as "unfinished" rather than "clinically
+              // minimal." Replaced with the app's OWN existing accent color
+              // (`highlight`, #5ACCE6 — the same cyan already used for the
+              // active-tool toolbar icons and this scrollbar's percentage
+              // badge spinner), not a new hue, so it stays consistent with the
+              // rest of the UI. A soft glow (box-shadow) gives it presence;
+              // the actively-downloading edge pulses (`animate-pulse`) to
+              // signal live work via MOTION rather than a color change —
+              // deliberately NOT a red→yellow→green progression, which would
+              // clash with color's clinical meaning elsewhere (alerts,
+              // flags, segmentation overlays) and risk a split-second
+              // "is that a warning?" read next to grayscale anatomy.
+              // ORIGINAL: className="bg-neutral/25" loadingClassName="bg-neutral/50"
               <SmartScrollbarFill
                 marked={loadedBytes}
                 version={loadedVersion}
-                className="bg-neutral/25"
-                loadingClassName="bg-neutral/50"
+                className="bg-highlight/35 shadow-[0_0_6px_rgba(90,204,230,0.4)]"
+                loadingClassName="bg-highlight/60 shadow-[0_0_8px_rgba(90,204,230,0.6)] animate-pulse"
               />
             )}
             {isFullMode && showViewedFill && (
