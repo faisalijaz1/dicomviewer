@@ -247,7 +247,7 @@ window.config = {
   // (never both true at once).
   // ORIGINAL: enabled: true,
   skmBulkLoader: {
-    enabled: false,
+    enabled: true,
     chunkSize: 20,
     maxConcurrentChunks: 12,
   },
