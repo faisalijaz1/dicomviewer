@@ -181,7 +181,7 @@ window.config = {
   // memory ≈ maxConcurrentChunks * chunkSize slices (~6*20*0.5MB ≈ 60 MB).
   // ORIGINAL: chunkSize: 30, maxConcurrentChunks: 4
   skmBulkLoader: {
-    enabled: false,
+    enabled: true,
     chunkSize: 20,
     maxConcurrentChunks: 6,
   },
