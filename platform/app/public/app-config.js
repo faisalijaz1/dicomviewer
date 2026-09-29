@@ -180,8 +180,20 @@ window.config = {
   // several HTTP/2 streams overlap and the pipe stays full end-to-end. Transient
   // memory ≈ maxConcurrentChunks * chunkSize slices (~6*20*0.5MB ≈ 60 MB).
   // ORIGINAL: chunkSize: 30, maxConcurrentChunks: 4
+  // SKM 2026-09-30: DISABLED. It was left ON at the SAME TIME as
+  // studyPrefetcher below (both `enabled: true`), which violates this config's
+  // own rule ("exactly one of the two loads the full series"). The result was a
+  // DOUBLE-FETCH: every slice pulled once as a /wado/bulk chunk AND again as a
+  // per-slice uri?requestType=WADO request — Network tab showed 1,594 MB moved
+  // for a ~1,054 MB study (~1.5x), which is why the load took 36s even after the
+  // nginx HTTP/1.1 change raised throughput to ~450 Mbps. Disabling bulk leaves
+  // exactly ONE loader (the per-slice prefetcher, historically the faster path:
+  // 27s vs bulk 33.7s) so we get a clean read on the HTTP/1.1 gain.
+  // TO RE-ENABLE BULK: set this enabled:true AND set studyPrefetcher.enabled:false
+  // (never both true at once).
+  // ORIGINAL: enabled: true,
   skmBulkLoader: {
-    enabled: true,
+    enabled: false,
     chunkSize: 20,
     maxConcurrentChunks: 6,
   },
