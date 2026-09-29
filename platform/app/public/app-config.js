@@ -213,7 +213,7 @@ window.config = {
   // sharing the HTTP/2 connection with 20 concurrent prefetch downloads. Only
   // the initial study-open is delayed; series switches restart immediately.
   // Tune: raise if TTFI still competes, lower/0 to disable.
-  prefetchStartDelayMs: 1000,
+  prefetchStartDelayMs: 400,
   // SKM 2026-09-28: concurrent multi-viewport prefetch. When >1 study/pane is
   // open (Ctrl+click), interleave every open series so all viewport progress
   // bars advance together, and scale the in-flight cap by the number of open
