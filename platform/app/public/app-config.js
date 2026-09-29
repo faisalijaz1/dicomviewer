@@ -231,9 +231,9 @@ window.config = {
   // (never both true at once).
   // ORIGINAL: enabled: true,
   skmBulkLoader: {
-    enabled: false,
+    enabled: true,
     chunkSize: 20,
-    maxConcurrentChunks: 6,
+    maxConcurrentChunks: 12,
   },
 
   studyPrefetcher: {
@@ -245,7 +245,7 @@ window.config = {
   // otherwise nothing eagerly loads the series and the centre spinner stalls
   // when the progress bar completes (the regression that reappeared). Keep this
   // = !skmBulkLoader.enabled: exactly one of the two loads the full series.
-  enabled: true,
+  enabled: false,
   // Prefetch ONLY the series currently open in the viewport (active series).
   // With our StudyPrefetcherService change the active series is first in the
   // prefetch list, so displaySetsCount:1 = active series only — it loads fully
