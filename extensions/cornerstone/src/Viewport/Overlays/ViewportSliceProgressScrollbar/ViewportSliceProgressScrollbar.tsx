@@ -7,6 +7,7 @@ import {
   SmartScrollbarFill,
   SmartScrollbarIndicator,
   SmartScrollbarEndpoints,
+  Icons,
 } from '@ohif/ui-next';
 import { getViewportImageIds } from './helpers';
 import {
@@ -40,6 +41,12 @@ function ViewportSliceProgressScrollbar({
   const loadedBatchIntervalMsRaw = customizationService.getCustomization(
     'viewportScrollbar.loadedBatchIntervalMs'
   );
+  // SKM 2026-09-29: percentage badge on this (the ACCURATE, per-slice-bytes)
+  // scrollbar, replacing the removed horizontal footer bar's percentage — see
+  // ViewerLayout/index.tsx. Same on/off convention as the other
+  // viewportScrollbar.* toggles above/below. Default on.
+  const showPercentBadge =
+    customizationService.getCustomization('viewportScrollbar.showPercentBadge') !== false;
   const viewedDwellMs =
     typeof viewedDwellMsRaw === 'number' && viewedDwellMsRaw >= 0 ? viewedDwellMsRaw : 0;
   const loadedBatchIntervalMs =
@@ -121,6 +128,30 @@ function ViewportSliceProgressScrollbar({
 
   const isLoading = isFullMode && showLoadingPattern ? !isFullyLoaded : false;
 
+  // SKM 2026-09-29: real loaded-slice percentage, summed from the same
+  // per-slice loadedBytes byte-array this scrollbar's fill already tracks
+  // (see useLoadedSliceBytes) — not an estimate, the identical source of
+  // truth as the fill/endpoints. O(numberOfSlices), trivial at DICOM series
+  // sizes; only recomputed when the underlying bytes actually change
+  // (loadedVersion bumps on write, batched by loadedBatchIntervalMs).
+  const loadedPercent = useMemo(() => {
+    if (!numberOfSlices) {
+      return 0;
+    }
+    let count = 0;
+    for (let i = 0; i < loadedBytes.length; i++) {
+      if (loadedBytes[i]) {
+        count++;
+      }
+    }
+    return Math.round((count / numberOfSlices) * 100);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadedVersion is the
+    // change signal for the mutable loadedBytes array; including loadedBytes
+    // itself would be a no-op dependency (same array reference every render).
+  }, [loadedVersion, numberOfSlices]);
+
+  const showBadge = isFullMode && showPercentBadge && isLoading;
+
   if (!numberOfSlices || numberOfSlices <= 1) {
     return null;
   }
@@ -136,6 +167,38 @@ function ViewportSliceProgressScrollbar({
         zIndex: 10,
       }}
     >
+      {/*
+        SKM 2026-09-29: real-time loaded-percentage badge, anchored to the
+        scrollbar's own top corner — deliberately corner-positioned, not
+        centred or overlaid on the image, so it never competes with the slice
+        the doctor is reading. It is the ONE progress indicator in the app now
+        (the horizontal footer bar was removed — see ViewerLayout/index.tsx)
+        and reads from the exact same loadedBytes source as the fill below it,
+        so what it says and what the bar shows can never disagree.
+
+        Always mounted (visibility via opacity + a slight upward slide, not
+        conditional render) so it fades in/out smoothly instead of popping —
+        this is most of the "polish" difference between a functional indicator
+        and one that feels considered. pointer-events-none keeps it fully
+        inert so it can never intercept a click/drag on the viewport under it.
+
+        TO REVERT: delete this block and the showBadge/loadedPercent
+        calculations above, and the `viewportScrollbar.showPercentBadge`
+        customization key.
+      */}
+      <div
+        aria-hidden={!showBadge}
+        className="bg-black/75 shadow-black/60 pointer-events-none absolute right-1 top-1 z-20 flex items-center gap-1 rounded-full border border-white/10 px-2 py-0.5 shadow-lg backdrop-blur-sm transition-all duration-300 ease-out"
+        style={{
+          opacity: showBadge ? 1 : 0,
+          transform: showBadge ? 'translateY(0)' : 'translateY(-4px)',
+        }}
+      >
+        <Icons.LoadingSpinner className="text-highlight h-2.5 w-2.5 shrink-0" />
+        <span className="text-[10px] font-semibold leading-none text-white [font-variant-numeric:tabular-nums]">
+          {loadedPercent}%
+        </span>
+      </div>
       <div
         style={{
           position: 'relative',

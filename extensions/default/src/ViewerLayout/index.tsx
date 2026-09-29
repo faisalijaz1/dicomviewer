@@ -73,13 +73,18 @@ function ViewerLayout({
     'ui.loadingIndicatorProgress'
   );
 
-  // Registered by extensions/cornerstone (studyLoadingStatusBarCustomization) -
-  // a RadiAnt-style "N files left" footer bar that self-manages its own
-  // visibility (renders null while nothing is loading), so it's safe to
-  // always render here unconditionally.
-  const StudyLoadingStatusBar = customizationService.getCustomization(
-    'ui.studyLoadingStatusBar'
-  );
+  // SKM 2026-09-29: DISABLED — the horizontal footer bar duplicated the
+  // vertical per-viewport scrollbar's loading progress (ViewportSliceProgress
+  // Scrollbar) with a different, less precise percentage (count-of-requests
+  // vs. that component's real per-slice-bytes tracking), which read as two
+  // disagreeing progress indicators on screen at once. The vertical scrollbar
+  // is the accurate one and now carries its own percentage badge (see
+  // viewportScrollbar.showPercentBadge). Component + registration are left
+  // fully intact — uncomment these two lines and the render call below to
+  // restore the footer bar exactly as it was.
+  // const StudyLoadingStatusBar = customizationService.getCustomization(
+  //   'ui.studyLoadingStatusBar'
+  // );
 
   /**
    * Set body classes (tailwindcss) that don't allow vertical
@@ -231,7 +236,10 @@ function ViewerLayout({
       </div>
       <Onboarding tours={customizationService.getCustomization('ohif.tours')} />
       <InvestigationalUseDialog dialogConfiguration={appConfig?.investigationalUseDialog} />
+      {/* SKM 2026-09-29: DISABLED — see comment above where StudyLoadingStatusBar
+          is fetched. Uncomment both to restore.
       {StudyLoadingStatusBar && <StudyLoadingStatusBar />}
+      */}
     </div>
   );
 }
