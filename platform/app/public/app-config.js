@@ -193,7 +193,7 @@ window.config = {
   // (never both true at once).
   // ORIGINAL: enabled: true,
   skmBulkLoader: {
-    enabled: false,
+    enabled: true,
     chunkSize: 20,
     maxConcurrentChunks: 6,
   },
@@ -207,7 +207,7 @@ window.config = {
   // otherwise nothing eagerly loads the series and the centre spinner stalls
   // when the progress bar completes (the regression that reappeared). Keep this
   // = !skmBulkLoader.enabled: exactly one of the two loads the full series.
-  enabled: true,
+  enabled: false,
   // Prefetch ONLY the series currently open in the viewport (active series).
   // With our StudyPrefetcherService change the active series is first in the
   // prefetch list, so displaySetsCount:1 = active series only — it loads fully
@@ -218,7 +218,7 @@ window.config = {
   displaySetsCount: 1,
   // Raised 20 → 48 to match maxNumRequests.prefetch (pipeline-feed fix 2026-09-28).
   // ORIGINAL: maxNumPrefetchRequests: 20,
-  maxNumPrefetchRequests: 80,
+  maxNumPrefetchRequests: 50,
   order: 'closest',            // load nearest-to-current slice first, then outward
   // Give the first (visible) image a clear runway before the background prefetch
   // flood starts, so time-to-first-image stays low instead of the first image
