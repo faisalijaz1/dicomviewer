@@ -104,30 +104,46 @@ function _shardWadoOrigin(url) {
     : url;
 }
 
+// ─── STORAGEPATH & DUAL-ORIGIN INTERCEPTOR ──────────────────────────────────
 if (storagePath) {
   var _encodedPath = encodeURIComponent(storagePath);
   var _backendPattern = '/wado/';
+  var _requestCounter = 0; // Counter for round-robin
+
+  // Helper to append storage path AND apply dual-origin load balancing
+  function transformUrl(url) {
+    if (typeof url !== 'string' || url.indexOf(_backendPattern) === -1) {
+        return url;
+    }
+    
+    // 1. Append storage path
+    url = url + (url.indexOf('?') !== -1 ? '&' : '?') + 'storagePath=' + _encodedPath;
+    
+    // 2. Dual-Origin Round-Robin (Alternates every request)
+    // By checking '/wado/', this perfectly catches BOTH '/wado/uri' and '/wado/bulk'
+    _requestCounter++;
+    if (_requestCounter % 2 !== 0) {
+       // Send odd requests to the second origin
+       url = url.replace('https://192.192.8.173', 'https://192.192.8.173:8443');
+    }
+    
+    return url;
+  }
 
   // Patch fetch()
   var _origFetch = window.fetch;
   window.fetch = function(url, opts) {
-    if (typeof url === 'string' && url.indexOf(_backendPattern) !== -1) {
-      url = url + (url.indexOf('?') !== -1 ? '&' : '?') + 'storagePath=' + _encodedPath;
-      url = _shardWadoOrigin(url);   // SKM 2026-09-30: two-origin round-robin
-    }
-    return _origFetch.call(this, url, opts);
+    return _origFetch.call(this, transformUrl(url), opts);
   };
 
   // Patch XMLHttpRequest.open()
   var _origXhrOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(method, url) {
-    if (typeof url === 'string' && url.indexOf(_backendPattern) !== -1) {
-      url = url + (url.indexOf('?') !== -1 ? '&' : '?') + 'storagePath=' + _encodedPath;
-      url = _shardWadoOrigin(url);   // SKM 2026-09-30: two-origin round-robin
-    }
-    return _origXhrOpen.apply(this, arguments.length === 2 ? [method, url] : Array.from(arguments).map(function(a, i) { return i === 1 ? url : a; }));
+    var newUrl = transformUrl(url);
+    return _origXhrOpen.apply(this, arguments.length === 2 ? [method, newUrl] : Array.from(arguments).map(function(a, i) { return i === 1 ? newUrl : a; }));
   };
 }
+
 
 // ─── AUTO-REDIRECT ──────────────────────────────────────────────────────────
 // When the EMR opens /viewer?storagePath=\\..., fetch the StudyInstanceUID
@@ -199,7 +215,7 @@ window.config = {
     // ORIGINAL: interaction 8, thumbnail 2, prefetch 20.
     interaction: 16,
     thumbnail: 4,
-    prefetch: 25,
+    prefetch: 80,
   },
   // ── SKM-BULK 2026-09-28 (Fix 3) ───────────────────────────────────────────
   // Batch pixel retrieval: one request pulls ~50 slices instead of 50 separate
@@ -233,7 +249,7 @@ window.config = {
   skmBulkLoader: {
     enabled: false,
     chunkSize: 20,
-    maxConcurrentChunks: 6,
+    maxConcurrentChunks: 12,
   },
 
   studyPrefetcher: {
@@ -245,7 +261,7 @@ window.config = {
   // otherwise nothing eagerly loads the series and the centre spinner stalls
   // when the progress bar completes (the regression that reappeared). Keep this
   // = !skmBulkLoader.enabled: exactly one of the two loads the full series.
-  enabled: true,
+  enabled: false,
   // Prefetch ONLY the series currently open in the viewport (active series).
   // With our StudyPrefetcherService change the active series is first in the
   // prefetch list, so displaySetsCount:1 = active series only — it loads fully
@@ -256,7 +272,7 @@ window.config = {
   displaySetsCount: 1,
   // Raised 20 → 48 to match maxNumRequests.prefetch (pipeline-feed fix 2026-09-28).
   // ORIGINAL: maxNumPrefetchRequests: 20,
-  maxNumPrefetchRequests: 25,
+  maxNumPrefetchRequests: 80,
   order: 'closest',            // load nearest-to-current slice first, then outward
   // Give the first (visible) image a clear runway before the background prefetch
   // flood starts, so time-to-first-image stays low instead of the first image
