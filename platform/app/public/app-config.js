@@ -111,6 +111,7 @@ if (storagePath) {
   var _requestCounter = 0; // Counter for round-robin
 
   // Helper to append storage path AND apply dual-origin load balancing
+    // Helper to append storage path AND apply dual-origin load balancing
   function transformUrl(url) {
     if (typeof url !== 'string' || url.indexOf(_backendPattern) === -1) {
         return url;
@@ -119,16 +120,22 @@ if (storagePath) {
     // 1. Append storage path
     url = url + (url.indexOf('?') !== -1 ? '&' : '?') + 'storagePath=' + _encodedPath;
     
-    // 2. Dual-Origin Round-Robin (Alternates every request)
-    // By checking '/wado/', this perfectly catches BOTH '/wado/uri' and '/wado/bulk'
+    // 2. Dual-Origin Round-Robin
     _requestCounter++;
     if (_requestCounter % 2 !== 0) {
-       // Send odd requests to the second origin
-       url = url.replace('https://192.192.8.173', 'https://192.192.8.173:8443');
+       // If URL is absolute, replace the domain
+       if (url.indexOf('192.192.8.173') !== -1) {
+           url = url.replace('192.192.8.173', '192.192.8.173:8443');
+       } 
+       // If URL is relative, force it to be an absolute cross-origin URL
+       else if (url.startsWith('/')) {
+           url = 'https://192.192.8.173:8443' + url;
+       }
     }
     
     return url;
   }
+
 
   // Patch fetch()
   var _origFetch = window.fetch;
