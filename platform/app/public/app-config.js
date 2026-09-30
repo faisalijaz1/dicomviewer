@@ -68,86 +68,26 @@ const studyUIDs = urlParams.get('StudyInstanceUIDs');
 // pixel data) without carrying storagePath.  We patch fetch + XHR here so
 // every request to our backend automatically carries the storagePath the page
 // was opened with.  The backend keeps storagePath as required per our plan.
-//
-// ─── SKM 2026-09-30: TWO-ORIGIN ROUND-ROBIN (connection multiplier) ──────────
-// The browser opens at most 6 HTTP/1.1 connections PER ORIGIN. Every pixel
-// request goes to https://192.192.8.173 (:443), so the whole study download is
-// capped at 6 parallel connections (measured: ~348 Mbps / ~30s — see the
-// bottleneck analysis). nginx now ALSO serves /wado/ from a SECOND origin,
-// https://192.192.8.173:8443 (nginx.conf → "SECOND WADO ORIGIN"). By alternating
-// the high-volume pixel-data requests (/wado/uri) between the two origins, the
-// browser opens 6 connections to EACH → 12 in total → ~2x the parallel pipes
-// (target ~12–15s, within NAS ~896 Mbps / gigabit headroom).
-//
-// SCOPE: ONLY /wado/uri is sharded — that's the ~2001 pixel files, i.e. nearly
-// all the bytes. Metadata (/wado/rs, QIDO), the auto-redirect probe below and
-// every other call stay on the primary origin, so study-setup logic is
-// completely untouched and only the bulk pixel download is parallelised wider.
-//
-// TO REVERT: set _WADO_MULTI_ORIGIN = false — every request then goes to :443
-// (the exact original single-origin behaviour), no rebuild logic changes needed
-// beyond this one flag. (Or delete this block and the two _shardWadoOrigin()
-// calls.) Also revert the nginx :8443 server block.
-var _WADO_MULTI_ORIGIN = true;                       // master on/off for sharding
-var _WADO_PRIMARY   = 'https://192.192.8.173';       // :443 (implicit port)
-var _WADO_SECONDARY = 'https://192.192.8.173:8443';  // second origin from nginx
-var _wadoOriginToggle = 0;
-function _shardWadoOrigin(url) {
-  if (!_WADO_MULTI_ORIGIN || typeof url !== 'string') { return url; }
-  // Must start with the primary origin followed IMMEDIATELY by '/wado/uri'. The
-  // '/' right after the bare host rules out a url whose host already carries
-  // ':8443', so we never re-shard an already-secondary url. Pixel data only.
-  if (url.indexOf(_WADO_PRIMARY + '/wado/uri') !== 0) { return url; }
-  _wadoOriginToggle ^= 1;                             // flip 0/1 every request
-  return _wadoOriginToggle
-    ? _WADO_SECONDARY + url.substring(_WADO_PRIMARY.length)
-    : url;
-}
-
-// ─── STORAGEPATH & DUAL-ORIGIN INTERCEPTOR ──────────────────────────────────
 if (storagePath) {
   var _encodedPath = encodeURIComponent(storagePath);
   var _backendPattern = '/wado/';
-  var _requestCounter = 0; // Counter for round-robin
-
-  // Helper to append storage path AND apply dual-origin load balancing
-    // Helper to append storage path AND apply dual-origin load balancing
-  function transformUrl(url) {
-    if (typeof url !== 'string' || url.indexOf(_backendPattern) === -1) {
-        return url;
-    }
-    
-    // 1. Append storage path
-    url = url + (url.indexOf('?') !== -1 ? '&' : '?') + 'storagePath=' + _encodedPath;
-    
-    // 2. Dual-Origin Round-Robin
-    _requestCounter++;
-    if (_requestCounter % 2 !== 0) {
-       // If URL is absolute, replace the domain
-       if (url.indexOf('192.192.8.173') !== -1) {
-           url = url.replace('192.192.8.173', '192.192.8.173:8443');
-       } 
-       // If URL is relative, force it to be an absolute cross-origin URL
-       else if (url.startsWith('/')) {
-           url = 'https://192.192.8.173:8443' + url;
-       }
-    }
-    
-    return url;
-  }
-
 
   // Patch fetch()
   var _origFetch = window.fetch;
   window.fetch = function(url, opts) {
-    return _origFetch.call(this, transformUrl(url), opts);
+    if (typeof url === 'string' && url.indexOf(_backendPattern) !== -1) {
+      url = url + (url.indexOf('?') !== -1 ? '&' : '?') + 'storagePath=' + _encodedPath;
+    }
+    return _origFetch.call(this, url, opts);
   };
 
   // Patch XMLHttpRequest.open()
   var _origXhrOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(method, url) {
-    var newUrl = transformUrl(url);
-    return _origXhrOpen.apply(this, arguments.length === 2 ? [method, newUrl] : Array.from(arguments).map(function(a, i) { return i === 1 ? newUrl : a; }));
+    if (typeof url === 'string' && url.indexOf(_backendPattern) !== -1) {
+      url = url + (url.indexOf('?') !== -1 ? '&' : '?') + 'storagePath=' + _encodedPath;
+    }
+    return _origXhrOpen.apply(this, arguments.length === 2 ? [method, url] : Array.from(arguments).map(function(a, i) { return i === 1 ? url : a; }));
   };
 }
 
