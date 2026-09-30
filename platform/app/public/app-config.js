@@ -161,8 +161,8 @@ window.config = {
     // nginx on http2 (h1 caps the browser at 6 conns/host and nullifies this).
     // ORIGINAL: interaction 8, thumbnail 2, prefetch 20.
     interaction: 16,
-    thumbnail: 2,
-    prefetch: 25,
+    thumbnail: 1,
+    prefetch: 48,
   },
   // ── SKM-BULK 2026-09-28 (Fix 3) ───────────────────────────────────────────
   // Batch pixel retrieval: one request pulls ~50 slices instead of 50 separate
@@ -219,7 +219,7 @@ window.config = {
   displaySetsCount: 1,
   // Raised 20 → 48 to match maxNumRequests.prefetch (pipeline-feed fix 2026-09-28).
   // ORIGINAL: maxNumPrefetchRequests: 20,
-  maxNumPrefetchRequests: 25,
+  maxNumPrefetchRequests: 48,
   order: 'closest',            // load nearest-to-current slice first, then outward
   // Give the first (visible) image a clear runway before the background prefetch
   // flood starts, so time-to-first-image stays low instead of the first image
