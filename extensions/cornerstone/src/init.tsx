@@ -435,32 +435,22 @@ export default async function init({
   let effectiveCacheSize = appConfig.maxCacheSize;
   try {
     const gb = 1024 * 1024 * 1024;
-    const rawDeviceMem = (navigator as any).deviceMemory; // 0.25..8, CAPPED at 8
-    // SKM 2026-09-30: navigator.deviceMemory is capped at 8 by the browser, so it
-    // CANNOT distinguish an 8 GB box from the 32 GB reading workstations — both
-    // report 8. The old `min(config, 20% × deviceMemory)` therefore silently pinned
-    // EVERY machine (fleet included) to a 1.6 GB cache. A 2001-slice CT decodes to
-    // ~2 GB, so the cache filled ~⅘ of the way in and LRU eviction churned the tail
-    // — the observed "first ~800 MB fast, last ~250 MB slow". Since 8 means "8 GB OR
-    // MORE" and the fleet is spec'd ≥32 GB, trust the admin-set maxCacheSize when
-    // deviceMemory reports the 8 GB cap, and only apply the 20% safety clamp on
-    // clients that report BELOW the cap (genuinely small boxes at OOM risk). A larger
-    // ceiling is safe: cornerstone only holds what a study actually needs, so a 2 GB
-    // study uses 2 GB whether the cap is 2 GB or 5 GB — the cap only matters once a
-    // study would EXCEED it, and then a bigger cap is exactly what avoids the churn.
-    // TO REVERT: restore `const deviceMemGb = (navigator as any).deviceMemory || 4;`
-    // and unconditionally clamp to `Math.floor(deviceMemGb * 0.2 * gb)`.
-    if (rawDeviceMem !== undefined && rawDeviceMem >= 8) {
-      // Capped value → ≥8 GB (could be 16/32/64); use the configured cap as-is.
-    } else {
-      const deviceMemGb = rawDeviceMem || 4;                  // undefined → assume 4 GB
-      const memBudget = Math.floor(deviceMemGb * 0.2 * gb);   // 20% of reported RAM
-      if (memBudget > 0) {
-        effectiveCacheSize = effectiveCacheSize
-          ? Math.min(effectiveCacheSize, memBudget)
-          : memBudget;
-      }
-    }
+    // SKM 2026-09-30: scale the cache to THIS machine so weak boxes don't OOM and
+    // strong boxes aren't starved — auto-adjusts per system with no per-machine
+    // config. navigator.deviceMemory is coarse (0.25..8 on some browsers, actual on
+    // others), so we scale PROPORTIONALLY and clamp on both ends:
+    //   budget = clamp( 30% of reported RAM , 1 GB floor , configured ceiling )
+    //   4 GB → 1.2 GB · 8 GB → 2.4 GB · 16 GB → 4.8 GB · ≥17 GB → 5 GB (ceiling)
+    // The 1 GB floor stops large studies from thrashing on a small/under-reported
+    // box; the configured maxCacheSize is the hard ceiling for the fleet. Safe to
+    // size generously: cornerstone only holds what a study actually needs, so the
+    // cap only bites once a study would exceed it (then a bigger cap avoids churn).
+    // TO REVERT: `effectiveCacheSize = appConfig.maxCacheSize;` (no scaling).
+    const deviceMemGb = (navigator as any).deviceMemory || 4; // undefined → assume 4 GB
+    const memBudget = Math.max(gb, Math.floor(deviceMemGb * 0.3 * gb)); // ≥1 GB, 30% RAM
+    effectiveCacheSize = effectiveCacheSize
+      ? Math.min(effectiveCacheSize, memBudget)
+      : memBudget;
   } catch (e) {
     /* fall back to the configured value */
   }
