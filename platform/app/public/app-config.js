@@ -161,7 +161,7 @@ window.config = {
     // nginx on http2 (h1 caps the browser at 6 conns/host and nullifies this).
     // ORIGINAL: interaction 8, thumbnail 2, prefetch 20.
     interaction: 16,
-    thumbnail: 4,
+    thumbnail: 2,
     prefetch: 25,
   },
   // ── SKM-BULK 2026-09-28 (Fix 3) ───────────────────────────────────────────
