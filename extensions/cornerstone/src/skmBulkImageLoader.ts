@@ -379,13 +379,18 @@ export function initSkmBulkDriver(
       if (!imageIds || imageIds.length === 0) {
         return;
       }
-      processedDisplaySets.add(dsUID);
-      // eslint-disable-next-line no-console
-      console.log(`[SKM-BULK] bulk-loading ${imageIds.length} slices for ${dsUID}`);
-      driveDisplaySet(imageIds, storagePath, chunkSize, maxConcurrentChunks).catch(e => {
+            processedDisplaySets.add(dsUID);
+      // SKM-FIX: Delay the bulk pipeline by 1.2 seconds!
+      // This gives Cornerstone's wado/uri lazy-loader a completely empty network
+      // to download the first visible slice instantly (no 4-second black screen).
+      setTimeout(() => {
         // eslint-disable-next-line no-console
-        console.warn('[SKM-BULK] driver error', e);
-      });
+        console.log(`[SKM-BULK] bulk-loading ${imageIds.length} slices for ${dsUID}`);
+        driveDisplaySet(imageIds, storagePath, chunkSize, maxConcurrentChunks).catch(e => {
+          // eslint-disable-next-line no-console
+          console.warn('[SKM-BULK] driver error', e);
+        });
+      }, 1200);
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn('[SKM-BULK] run() error', e);
@@ -403,3 +408,5 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
+
