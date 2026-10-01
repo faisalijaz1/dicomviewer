@@ -48,32 +48,56 @@ const bulkBuffer = new Map<string, ArrayBuffer>();
 let _totalNetworkBytes = 0;
 let _downloadedNetworkBytes = 0;
 let _customProgressBar: HTMLElement | null = null;
+let _customProgressText: HTMLElement | null = null;
 
 function updateNetworkProgress(bytesLoaded: number) {
   _downloadedNetworkBytes += bytesLoaded;
   if (!(window as any)._CUSTOM_NETWORK_PROGRESS_BAR) return;
 
   if (!_customProgressBar) {
+    const wrapper = document.createElement('div');
+    wrapper.style.position = 'fixed';
+    wrapper.style.bottom = '0';
+    wrapper.style.left = '0';
+    wrapper.style.width = '100%';
+    wrapper.style.height = '14px';
+    wrapper.style.backgroundColor = 'rgba(0, 0, 0, 0.6)';
+    wrapper.style.zIndex = '999999';
+    wrapper.style.display = 'flex';
+    wrapper.style.alignItems = 'center';
+    wrapper.style.justifyContent = 'center';
+    
     _customProgressBar = document.createElement('div');
-    _customProgressBar.style.position = 'fixed';
-    _customProgressBar.style.bottom = '0';
+    _customProgressBar.style.position = 'absolute';
+    _customProgressBar.style.top = '0';
     _customProgressBar.style.left = '0';
-    _customProgressBar.style.height = '8px';
+    _customProgressBar.style.height = '100%';
     _customProgressBar.style.backgroundColor = '#00a4d9'; // OHIF primary blue
-    _customProgressBar.style.zIndex = '999999';
     _customProgressBar.style.transition = 'width 0.2s';
     _customProgressBar.style.width = '0%';
-    document.body.appendChild(_customProgressBar);
-  }
+    
+    _customProgressText = document.createElement('div');
+    _customProgressText.style.position = 'relative';
+    _customProgressText.style.color = 'white';
+    _customProgressText.style.fontSize = '12px';
+    _customProgressText.style.fontWeight = 'bold';
+    _customProgressText.style.fontFamily = 'sans-serif';
+    _customProgressText.style.textShadow = '1px 1px 2px rgba(0,0,0,0.8)';
+    _customProgressText.innerText = 'Downloading: 0%';
 
-    if (_totalNetworkBytes > 0) {
+    wrapper.appendChild(_customProgressBar);
+    wrapper.appendChild(_customProgressText);
+    document.body.appendChild(wrapper);
+  }
+  if (_totalNetworkBytes > 0) {
     const percent = Math.min(100, Math.round((_downloadedNetworkBytes / _totalNetworkBytes) * 100));
-    _customProgressBar.style.width = percent + '%';
+        _customProgressBar.style.width = percent + '%';
+    if (_customProgressText) _customProgressText.innerText = 'Downloading: ' + percent + '%';
     _customProgressBar.style.opacity = '1';
     
     if (percent >= 100) {
       setTimeout(() => {
-        if (_customProgressBar) _customProgressBar.style.opacity = '0';
+                if (_customProgressBar && _customProgressBar.parentElement) _customProgressBar.parentElement.style.opacity = '0';
       }, 1500);
     }
   }
@@ -343,9 +367,10 @@ async function driveDisplaySet(
     // We estimate ~520 KB per slice (Uncompressed Explicit VR CT) for a very accurate progress bar
     _totalNetworkBytes = imageIds.length * 520000;
     _downloadedNetworkBytes = 0;
-    if (_customProgressBar) {
-      _customProgressBar.style.opacity = '1';
+        if (_customProgressBar) {
       _customProgressBar.style.width = '0%';
+      if (_customProgressBar.parentElement) _customProgressBar.parentElement.style.opacity = '1';
+      if (_customProgressText) _customProgressText.innerText = 'Downloading: 0%';
     }
 
   const chunks: string[][] = [];
@@ -517,6 +542,10 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
+
+
+
 
 
 
