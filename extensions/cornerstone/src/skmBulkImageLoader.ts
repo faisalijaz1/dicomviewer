@@ -75,6 +75,7 @@ const managedSops = new Set<string>();
 // Registry to hold interaction promises if the user scrolls to an image
 // BEFORE the Bulk API has finished downloading its chunk.
 const pendingInteractionCallbacks = new Map<string, (b: ArrayBuffer) => void>();
+let wadoUriFallbackCount = 0;
 
 
 let loaderRegistered = false;
@@ -160,6 +161,14 @@ export function registerSkmBulkImageLoader(): boolean {
     // No pre-fetched bytes for this slice → normal per-slice network path.
     if (!bytes) {
       if (sop && managedSops.has(sop)) {
+        // FAST-TRACK: Let the very first 5 requests (the initial render + first few thumbnails) 
+        // fall back to WADO-URI instantly! This guarantees a 0.0s black screen without 
+        // exposing the network to a 100-request flood if the doctor scrolls fast!
+        if (wadoUriFallbackCount < 5) {
+          wadoUriFallbackCount++;
+          return originalLoad(imageId, options);
+        }
+
         // SKM-FIX: The user scrolled to an image that the Bulk API is actively downloading!
         // If we fall back to originalLoad, Cornerstone locks this slice to a slow, legacy
         // WADO-URI network request that will get permanently queued behind the massive Bulk API
@@ -608,17 +617,13 @@ export function initSkmBulkDriver(
       }
             processedDisplaySets.add(dsUID);
         
-        // SKM RACE CONDITION FIX: Register these SOPs globally IMMEDIATELY!
-        // This guarantees that any aggressive prefetchers (studyPrefetcher, stackPrefetch) that fire 
-        // in the first 2 seconds will be instantly intercepted and forced to wait for the Bulk API.
+        // SKM RACE CONDITION FIX: Register SOPs globally IMMEDIATELY!
         const mySops = imageIds.map(extractSop).filter(Boolean) as string[];
         for (const sop of mySops) {
           managedSops.add(sop);
         }
 
-        // SKM-FIX: Delay the bulk pipeline by 1.2 seconds!
-        // This gives Cornerstone's wado/uri lazy-loader a completely empty network
-        // to download the first visible slice instantly (no 4-second black screen).
+        // We only delay the massive Bulk API chunking engine by 500ms so it starts almost instantly!
         setTimeout(() => {
         // eslint-disable-next-line no-console
         console.log(`[SKM-BULK] bulk-loading ${imageIds.length} slices for ${dsUID}`);
@@ -644,6 +649,10 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
+
+
+
 
 
 
