@@ -296,9 +296,22 @@ async function fetchChunk(
       const chunks: Uint8Array[] = [];
       let chunkTotalLength = 0;
       try {
+        let inactivityTimeout: any;
+        const resetTimeout = () => {
+          if (inactivityTimeout) clearTimeout(inactivityTimeout);
+          inactivityTimeout = setTimeout(() => {
+            reader.cancel(new Error("Inactivity Timeout")).catch(() => {});
+          }, 15000); // 15 seconds of absolute network silence = assume dropped connection
+        };
+        resetTimeout();
+
         while (true) {
           const { done, value } = await reader.read();
-          if (done) break;
+          resetTimeout();
+          if (done) {
+            clearTimeout(inactivityTimeout);
+            break;
+          }
           if (value) {
             chunks.push(value);
             chunkTotalLength += value.length;
@@ -627,6 +640,7 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
 
 
 
