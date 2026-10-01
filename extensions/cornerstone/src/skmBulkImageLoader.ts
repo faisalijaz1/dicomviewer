@@ -68,7 +68,11 @@ class Semaphore {
   }
 }
 // Dynamically pull the global cap from app-config.js (defaults to 80 if not set)
-const maxGlobal = (window as any).config?.skmBulkLoader?.maxGlobalConcurrentChunks || 80;
+  // SKM-FIX: Limit global concurrency to 6 chunks! 
+  // If we launch 80 chunks at once, the browser multiplexes them and they ALL finish at 10 seconds.
+  // By limiting to 6 chunks at a time, they get full bandwidth and finish in 0.5s chunks!
+  // This gives the user perfectly smooth progress bar updates and instant scrolling!
+  const maxGlobal = 6;
 const globalChunkSemaphore = new Semaphore(maxGlobal);
 // SOP UIDs that are actively being fetched by the Bulk API driver.
 const managedSops = new Set<string>();
@@ -604,6 +608,7 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
 
 
 
