@@ -504,23 +504,21 @@ async function driveDisplaySet(
         if (!mySops.length) continue;
 
         try {
-                      await globalChunkSemaphore.acquire();
-            let bytesMap;
-            let retries = 3;
-            while (retries > 0) {
-              await globalChunkSemaphore.acquire();
-              try {
-                bytesMap = await fetchChunk(mySops, seriesUID, storagePath, updateProgress);
-                break;
-              } catch (e) {
-                retries--;
-                if (retries === 0) throw e;
-                await new Promise(r => setTimeout(r, 1000));
-              } finally {
-                globalChunkSemaphore.release();
-              }
+          let bytesMap;
+          let retries = 3;
+          while (retries > 0) {
+            await globalChunkSemaphore.acquire();
+            try {
+              bytesMap = await fetchChunk(mySops, seriesUID, storagePath, updateProgress);
+              break;
+            } catch (e) {
+              retries--;
+              if (retries === 0) throw e;
+              await new Promise(r => setTimeout(r, 1000));
+            } finally {
+              globalChunkSemaphore.release();
             }
-            }
+          }
           let gotData = false;
           for (const [sop, bytes] of Array.from(bytesMap.entries())) {
             if (bytes) {
@@ -629,6 +627,7 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
 
 
 
