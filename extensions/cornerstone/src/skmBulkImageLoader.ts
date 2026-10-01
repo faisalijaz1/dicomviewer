@@ -524,7 +524,7 @@ export function initSkmBulkDriver(
           // eslint-disable-next-line no-console
           console.warn('[SKM-BULK] driver error', e);
         });
-      }, 1200);
+      }, 2200);
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn('[SKM-BULK] run() error', e);
