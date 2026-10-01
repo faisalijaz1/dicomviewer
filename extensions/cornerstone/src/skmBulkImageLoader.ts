@@ -261,7 +261,7 @@ async function fetchChunk(
     `&sopUIDs=${sops.map(encodeURIComponent).join(',')}`;
     const res = await fetch(url, { method: 'GET' });
   if (!res.ok) {
-    throw new Error(ulk http );
+    throw new Error('bulk http ' + res.status);
   }
   
   let buf: ArrayBuffer;
@@ -517,6 +517,7 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
 
 
 
