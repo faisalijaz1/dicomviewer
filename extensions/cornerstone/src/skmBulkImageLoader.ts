@@ -43,6 +43,8 @@ type BulkConfig = {
 // slice (then deleted). Bounded by the driver's chunk concurrency, so this map
 // never holds more than ~maxConcurrentChunks * chunkSize slices at once.
 const bulkBuffer = new Map<string, ArrayBuffer>();
+// SOP UIDs that are actively being fetched by the Bulk API driver.
+const managedSops = new Set<string>();
 
 
 let loaderRegistered = false;
@@ -126,6 +128,13 @@ export function registerSkmBulkImageLoader(): boolean {
 
     // No pre-fetched bytes for this slice → normal per-slice network path.
     if (!bytes) {
+      if (options?.requestType === 'prefetch' && sop && managedSops.has(sop)) {
+        // SKM-FIX: Kill duplicate WADO-URI prefetch requests to prevent race conditions!
+        // Cornerstone's stackPrefetch fires hundreds of network requests that compete
+        // with our Bulk API stream. By rejecting them here, we force Cornerstone to wait
+        // for driveDisplaySet to fetch the bulk bytes and trigger loadAndCacheImage!
+        return Promise.reject(new Error('SKM Bulk Loader handles prefetch'));
+      }
       return originalLoad(imageId, options);
     }
 
@@ -299,6 +308,10 @@ async function driveDisplaySet(
   maxConcurrentChunks: number,
   viewportId?: string
 ): Promise<void> {
+  const mySops = imageIds.map(extractSop).filter(Boolean) as string[];
+  for (const sop of mySops) {
+    managedSops.add(sop);
+  }
   let totalBytes = imageIds.length * 520000;
   let downloadedBytes = 0;
   let barEl: HTMLElement | null = null;
@@ -538,6 +551,7 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
 
 
 
