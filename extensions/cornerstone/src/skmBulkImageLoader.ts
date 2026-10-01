@@ -284,23 +284,31 @@ async function fetchChunk(
     `${window.location.origin}/wado/bulk?seriesUID=${encodeURIComponent(seriesUID)}` +
     `&sopUIDs=${sops.map(encodeURIComponent).join(',')}`;
     const res = await fetch(url, { method: 'GET' });
-  if (!res.ok) {
-    throw new Error('bulk http ' + res.status);
-  }
-  
-  let buf: ArrayBuffer;
-  if (res.body) {
-    const reader = res.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let chunkTotalLength = 0;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value) {
-        chunks.push(value);
-        chunkTotalLength += value.length;
-        if (onProgress) onProgress(value.length);
+    if (!res.ok) {
+      if (res.body) await res.body.cancel().catch(() => {});
+      throw new Error('bulk http ' + res.status);
+    }
+    let buf: ArrayBuffer;
+    if (res.body) {
+      const reader = res.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let chunkTotalLength = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            chunks.push(value);
+            chunkTotalLength += value.length;
+            if (onProgress) onProgress(value.length);
+          }
+        }
+      } catch (e) {
+        reader.releaseLock();
+        await res.body.cancel().catch(() => {});
+        throw e;
+      } finally {
+        reader.releaseLock();
       }
     }
 
@@ -497,10 +505,20 @@ async function driveDisplaySet(
         try {
                       await globalChunkSemaphore.acquire();
             let bytesMap;
-            try {
-              bytesMap = await fetchChunk(mySops, seriesUID, storagePath, updateProgress);
-            } finally {
-              globalChunkSemaphore.release();
+            let retries = 3;
+            while (retries > 0) {
+              await globalChunkSemaphore.acquire();
+              try {
+                bytesMap = await fetchChunk(mySops, seriesUID, storagePath, updateProgress);
+                break;
+              } catch (e) {
+                retries--;
+                if (retries === 0) throw e;
+                await new Promise(r => setTimeout(r, 1000));
+              } finally {
+                globalChunkSemaphore.release();
+              }
+            }
             }
           let gotData = false;
           for (const [sop, bytes] of Array.from(bytesMap.entries())) {
@@ -610,6 +628,9 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
+
+
 
 
 
