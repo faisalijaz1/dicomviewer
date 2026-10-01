@@ -288,7 +288,8 @@ async function driveDisplaySet(
     // We let the network pull 60 chunks concurrently (out of order),
     // but we force Cornerstone to decode them strictly in sequential order (0, 1, 2...).
     // This gives us the blazing 23s speed AND a perfectly smooth vertical progress bar!
-    const downloadedChunks = new Map<number, string[]>();
+        const downloadedChunks = new Map<number, string[]>();
+    const processedChunkStatus = new Set<number>();
     let nextDecodeChunk = 0;
     let isDecoding = false;
 
@@ -296,24 +297,34 @@ async function driveDisplaySet(
       if (isDecoding) return;
       isDecoding = true;
       try {
-        while (downloadedChunks.has(nextDecodeChunk)) {
-          const my = downloadedChunks.get(nextDecodeChunk)!;
-          downloadedChunks.delete(nextDecodeChunk);
-          
-          await Promise.all(
-            my.map(id => {
-              try {
-                if (cache.getImageLoadObject(id)) {
+        // Only proceed if the EXACT NEXT chunk we need has finished (whether it succeeded or failed)
+        while (processedChunkStatus.has(nextDecodeChunk)) {
+          if (downloadedChunks.has(nextDecodeChunk)) {
+            const my = downloadedChunks.get(nextDecodeChunk)!;
+            downloadedChunks.delete(nextDecodeChunk);
+            
+            await Promise.all(
+              my.map(id => {
+                try {
+                  if (cache.getImageLoadObject(id)) {
+                    return Promise.resolve();
+                  }
+                  // SKM-FIX: Changed priority from -5 to 100!
+                  // stackPrefetch uses 0. By using 100, we force Cornerstone to decode our
+                  // fully-downloaded bulk bytes IMMEDIATELY, instead of getting stuck in the
+                  // queue behind slow WADO URI network requests!
+                  return imageLoader
+                    .loadAndCacheImage(id, { priority: 100, requestType: 'prefetch' })
+                    .catch(() => undefined);
+                } catch (e) {
                   return Promise.resolve();
                 }
-                return imageLoader
-                  .loadAndCacheImage(id, { priority: -5, requestType: 'prefetch' })
-                  .catch(() => undefined);
-              } catch (e) {
-                return Promise.resolve();
-              }
-            })
-          );
+              })
+            );
+          }
+          // We've handled this chunk (either decoded it, or skipped it because it failed)
+          // Move the pointer forward so we don't get deadlocked!
+          processedChunkStatus.delete(nextDecodeChunk);
           nextDecodeChunk++;
         }
       } finally {
@@ -339,14 +350,16 @@ async function driveDisplaySet(
               gotData = true;
             }
           }
-          if (gotData) {
+                    if (gotData) {
             // Queue this chunk for sequential decoding
             downloadedChunks.set(chunkIndex, my);
-            await decodeNextAvailable();
           }
         } catch (e) {
           // eslint-disable-next-line no-console
           console.warn('[SKM-BULK] chunk failed, continuing', e);
+        } finally {
+          processedChunkStatus.add(chunkIndex);
+          await decodeNextAvailable();
         }
       }
     };
@@ -433,6 +446,8 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
+
 
 
 
