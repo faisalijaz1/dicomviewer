@@ -67,7 +67,9 @@ class Semaphore {
     }
   }
 }
-const globalChunkSemaphore = new Semaphore(80);
+// Dynamically pull the global cap from app-config.js (defaults to 80 if not set)
+const maxGlobal = (window as any).config?.skmBulkLoader?.maxGlobalConcurrentChunks || 80;
+const globalChunkSemaphore = new Semaphore(maxGlobal);
 // SOP UIDs that are actively being fetched by the Bulk API driver.
 const managedSops = new Set<string>();
 // Registry to hold interaction promises if the user scrolls to an image
@@ -310,16 +312,15 @@ async function fetchChunk(
       } finally {
         reader.releaseLock();
       }
-    }
 
-    const uint8Buf = new Uint8Array(chunkTotalLength);
-    let offset = 0;
-    for (const chunk of chunks) {
-      uint8Buf.set(chunk, offset);
-      offset += chunk.length;
-    }
-    buf = uint8Buf.buffer;
-  } else {
+      const uint8Buf = new Uint8Array(chunkTotalLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        uint8Buf.set(chunk, offset);
+        offset += chunk.length;
+      }
+      buf = uint8Buf.buffer;
+    } else {
     buf = await res.arrayBuffer();
     if (onProgress) onProgress(buf.byteLength);
   }
@@ -628,6 +629,8 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
+
 
 
 
