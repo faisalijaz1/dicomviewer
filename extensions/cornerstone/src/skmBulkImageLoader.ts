@@ -66,9 +66,9 @@ function updateNetworkProgress(bytesLoaded: number) {
     document.body.appendChild(_customProgressBar);
   }
 
-  if (_totalNetworkBytes > 0) {
+    if (_totalNetworkBytes > 0) {
     const percent = Math.min(100, Math.round((_downloadedNetworkBytes / _totalNetworkBytes) * 100));
-    _customProgressBar.style.width = ${percent}%;
+    _customProgressBar.style.width = percent + '%';
     _customProgressBar.style.opacity = '1';
     
     if (percent >= 100) {
@@ -517,6 +517,8 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
+
 
 
 
