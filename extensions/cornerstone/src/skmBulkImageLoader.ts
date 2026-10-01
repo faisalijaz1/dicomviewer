@@ -517,6 +517,7 @@ async function driveDisplaySet(
         }
       }
     };
+    const workers: Promise<void>[] = [];
   const n = Math.max(1, Math.min(maxConcurrentChunks, chunks.length));
   for (let w = 0; w < n; w++) {
     workers.push(worker());
@@ -603,6 +604,8 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
+
 
 
 
