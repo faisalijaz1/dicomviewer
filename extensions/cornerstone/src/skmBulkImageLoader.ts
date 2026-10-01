@@ -145,11 +145,7 @@ export function registerSkmBulkImageLoader(): boolean {
     dicomImageLoader.wadouri.loadImage(imageId, options);
 
   const bulkLoad = (imageId: string, options?: any) => {
-    const viewportElements = Array.from(document.querySelectorAll('[data-viewport-uid], [data-viewportid]'));
-    const numViewports = viewportElements.filter(el => (el as HTMLElement).clientWidth > 250).length;
-    if (numViewports > 1) {
-      return originalLoad(imageId, options);
-    }
+
     let bytes: ArrayBuffer | undefined;
     let sop: string | null = null;
     try {
@@ -386,14 +382,7 @@ async function driveDisplaySet(
   // SKM ARCHITECTURE PIVOT: If multiple viewports are open, the Bulk API is too aggressive 
   // and crashes the server. The native WADO-URI prefetcher handles multi-viewport perfectly 
   // and smoothly updates the vertical scrollbar!
-  // Filter out tiny sidebar thumbnails by only counting viewports wider than 250px
-  const viewportElements = Array.from(document.querySelectorAll('[data-viewport-uid], [data-viewportid]'));
-  const numViewports = viewportElements.filter(el => (el as HTMLElement).clientWidth > 250).length;
-  if (numViewports > 1) {
-    // eslint-disable-next-line no-console
-    console.log('[SKM-BULK] Multiple viewports detected (' + numViewports + '). Bypassing Bulk API to protect server.');
-    return; // Gracefully abort. Let the native studyPrefetcher take over!
-  }
+
   const mySops = imageIds.map(extractSop).filter(Boolean) as string[];
   for (const sop of mySops) {
     managedSops.add(sop);
@@ -638,6 +627,7 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
 
 
 
