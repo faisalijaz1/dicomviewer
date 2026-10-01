@@ -262,7 +262,7 @@ async function fetchChunk(
   sops: string[],
   seriesUID: string,
   storagePath: string,
-  onProgress?: (bytes: number) => void
+  // onProgress tracking removed, chunk-level tracking is more accurate
 ): Promise<Map<string, ArrayBuffer | null>> {
   // GET (same-origin) so no Origin header is sent → no Spring Security CORS
   // rejection, and it's covered by the existing `GET /wado/** permitAll` rule.
@@ -315,7 +315,7 @@ async function fetchChunk(
           if (value) {
             chunks.push(value);
             chunkTotalLength += value.length;
-            if (onProgress) onProgress(value.length);
+            
           }
         }
       } catch (e) {
@@ -378,80 +378,67 @@ async function driveDisplaySet(
   maxConcurrentChunks: number,
   viewportId?: string
 ): Promise<void> {
+  // SKM ARCHITECTURE PIVOT: If multiple viewports are open, the Bulk API is too aggressive 
+  // and crashes the server. The native WADO-URI prefetcher handles multi-viewport perfectly 
+  // and smoothly updates the vertical scrollbar!
+  const numViewports = document.querySelectorAll('[data-viewport-uid], [data-viewportid]').length;
+  if (numViewports > 1) {
+    // eslint-disable-next-line no-console
+    console.log('[SKM-BULK] Multiple viewports detected (' + numViewports + '). Bypassing Bulk API to protect server.');
+    return; // Gracefully abort. Let the native studyPrefetcher take over!
+  }
   const mySops = imageIds.map(extractSop).filter(Boolean) as string[];
   for (const sop of mySops) {
     managedSops.add(sop);
   }
-  let totalBytes = imageIds.length * 520000;
-  let downloadedBytes = 0;
-  let barEl: HTMLElement | null = null;
-  let textEl: HTMLElement | null = null;
-  let wrapper: HTMLElement | null = null;
-  
-  if (viewportId && (window as any)._CUSTOM_NETWORK_PROGRESS_BAR) {
-    const viewportDom = document.querySelector('[data-viewport-uid="' + viewportId + '"]') 
-                     || document.querySelector('[data-viewportid="' + viewportId + '"]');
-    if (viewportDom) {
-      wrapper = document.createElement('div');
-      wrapper.style.position = 'absolute';
-      wrapper.style.bottom = '0';
-      wrapper.style.left = '0';
-      wrapper.style.width = '100%';
-      wrapper.style.height = '14px';
-      wrapper.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
-      wrapper.style.zIndex = '999999';
-      wrapper.style.display = 'flex';
-      wrapper.style.alignItems = 'center';
-      wrapper.style.justifyContent = 'center';
-      wrapper.style.pointerEvents = 'none';
-      wrapper.style.transition = 'opacity 0.3s';
-      
-      barEl = document.createElement('div');
-      barEl.style.position = 'absolute';
-      barEl.style.top = '0';
-      barEl.style.left = '0';
-      barEl.style.height = '100%';
-      barEl.style.backgroundColor = '#00a4d9';
-      barEl.style.transition = 'width 0.2s';
-      barEl.style.width = '0%';
-      
-      textEl = document.createElement('div');
-      textEl.style.position = 'relative';
-      textEl.style.color = 'white';
-      textEl.style.fontSize = '11px';
-      textEl.style.fontWeight = 'bold';
-      textEl.style.fontFamily = 'sans-serif';
-      textEl.style.textShadow = '1px 1px 2px rgba(0,0,0,0.8)';
-      textEl.innerText = 'Downloading: 0%';
-
-      wrapper.appendChild(barEl);
-      wrapper.appendChild(textEl);
-      // Ensure the viewport container is relative so absolute positioning works
-      (viewportDom as HTMLElement).style.position = 'relative';
-      viewportDom.appendChild(wrapper);
+    let chunksCompleted = 0;
+    let barEl: HTMLElement | null = null;
+    let textEl: HTMLElement | null = null;
+    let wrapper: HTMLElement | null = null;
+    if (viewportId && (window as any)._CUSTOM_NETWORK_PROGRESS_BAR) {
+      const viewportDom = document.querySelector('[data-viewport-uid="' + viewportId + '"]') || document.querySelector('[data-viewportid="' + viewportId + '"]');
+      if (viewportDom) {
+        wrapper = document.createElement('div');
+        wrapper.style.position = 'absolute';
+        wrapper.style.bottom = '0';
+        wrapper.style.left = '0';
+        wrapper.style.width = '100%';
+        wrapper.style.height = '14px';
+        wrapper.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+        wrapper.style.zIndex = '999999';
+        wrapper.style.display = 'flex';
+        wrapper.style.alignItems = 'center';
+        wrapper.style.justifyContent = 'center';
+        barEl = document.createElement('div');
+        barEl.style.position = 'absolute';
+        barEl.style.left = '0';
+        barEl.style.height = '100%';
+        barEl.style.width = '0%';
+        barEl.style.backgroundColor = '#00a4d9';
+        barEl.style.transition = 'width 0.2s ease-out';
+        textEl = document.createElement('span');
+        textEl.style.position = 'relative';
+        textEl.style.color = '#ffffff';
+        textEl.style.fontSize = '10px';
+        textEl.style.fontWeight = 'bold';
+        textEl.style.fontFamily = 'sans-serif';
+        textEl.style.textShadow = '1px 1px 2px black';
+        textEl.innerText = 'Downloading: 0%';
+        wrapper.appendChild(barEl);
+        wrapper.appendChild(textEl);
+        viewportDom.appendChild(wrapper);
+      }
     }
-  }
-
-  const updateProgress = (bytesLoaded: number) => {
-    if (!barEl) return;
-    downloadedBytes += bytesLoaded;
-    const percent = Math.min(100, Math.round((downloadedBytes / totalBytes) * 100));
-    barEl.style.width = percent + '%';
-    if (textEl) textEl.innerText = 'Downloading: ' + percent + '%';
-    if (percent >= 100) {
-        setTimeout(() => { if (wrapper) wrapper.style.opacity = '0'; }, 1500);
-    }
-  };
-  // All imageIds in a display set share one series; take it from the first.
-  const seriesUID = extractSeries(imageIds[0]);
-  if (!seriesUID) {
-    // eslint-disable-next-line no-console
-    console.warn('[SKM-BULK] could not extract seriesUID; skipping bulk for this display set');
-    return;
-  }
-
-    
-
+    const updateProgress = () => {
+      if (!barEl) return;
+      chunksCompleted++;
+      const percent = Math.min(100, Math.round((chunksCompleted / chunks.length) * 100));
+      barEl.style.width = percent + '%';
+      if (textEl) textEl.innerText = 'Downloading: ' + percent + '%';
+      if (percent >= 100) {
+          setTimeout(() => { if (wrapper) wrapper.style.opacity = '0'; }, 1500);
+      }
+    };
   const chunks: string[][] = [];
   for (let i = 0; i < imageIds.length; i += chunkSize) {
     chunks.push(imageIds.slice(i, i + chunkSize));
@@ -522,7 +509,7 @@ async function driveDisplaySet(
           while (retries > 0) {
             await globalChunkSemaphore.acquire();
             try {
-              bytesMap = await fetchChunk(mySops, seriesUID, storagePath, updateProgress);
+              bytesMap = await fetchChunk(mySops, seriesUID, storagePath);
               break;
             } catch (e) {
               retries--;
@@ -548,6 +535,10 @@ if (callback) {
             // Queue this chunk for sequential decoding
             downloadedChunks.set(chunkIndex, my);
           }
+          // Trigger the progress bar update now that the chunk is fully downloaded
+          updateProgress();
+          // Trigger the progress bar update now that the chunk is fully downloaded
+          updateProgress();
         } catch (e) {
           // eslint-disable-next-line no-console
           console.warn('[SKM-BULK] chunk failed, continuing', e);
@@ -640,6 +631,10 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
+
+
+
 
 
 
