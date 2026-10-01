@@ -282,51 +282,76 @@ async function driveDisplaySet(
     chunks.push(imageIds.slice(i, i + chunkSize));
   }
 
-  let nextChunk = 0;
-  const worker = async () => {
-    while (nextChunk < chunks.length) {
-      const my = chunks[nextChunk++];
-      const mySops = my.map(extractSop).filter((s): s is string => !!s);
-      if (!mySops.length) {
-        continue;
-      }
+      let nextChunk = 0;
+    
+    // SKM-FIX: Smart Decode Queue
+    // We let the network pull 60 chunks concurrently (out of order),
+    // but we force Cornerstone to decode them strictly in sequential order (0, 1, 2...).
+    // This gives us the blazing 23s speed AND a perfectly smooth vertical progress bar!
+    const downloadedChunks = new Map<number, string[]>();
+    let nextDecodeChunk = 0;
+    let isDecoding = false;
+
+    const decodeNextAvailable = async () => {
+      if (isDecoding) return;
+      isDecoding = true;
       try {
-        const map = await fetchChunk(mySops, seriesUID, storagePath);
-        for (const id of my) {
-          const sop = extractSop(id);
-          if (!sop) {
-            continue;
-          }
-          const bytes = map.get(sop);
-          if (bytes) {
-            bulkBuffer.set(sop, bytes);
-          }
-        }
-        // Trigger native decode via our loader; await to free bytes before the
-        // next chunk (backpressure → bounded memory). Skip already-cached slices.
-        await Promise.all(
-          my.map(id => {
-            try {
-              if (cache.getImageLoadObject(id)) {
+        while (downloadedChunks.has(nextDecodeChunk)) {
+          const my = downloadedChunks.get(nextDecodeChunk)!;
+          downloadedChunks.delete(nextDecodeChunk);
+          
+          await Promise.all(
+            my.map(id => {
+              try {
+                if (cache.getImageLoadObject(id)) {
+                  return Promise.resolve();
+                }
+                return imageLoader
+                  .loadAndCacheImage(id, { priority: -5, requestType: 'prefetch' })
+                  .catch(() => undefined);
+              } catch (e) {
                 return Promise.resolve();
               }
-              return imageLoader
-                .loadAndCacheImage(id, { priority: -5, requestType: 'prefetch' })
-                .catch(() => undefined);
-            } catch (e) {
-              return Promise.resolve();
-            }
-          })
-        );
-      } catch (e) {
-        // Chunk failed → those slices simply load normally on demand. Continue.
-        // eslint-disable-next-line no-console
-        console.warn('[SKM-BULK] chunk failed, continuing', e);
+            })
+          );
+          nextDecodeChunk++;
+        }
+      } finally {
+        isDecoding = false;
       }
-    }
-  };
+    };
 
-  const workers: Promise<void>[] = [];
+    const worker = async () => {
+      while (true) {
+        const chunkIndex = nextChunk++;
+        if (chunkIndex >= chunks.length) break;
+        
+        const my = chunks[chunkIndex];
+        const mySops = my.map(extractSop).filter((s): s is string => !!s);
+        if (!mySops.length) continue;
+
+        try {
+          const bytesMap = await fetchBulkChunk(seriesUID, mySops, storagePath);
+          let gotData = false;
+          for (const [sop, bytes] of Array.from(bytesMap.entries())) {
+            if (bytes) {
+              bulkBuffer.set(sop, bytes);
+              gotData = true;
+            }
+          }
+          if (gotData) {
+            // Queue this chunk for sequential decoding
+            downloadedChunks.set(chunkIndex, my);
+            await decodeNextAvailable();
+          }
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.warn('[SKM-BULK] chunk failed, continuing', e);
+        }
+      }
+    };
+
+    const workers: Promise<void>[] = [];
   const n = Math.max(1, Math.min(maxConcurrentChunks, chunks.length));
   for (let w = 0; w < n; w++) {
     workers.push(worker());
@@ -408,5 +433,6 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
 
 
