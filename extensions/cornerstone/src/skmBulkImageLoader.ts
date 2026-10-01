@@ -435,12 +435,20 @@ async function driveDisplaySet(
           setTimeout(() => { if (wrapper) wrapper.style.opacity = '0'; }, 1500);
       }
     };
-  const chunks: string[][] = [];
-  for (let i = 0; i < imageIds.length; i += chunkSize) {
-    chunks.push(imageIds.slice(i, i + chunkSize));
-  }
 
-      let nextChunk = 0;
+    const seriesUID = extractSeries(imageIds[0]);
+    if (!seriesUID) {
+      // eslint-disable-next-line no-console
+      console.warn('[SKM-BULK] could not extract seriesUID; skipping bulk for this display set');
+      return;
+    }
+
+    const chunks: string[][] = [];
+    for (let i = 0; i < imageIds.length; i += chunkSize) {
+      chunks.push(imageIds.slice(i, i + chunkSize));
+    }
+
+    let nextChunk = 0;
     
     // SKM-FIX: Smart Decode Queue
     // We let the network pull 60 chunks concurrently (out of order),
@@ -636,6 +644,8 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
+
 
 
 
