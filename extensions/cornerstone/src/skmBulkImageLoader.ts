@@ -44,6 +44,41 @@ type BulkConfig = {
 // never holds more than ~maxConcurrentChunks * chunkSize slices at once.
 const bulkBuffer = new Map<string, ArrayBuffer>();
 
+// --- CUSTOM NETWORK PROGRESS BAR ---
+let _totalNetworkBytes = 0;
+let _downloadedNetworkBytes = 0;
+let _customProgressBar: HTMLElement | null = null;
+
+function updateNetworkProgress(bytesLoaded: number) {
+  _downloadedNetworkBytes += bytesLoaded;
+  if (!(window as any)._CUSTOM_NETWORK_PROGRESS_BAR) return;
+
+  if (!_customProgressBar) {
+    _customProgressBar = document.createElement('div');
+    _customProgressBar.style.position = 'fixed';
+    _customProgressBar.style.bottom = '0';
+    _customProgressBar.style.left = '0';
+    _customProgressBar.style.height = '8px';
+    _customProgressBar.style.backgroundColor = '#00a4d9'; // OHIF primary blue
+    _customProgressBar.style.zIndex = '999999';
+    _customProgressBar.style.transition = 'width 0.2s';
+    _customProgressBar.style.width = '0%';
+    document.body.appendChild(_customProgressBar);
+  }
+
+  if (_totalNetworkBytes > 0) {
+    const percent = Math.min(100, Math.round((_downloadedNetworkBytes / _totalNetworkBytes) * 100));
+    _customProgressBar.style.width = ${percent}%;
+    _customProgressBar.style.opacity = '1';
+    
+    if (percent >= 100) {
+      setTimeout(() => {
+        if (_customProgressBar) _customProgressBar.style.opacity = '0';
+      }, 1500);
+    }
+  }
+}
+
 let loaderRegistered = false;
 let driverInitialized = false;
 // Display sets already handed to the bulk driver (avoid re-processing on every
@@ -224,11 +259,38 @@ async function fetchChunk(
   const url =
     `${window.location.origin}/wado/bulk?seriesUID=${encodeURIComponent(seriesUID)}` +
     `&sopUIDs=${sops.map(encodeURIComponent).join(',')}`;
-  const res = await fetch(url, { method: 'GET' });
+    const res = await fetch(url, { method: 'GET' });
   if (!res.ok) {
-    throw new Error(`bulk http ${res.status}`);
+    throw new Error(ulk http );
   }
-  const buf = await res.arrayBuffer();
+  
+  let buf: ArrayBuffer;
+  if (res.body) {
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let chunkTotalLength = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        chunkTotalLength += value.length;
+        updateNetworkProgress(value.length);
+      }
+    }
+
+    const uint8Buf = new Uint8Array(chunkTotalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      uint8Buf.set(chunk, offset);
+      offset += chunk.length;
+    }
+    buf = uint8Buf.buffer;
+  } else {
+    buf = await res.arrayBuffer();
+    updateNetworkProgress(buf.byteLength);
+  }
   const dv = new DataView(buf);
   const decoder = new TextDecoder();
   const out = new Map<string, ArrayBuffer | null>();
@@ -276,6 +338,15 @@ async function driveDisplaySet(
     console.warn('[SKM-BULK] could not extract seriesUID; skipping bulk for this display set');
     return;
   }
+
+    // Reset Progress Bar for new study
+    // We estimate ~520 KB per slice (Uncompressed Explicit VR CT) for a very accurate progress bar
+    _totalNetworkBytes = imageIds.length * 520000;
+    _downloadedNetworkBytes = 0;
+    if (_customProgressBar) {
+      _customProgressBar.style.opacity = '1';
+      _customProgressBar.style.width = '0%';
+    }
 
   const chunks: string[][] = [];
   for (let i = 0; i < imageIds.length; i += chunkSize) {
@@ -446,6 +517,7 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
 
 
 
