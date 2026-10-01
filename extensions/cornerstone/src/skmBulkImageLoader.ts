@@ -599,10 +599,19 @@ export function initSkmBulkDriver(
         return;
       }
             processedDisplaySets.add(dsUID);
-      // SKM-FIX: Delay the bulk pipeline by 1.2 seconds!
-      // This gives Cornerstone's wado/uri lazy-loader a completely empty network
-      // to download the first visible slice instantly (no 4-second black screen).
-      setTimeout(() => {
+        
+        // SKM RACE CONDITION FIX: Register these SOPs globally IMMEDIATELY!
+        // This guarantees that any aggressive prefetchers (studyPrefetcher, stackPrefetch) that fire 
+        // in the first 2 seconds will be instantly intercepted and forced to wait for the Bulk API.
+        const mySops = imageIds.map(extractSop).filter(Boolean) as string[];
+        for (const sop of mySops) {
+          managedSops.add(sop);
+        }
+
+        // SKM-FIX: Delay the bulk pipeline by 1.2 seconds!
+        // This gives Cornerstone's wado/uri lazy-loader a completely empty network
+        // to download the first visible slice instantly (no 4-second black screen).
+        setTimeout(() => {
         // eslint-disable-next-line no-console
         console.log(`[SKM-BULK] bulk-loading ${imageIds.length} slices for ${dsUID}`);
         driveDisplaySet(imageIds, storagePath, chunkSize, maxConcurrentChunks, activeViewportId).catch(e => {
@@ -627,6 +636,8 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
+
 
 
 
