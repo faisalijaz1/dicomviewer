@@ -331,7 +331,7 @@ async function driveDisplaySet(
         if (!mySops.length) continue;
 
         try {
-          const bytesMap = await fetchBulkChunk(seriesUID, mySops, storagePath);
+          const bytesMap = await fetchChunk(mySops, seriesUID, storagePath);
           let gotData = false;
           for (const [sop, bytes] of Array.from(bytesMap.entries())) {
             if (bytes) {
@@ -433,6 +433,7 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
 
 
 
