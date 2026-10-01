@@ -44,51 +44,7 @@ type BulkConfig = {
 // never holds more than ~maxConcurrentChunks * chunkSize slices at once.
 const bulkBuffer = new Map<string, ArrayBuffer>();
 
-// --- CUSTOM NETWORK PROGRESS BAR ---
-let _totalNetworkBytes = 0;
-let _downloadedNetworkBytes = 0;
-let _customProgressBar: HTMLElement | null = null;
-let _customProgressText: HTMLElement | null = null;
 
-function updateNetworkProgress(bytesLoaded: number) {
-  _downloadedNetworkBytes += bytesLoaded;
-  if (!(window as any)._CUSTOM_NETWORK_PROGRESS_BAR) return;
-
-  if (!_customProgressBar) {
-    const wrapper = document.createElement('div');
-    wrapper.style.position = 'fixed';
-    wrapper.style.bottom = '0';
-    wrapper.style.left = '0';
-    wrapper.style.width = '100%';
-    wrapper.style.height = '14px';
-    wrapper.style.backgroundColor = 'rgba(0, 0, 0, 0.6)';
-    wrapper.style.zIndex = '999999';
-    wrapper.style.display = 'flex';
-    wrapper.style.alignItems = 'center';
-    wrapper.style.justifyContent = 'center';
-    
-    _customProgressBar = document.createElement('div');
-    _customProgressBar.style.position = 'absolute';
-    _customProgressBar.style.top = '0';
-    _customProgressBar.style.left = '0';
-    _customProgressBar.style.height = '100%';
-    _customProgressBar.style.backgroundColor = '#00a4d9'; // OHIF primary blue
-    _customProgressBar.style.transition = 'width 0.2s';
-    _customProgressBar.style.width = '0%';
-    
-    _customProgressText = document.createElement('div');
-    _customProgressText.style.position = 'relative';
-    _customProgressText.style.color = 'white';
-    _customProgressText.style.fontSize = '12px';
-    _customProgressText.style.fontWeight = 'bold';
-    _customProgressText.style.fontFamily = 'sans-serif';
-    _customProgressText.style.textShadow = '1px 1px 2px rgba(0,0,0,0.8)';
-    _customProgressText.innerText = 'Downloading: 0%';
-
-    wrapper.appendChild(_customProgressBar);
-    wrapper.appendChild(_customProgressText);
-    document.body.appendChild(wrapper);
-  }
   if (_totalNetworkBytes > 0) {
     const percent = Math.min(100, Math.round((_downloadedNetworkBytes / _totalNetworkBytes) * 100));
         _customProgressBar.style.width = percent + '%';
@@ -260,7 +216,8 @@ export function registerSkmBulkImageLoader(): boolean {
 async function fetchChunk(
   sops: string[],
   seriesUID: string,
-  storagePath: string
+  storagePath: string,
+  onProgress?: (bytes: number) => void
 ): Promise<Map<string, ArrayBuffer | null>> {
   // GET (same-origin) so no Origin header is sent → no Spring Security CORS
   // rejection, and it's covered by the existing `GET /wado/** permitAll` rule.
@@ -300,7 +257,7 @@ async function fetchChunk(
       if (value) {
         chunks.push(value);
         chunkTotalLength += value.length;
-        updateNetworkProgress(value.length);
+        if (onProgress) onProgress(value.length);
       }
     }
 
@@ -313,7 +270,7 @@ async function fetchChunk(
     buf = uint8Buf.buffer;
   } else {
     buf = await res.arrayBuffer();
-    updateNetworkProgress(buf.byteLength);
+    if (onProgress) onProgress(buf.byteLength);
   }
   const dv = new DataView(buf);
   const decoder = new TextDecoder();
@@ -353,8 +310,69 @@ async function driveDisplaySet(
   imageIds: string[],
   storagePath: string,
   chunkSize: number,
-  maxConcurrentChunks: number
+  maxConcurrentChunks: number,
+  viewportId?: string
 ): Promise<void> {
+  let totalBytes = imageIds.length * 520000;
+  let downloadedBytes = 0;
+  let barEl: HTMLElement | null = null;
+  let textEl: HTMLElement | null = null;
+  let wrapper: HTMLElement | null = null;
+  
+  if (viewportId && (window as any)._CUSTOM_NETWORK_PROGRESS_BAR) {
+    const viewportDom = document.querySelector([data-viewport-uid=" + viewportId + "]) 
+                     || document.querySelector([data-viewportid=" + viewportId + "]);
+    if (viewportDom) {
+      wrapper = document.createElement('div');
+      wrapper.style.position = 'absolute';
+      wrapper.style.bottom = '0';
+      wrapper.style.left = '0';
+      wrapper.style.width = '100%';
+      wrapper.style.height = '14px';
+      wrapper.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+      wrapper.style.zIndex = '999999';
+      wrapper.style.display = 'flex';
+      wrapper.style.alignItems = 'center';
+      wrapper.style.justifyContent = 'center';
+      wrapper.style.pointerEvents = 'none';
+      wrapper.style.transition = 'opacity 0.3s';
+      
+      barEl = document.createElement('div');
+      barEl.style.position = 'absolute';
+      barEl.style.top = '0';
+      barEl.style.left = '0';
+      barEl.style.height = '100%';
+      barEl.style.backgroundColor = '#00a4d9';
+      barEl.style.transition = 'width 0.2s';
+      barEl.style.width = '0%';
+      
+      textEl = document.createElement('div');
+      textEl.style.position = 'relative';
+      textEl.style.color = 'white';
+      textEl.style.fontSize = '11px';
+      textEl.style.fontWeight = 'bold';
+      textEl.style.fontFamily = 'sans-serif';
+      textEl.style.textShadow = '1px 1px 2px rgba(0,0,0,0.8)';
+      textEl.innerText = 'Downloading: 0%';
+
+      wrapper.appendChild(barEl);
+      wrapper.appendChild(textEl);
+      // Ensure the viewport container is relative so absolute positioning works
+      (viewportDom as HTMLElement).style.position = 'relative';
+      viewportDom.appendChild(wrapper);
+    }
+  }
+
+  const updateProgress = (bytesLoaded: number) => {
+    if (!barEl) return;
+    downloadedBytes += bytesLoaded;
+    const percent = Math.min(100, Math.round((downloadedBytes / totalBytes) * 100));
+    barEl.style.width = percent + '%';
+    if (textEl) textEl.innerText = 'Downloading: ' + percent + '%';
+    if (percent >= 100) {
+        setTimeout(() => { if (wrapper) wrapper.style.opacity = '0'; }, 1500);
+    }
+  };
   // All imageIds in a display set share one series; take it from the first.
   const seriesUID = extractSeries(imageIds[0]);
   if (!seriesUID) {
@@ -363,15 +381,7 @@ async function driveDisplaySet(
     return;
   }
 
-    // Reset Progress Bar for new study
-    // We estimate ~520 KB per slice (Uncompressed Explicit VR CT) for a very accurate progress bar
-    _totalNetworkBytes = imageIds.length * 520000;
-    _downloadedNetworkBytes = 0;
-        if (_customProgressBar) {
-      _customProgressBar.style.width = '0%';
-      if (_customProgressBar.parentElement) _customProgressBar.parentElement.style.opacity = '1';
-      if (_customProgressText) _customProgressText.innerText = 'Downloading: 0%';
-    }
+    
 
   const chunks: string[][] = [];
   for (let i = 0; i < imageIds.length; i += chunkSize) {
@@ -438,7 +448,7 @@ async function driveDisplaySet(
         if (!mySops.length) continue;
 
         try {
-          const bytesMap = await fetchChunk(mySops, seriesUID, storagePath);
+          const bytesMap = await fetchChunk(mySops, seriesUID, storagePath, updateProgress);
           let gotData = false;
           for (const [sop, bytes] of Array.from(bytesMap.entries())) {
             if (bytes) {
@@ -520,7 +530,7 @@ export function initSkmBulkDriver(
       setTimeout(() => {
         // eslint-disable-next-line no-console
         console.log(`[SKM-BULK] bulk-loading ${imageIds.length} slices for ${dsUID}`);
-        driveDisplaySet(imageIds, storagePath, chunkSize, maxConcurrentChunks).catch(e => {
+        driveDisplaySet(imageIds, storagePath, chunkSize, maxConcurrentChunks, activeViewportId).catch(e => {
           // eslint-disable-next-line no-console
           console.warn('[SKM-BULK] driver error', e);
         });
@@ -542,6 +552,8 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
+
 
 
 

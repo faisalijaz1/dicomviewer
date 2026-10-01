@@ -446,11 +446,23 @@ export default async function init({
     // size generously: cornerstone only holds what a study actually needs, so the
     // cap only bites once a study would exceed it (then a bigger cap avoids churn).
     // TO REVERT: `effectiveCacheSize = appConfig.maxCacheSize;` (no scaling).
-    const deviceMemGb = (navigator as any).deviceMemory || 4; // undefined → assume 4 GB
-    const memBudget = Math.max(gb, Math.floor(deviceMemGb * 0.3 * gb)); // ≥1 GB, 30% RAM
-    effectiveCacheSize = effectiveCacheSize
-      ? Math.min(effectiveCacheSize, memBudget)
-      : memBudget;
+        const deviceMemGb = (navigator as any).deviceMemory || 4;
+    // SKM-FIX: Chrome hard-caps navigator.deviceMemory at 8. 
+    // This means a 16GB Resident PC and a 32GB Consultant PC BOTH report "8".
+    // If we apply the 30% rule to 8GB, they both get clamped to a tiny 2.4GB cache, 
+    // which instantly throws CACHE_SIZE_EXCEEDED when opening multiple series!
+    // FIX: If the browser reports 8, it means "8 OR MORE". We must trust the configured
+    // maxCacheSize for these powerful machines to allow unlimited viewport stacking!
+    if (deviceMemGb >= 8) {
+      // Powerful machine: Do not restrict! Use the full config ceiling (e.g. 5GB or 8GB).
+      // effectiveCacheSize remains whatever was passed from app-config.js.
+    } else {
+      // Weak machine (<8GB): Apply the 30% safety clamp to prevent OOM crashes.
+      const memBudget = Math.max(gb, Math.floor(deviceMemGb * 0.3 * gb));
+      effectiveCacheSize = effectiveCacheSize
+        ? Math.min(effectiveCacheSize, memBudget)
+        : memBudget;
+    }
   } catch (e) {
     /* fall back to the configured value */
   }
@@ -781,3 +793,4 @@ function _showCPURenderingModal(uiModalService, hangingProtocolService) {
     }
   );
 }
+
