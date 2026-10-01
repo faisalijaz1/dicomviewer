@@ -45,20 +45,6 @@ type BulkConfig = {
 const bulkBuffer = new Map<string, ArrayBuffer>();
 
 
-  if (_totalNetworkBytes > 0) {
-    const percent = Math.min(100, Math.round((_downloadedNetworkBytes / _totalNetworkBytes) * 100));
-        _customProgressBar.style.width = percent + '%';
-    if (_customProgressText) _customProgressText.innerText = 'Downloading: ' + percent + '%';
-    _customProgressBar.style.opacity = '1';
-    
-    if (percent >= 100) {
-      setTimeout(() => {
-                if (_customProgressBar && _customProgressBar.parentElement) _customProgressBar.parentElement.style.opacity = '0';
-      }, 1500);
-    }
-  }
-}
-
 let loaderRegistered = false;
 let driverInitialized = false;
 // Display sets already handed to the bulk driver (avoid re-processing on every
@@ -552,6 +538,8 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
+
 
 
 
