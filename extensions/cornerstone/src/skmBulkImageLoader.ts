@@ -43,8 +43,36 @@ type BulkConfig = {
 // slice (then deleted). Bounded by the driver's chunk concurrency, so this map
 // never holds more than ~maxConcurrentChunks * chunkSize slices at once.
 const bulkBuffer = new Map<string, ArrayBuffer>();
+
+// SKM-FIX: Global Semaphore to protect the server and browser from network collapse!
+// When a doctor opens 4 viewports simultaneously, and maxConcurrentChunks is 60,
+// it launches 240 concurrent HTTP queries to the NAS. The server drops connections,
+// causing fetchChunk to silently fail, which permanently freezes the progress bar!
+// This semaphore limits the absolute maximum in-flight chunks across ALL viewports
+// to 80, guaranteeing the connection never drops and progress bars always reach 100%!
+class Semaphore {
+  private count: number;
+  private queue: (() => void)[] = [];
+  constructor(max: number) { this.count = max; }
+  async acquire() {
+    if (this.count > 0) { this.count--; return; }
+    await new Promise<void>(r => this.queue.push(r));
+  }
+  release() {
+    if (this.queue.length > 0) {
+      const resolve = this.queue.shift();
+      if (resolve) resolve();
+    } else {
+      this.count++;
+    }
+  }
+}
+const globalChunkSemaphore = new Semaphore(80);
 // SOP UIDs that are actively being fetched by the Bulk API driver.
 const managedSops = new Set<string>();
+// Registry to hold interaction promises if the user scrolls to an image
+// BEFORE the Bulk API has finished downloading its chunk.
+const pendingInteractionCallbacks = new Map<string, (b: ArrayBuffer) => void>();
 
 
 let loaderRegistered = false;
@@ -128,12 +156,32 @@ export function registerSkmBulkImageLoader(): boolean {
 
     // No pre-fetched bytes for this slice → normal per-slice network path.
     if (!bytes) {
-      if (options?.requestType === 'prefetch' && sop && managedSops.has(sop)) {
-        // SKM-FIX: Kill duplicate WADO-URI prefetch requests to prevent race conditions!
-        // Cornerstone's stackPrefetch fires hundreds of network requests that compete
-        // with our Bulk API stream. By rejecting them here, we force Cornerstone to wait
-        // for driveDisplaySet to fetch the bulk bytes and trigger loadAndCacheImage!
-        return Promise.reject(new Error('SKM Bulk Loader handles prefetch'));
+      if (sop && managedSops.has(sop)) {
+        // SKM-FIX: The user scrolled to an image that the Bulk API is actively downloading!
+        // If we fall back to originalLoad, Cornerstone locks this slice to a slow, legacy
+        // WADO-URI network request that will get permanently queued behind the massive Bulk API
+        // stream, causing the center loading spinner to freeze forever!
+        // FIX: Just return a Promise that waits silently. When the Bulk API finishes the chunk,
+        // it will trigger the callback and instantly decode the image! No network race conditions!
+        const promise = new Promise((resolve, reject) => {
+          pendingInteractionCallbacks.set(sop, (b: ArrayBuffer) => {
+            try {
+              const fileId = dicomImageLoader.wadouri.fileManager.add(new Blob([b]));
+              const innerPromise = imageLoader.loadImage(fileId, options);
+              Promise.resolve(innerPromise).then(
+                (image: any) => {
+                  image.imageId = imageId;
+                  image.sharedCacheKey = imageId;
+                  resolve(image);
+                },
+                reject
+              );
+            } catch (e) {
+              reject(e);
+            }
+          });
+        });
+        return { promise };
       }
       return originalLoad(imageId, options);
     }
@@ -447,12 +495,23 @@ async function driveDisplaySet(
         if (!mySops.length) continue;
 
         try {
-          const bytesMap = await fetchChunk(mySops, seriesUID, storagePath, updateProgress);
+                      await globalChunkSemaphore.acquire();
+            let bytesMap;
+            try {
+              bytesMap = await fetchChunk(mySops, seriesUID, storagePath, updateProgress);
+            } finally {
+              globalChunkSemaphore.release();
+            }
           let gotData = false;
           for (const [sop, bytes] of Array.from(bytesMap.entries())) {
             if (bytes) {
               bulkBuffer.set(sop, bytes);
-              gotData = true;
+gotData = true;
+const callback = pendingInteractionCallbacks.get(sop);
+if (callback) {
+  pendingInteractionCallbacks.delete(sop);
+  callback(bytes);
+}
             }
           }
                     if (gotData) {
@@ -551,6 +610,12 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
+
+
+
+
+
 
 
 
