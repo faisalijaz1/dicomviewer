@@ -459,63 +459,16 @@ async function driveDisplaySet(
 
     let nextChunk = 0;
     
-    // SKM-FIX: Smart Decode Queue
-    // We let the network pull 60 chunks concurrently (out of order),
-    // but we force Cornerstone to decode them strictly in sequential order (0, 1, 2...).
-    // This gives us the blazing 23s speed AND a perfectly smooth vertical progress bar!
-        const downloadedChunks = new Map<number, string[]>();
-    const processedChunkStatus = new Set<number>();
-    let nextDecodeChunk = 0;
-    let isDecoding = false;
-
-    const decodeNextAvailable = async () => {
-      if (isDecoding) return;
-      isDecoding = true;
-      try {
-        // Only proceed if the EXACT NEXT chunk we need has finished (whether it succeeded or failed)
-        while (processedChunkStatus.has(nextDecodeChunk)) {
-          if (downloadedChunks.has(nextDecodeChunk)) {
-            const my = downloadedChunks.get(nextDecodeChunk)!;
-            downloadedChunks.delete(nextDecodeChunk);
-            
-            await Promise.all(
-              my.map(id => {
-                try {
-                  if (cache.getImageLoadObject(id)) {
-                    return Promise.resolve();
-                  }
-                  // SKM-FIX: Changed priority from -5 to 100!
-                  // stackPrefetch uses 0. By using 100, we force Cornerstone to decode our
-                  // fully-downloaded bulk bytes IMMEDIATELY, instead of getting stuck in the
-                  // queue behind slow WADO URI network requests!
-                  return imageLoader
-                    .loadAndCacheImage(id, { priority: 100, requestType: 'prefetch' })
-                    .catch(() => undefined);
-                } catch (e) {
-                  return Promise.resolve();
-                }
-              })
-            );
-          }
-          // We've handled this chunk (either decoded it, or skipped it because it failed)
-          // Move the pointer forward so we don't get deadlocked!
-          processedChunkStatus.delete(nextDecodeChunk);
-          nextDecodeChunk++;
-        }
-      } finally {
-        isDecoding = false;
-      }
-    };
-
+    // SKM-FIX: Gentle Non-Sequential Decode
+    // We no longer force strict sequential decoding because it causes massive pauses if Chunk 0 is slow.
+    // Instead, chunks decode gently in the background as they arrive, yielding to the UI thread!
     const worker = async () => {
       while (true) {
         const chunkIndex = nextChunk++;
         if (chunkIndex >= chunks.length) break;
-        
         const my = chunks[chunkIndex];
         const mySops = my.map(extractSop).filter((s): s is string => !!s);
         if (!mySops.length) continue;
-
         try {
           let bytesMap;
           let retries = 3;
@@ -536,33 +489,34 @@ async function driveDisplaySet(
           for (const [sop, bytes] of Array.from(bytesMap.entries())) {
             if (bytes) {
               bulkBuffer.set(sop, bytes);
-gotData = true;
-const callback = pendingInteractionCallbacks.get(sop);
-if (callback) {
-  pendingInteractionCallbacks.delete(sop);
-  callback(bytes);
-}
+              gotData = true;
+              const callback = pendingInteractionCallbacks.get(sop);
+              if (callback) {
+                pendingInteractionCallbacks.delete(sop);
+                callback(bytes);
+              }
             }
           }
-                    if (gotData) {
-            // Queue this chunk for sequential decoding
-            downloadedChunks.set(chunkIndex, my);
+          if (gotData) {
+            updateProgress();
+            // Gentle background decode: Decode 1 slice at a time with a tiny delay.
+            // This completely eliminates UI freezes and fills the vertical scrollbar dynamically!
+            (async () => {
+              for (const id of my) {
+                if (!cache.getImageLoadObject(id)) {
+                  // Use a low priority so user scrolling (priority 100) instantly preempts this!
+                  await imageLoader.loadAndCacheImage(id, { priority: -5, requestType: 'prefetch' }).catch(() => {});
+                  await new Promise(r => setTimeout(r, 10)); // Yield to keep UI buttery smooth
+                }
+              }
+            })();
           }
-          // Trigger the progress bar update now that the chunk is fully downloaded
-          updateProgress();
-          // Trigger the progress bar update now that the chunk is fully downloaded
-          updateProgress();
         } catch (e) {
           // eslint-disable-next-line no-console
           console.warn('[SKM-BULK] chunk failed, continuing', e);
-        } finally {
-          processedChunkStatus.add(chunkIndex);
-          await decodeNextAvailable();
         }
       }
     };
-
-    const workers: Promise<void>[] = [];
   const n = Math.max(1, Math.min(maxConcurrentChunks, chunks.length));
   for (let w = 0; w < n; w++) {
     workers.push(worker());
@@ -649,6 +603,7 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
 
 
 
