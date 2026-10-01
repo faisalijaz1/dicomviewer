@@ -306,8 +306,8 @@ async function driveDisplaySet(
   let wrapper: HTMLElement | null = null;
   
   if (viewportId && (window as any)._CUSTOM_NETWORK_PROGRESS_BAR) {
-    const viewportDom = document.querySelector([data-viewport-uid=" + viewportId + "]) 
-                     || document.querySelector([data-viewportid=" + viewportId + "]);
+    const viewportDom = document.querySelector('[data-viewport-uid="' + viewportId + '"]') 
+                     || document.querySelector('[data-viewportid="' + viewportId + '"]');
     if (viewportDom) {
       wrapper = document.createElement('div');
       wrapper.style.position = 'absolute';
@@ -538,6 +538,7 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
 
 
 
