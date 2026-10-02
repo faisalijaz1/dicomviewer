@@ -454,14 +454,8 @@ export default async function init({
     // FIX: If the browser reports 8, it means "8 OR MORE". We must trust the configured
     // maxCacheSize for these powerful machines to allow unlimited viewport stacking!
     if (deviceMemGb >= 8) {
-        // SKM-FIX: Algorithmic Ceiling
-        // A single tab never needs more than 3.0 GB of VRAM (holds ~6000 uncompressed slices).
-        // By strictly capping it at 3.0 GB, a doctor can safely open 4 heavy tabs
-        // on a 16GB Resident system without ever triggering a Windows OS RAM freeze!
-        const CEILING = 3 * 1024 * 1024 * 1024; // 3.0 GB
-        effectiveCacheSize = effectiveCacheSize
-          ? Math.min(effectiveCacheSize, CEILING)
-          : CEILING;
+        // Powerful machine: Do not restrict! Use the full config ceiling (e.g. 5GB or 8GB).
+        // effectiveCacheSize remains whatever was passed from app-config.js.
     } else {
       // Weak machine (<8GB): Apply the 30% safety clamp to prevent OOM crashes.
       const memBudget = Math.max(gb, Math.floor(deviceMemGb * 0.3 * gb));
@@ -799,5 +793,6 @@ function _showCPURenderingModal(uiModalService, hangingProtocolService) {
     }
   );
 }
+
 
 
