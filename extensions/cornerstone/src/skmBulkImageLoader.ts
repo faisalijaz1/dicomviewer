@@ -544,6 +544,7 @@ export function initSkmBulkDriver(
 
   const chunkSize = config?.chunkSize ?? 30;
   const maxConcurrentChunks = config?.maxConcurrentChunks ?? 4;
+    const takeoverDelay = config?.takeoverDelay ?? 150;
 
   const run = () => {
     try {
@@ -581,7 +582,7 @@ export function initSkmBulkDriver(
           managedSops.add(sop);
         }
 
-        // We only delay the massive Bulk API chunking engine by 500ms so it starts almost instantly!
+          // We only delay the massive Bulk API chunking engine by takeoverDelay ms so it starts almost instantly!
         setTimeout(() => {
         // eslint-disable-next-line no-console
         console.log(`[SKM-BULK] bulk-loading ${imageIds.length} slices for ${dsUID}`);
@@ -589,7 +590,7 @@ export function initSkmBulkDriver(
           // eslint-disable-next-line no-console
           console.warn('[SKM-BULK] driver error', e);
         });
-      }, 2200);
+      }, takeoverDelay);
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn('[SKM-BULK] run() error', e);
@@ -607,6 +608,9 @@ export function initSkmBulkDriver(
     console.warn('[SKM-BULK] failed to subscribe driver', e);
   }
 }
+
+
+
 
 
 
