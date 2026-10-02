@@ -37,6 +37,19 @@ type BulkConfig = {
   chunkSize?: number;
   /** Max bulk chunk requests in flight (bounds transient memory). Default 4. */
   maxConcurrentChunks?: number;
+  /** ms to delay the bulk engine after a viewport is ready (keeps TTFI low). Default 150. */
+  takeoverDelay?: number;
+  /** Absolute cap on in-flight chunks across ALL viewports (the global semaphore). Default 6. */
+  maxGlobalConcurrentChunks?: number;
+  /**
+   * SKM 2026-10-02 (P1.1): when true (default), free a study's bulk state
+   * (raw bytes, managed-SOP tracking, pending callbacks) the moment it is no
+   * longer open in ANY viewport — bounding memory across a long multi-study
+   * reading session. It NEVER touches a study still open in a viewport, so it
+   * cannot stall the slice a doctor is viewing. Set false to retain the old
+   * never-flush behaviour.
+   */
+  flushOnStudyClose?: boolean;
 };
 
 // sopUID -> raw DICOM file bytes, held only until Cornerstone has decoded the
@@ -75,6 +88,10 @@ class Semaphore {
 const globalChunkSemaphore = new Semaphore(maxGlobal);
 // SOP UIDs that are actively being fetched by the Bulk API driver.
 const managedSops = new Set<string>();
+// SKM 2026-10-02 (P1.1): SOPs grouped by their displaySetInstanceUID, so a study
+// that is no longer open in any viewport can have EXACTLY its own bytes/tracking
+// freed (selective, multi-pane-safe flush) without disturbing other open studies.
+const sopsByDisplaySet = new Map<string, Set<string>>();
 // Registry to hold interaction promises if the user scrolls to an image
 // BEFORE the Bulk API has finished downloading its chunk.
 const pendingInteractionCallbacks = new Map<string, (b: ArrayBuffer) => void>();
@@ -560,6 +577,40 @@ export function initSkmBulkDriver(
   const maxConcurrentChunks = config?.maxConcurrentChunks ?? 4;
     const takeoverDelay = config?.takeoverDelay ?? 150;
 
+  // SKM 2026-10-02 (P1.1): free bulk state for any study no longer open in a
+  // viewport. Selective (per displaySet) and only ever targets CLOSED studies,
+  // so it can never touch the slice currently being viewed → no scroll stall.
+  // Gated by config.flushOnStudyClose (default on).
+  const pruneClosedStudies = (openDsUids: Set<string>) => {
+    if (config?.flushOnStudyClose === false) {
+      return;
+    }
+    // SAFETY: never prune on an EMPTY grid state. Viewport-grid events can emit a
+    // transient empty snapshot mid-layout-change; pruning then would wrongly free
+    // the active study and force a full re-download. We only prune when some study
+    // is genuinely open — so a closed study is reclaimed the moment the NEXT study
+    // opens (openDsUids = {new}), which still bounds memory, with zero risk to the
+    // study currently on screen.
+    if (openDsUids.size === 0) {
+      return;
+    }
+    for (const dsUID of Array.from(processedDisplaySets)) {
+      if (openDsUids.has(dsUID)) {
+        continue;
+      }
+      const sops = sopsByDisplaySet.get(dsUID);
+      if (sops) {
+        for (const sop of Array.from(sops)) {
+          bulkBuffer.delete(sop);
+          managedSops.delete(sop);
+          pendingInteractionCallbacks.delete(sop);
+        }
+      }
+      sopsByDisplaySet.delete(dsUID);
+      processedDisplaySets.delete(dsUID);
+    }
+  };
+
   const run = () => {
     try {
       const storagePath = getStoragePath();
@@ -568,6 +619,24 @@ export function initSkmBulkDriver(
       }
       const { viewportGridService, displaySetService } = servicesManager.services;
       const state = viewportGridService.getState();
+
+      // SKM 2026-10-02 (P1.1): collect the display sets currently open across ALL
+      // viewports, then free any previously-processed study no longer among them
+      // (covers back-to-study-list, closing a pane, and opening a new study in
+      // the same tab). Best-effort; never throws into the caller.
+      const openDsUids = new Set<string>();
+      try {
+        const vps = state?.viewports;
+        if (vps && typeof vps.forEach === 'function') {
+          vps.forEach((vp: any) => {
+            (vp?.displaySetInstanceUIDs || []).forEach((u: string) => openDsUids.add(u));
+          });
+        }
+      } catch (e) {
+        /* ignore — prune is best-effort */
+      }
+      pruneClosedStudies(openDsUids);
+
       const activeViewportId = state?.activeViewportId;
       if (!activeViewportId) {
         return;
@@ -589,12 +658,17 @@ export function initSkmBulkDriver(
         return;
       }
             processedDisplaySets.add(dsUID);
-        
-        // SKM RACE CONDITION FIX: Register SOPs globally IMMEDIATELY!
+
+        // SKM RACE CONDITION FIX: register SOPs globally IMMEDIATELY so an early
+        // scroll knows the slice is bulk-managed. Also group them by displaySet so
+        // pruneClosedStudies() can later free EXACTLY this study (P1.1).
         const mySops = imageIds.map(extractSop).filter(Boolean) as string[];
+        const dsSet = new Set<string>();
         for (const sop of mySops) {
           managedSops.add(sop);
+          dsSet.add(sop);
         }
+        sopsByDisplaySet.set(dsUID, dsSet);
 
           // We only delay the massive Bulk API chunking engine by takeoverDelay ms so it starts almost instantly!
         setTimeout(() => {
@@ -682,11 +756,24 @@ export function initSkmBulkDriver(
 
 
 
+/**
+ * Full teardown flush — frees ALL bulk state. Use on a hard exit of the viewer
+ * (e.g. OHIF mode onModeExit) when nothing should remain cached. For ordinary
+ * study switching, the driver's pruneClosedStudies() already frees each study as
+ * it closes, so this is the belt-and-braces version.
+ *
+ * SKM 2026-10-02 (P1.1): now also clears processedDisplaySets and the
+ * per-displaySet SOP map. Clearing processedDisplaySets is REQUIRED — otherwise a
+ * reopened study is seen as "already processed", the bulk driver is skipped, and
+ * the whole study silently reloads via slow wadouri.
+ */
 export function flushBulkMemory() {
   bulkBuffer.clear();
   managedSops.clear();
   pendingInteractionCallbacks.clear();
-  // processedDisplaySets tracking isn't defined here, but clearing the above covers 99% of the heap leak
-  console.log('[SKM-BULK] Memory flushed.');
+  sopsByDisplaySet.clear();
+  processedDisplaySets.clear();
+  // eslint-disable-next-line no-console
+  console.log('[SKM-BULK] Memory flushed (full teardown).');
 }
 
