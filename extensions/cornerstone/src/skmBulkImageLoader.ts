@@ -61,12 +61,66 @@ type BulkConfig = {
    * the bar does not stick when decode pauses. Default OFF — A/B before enabling.
    */
   boundedDecode?: boolean;
+  /**
+   * SKM 2026-10-02 (P2.2): hard cap (in MB) on the RETAINED raw-bytes buffer
+   * (bulkBuffer), summed across ALL open studies/viewports in this tab. Prevents
+   * the raw heap from growing without bound when several large studies are open at
+   * once (the 4-studies-in-one-tab / multi-viewport freeze). Oldest bytes evict
+   * first; an evicted slice re-fetches on demand (wadouri) if scrolled to. 0 =
+   * unbounded. Default 600.
+   */
+  maxBulkBufferMB?: number;
 };
 
-// sopUID -> raw DICOM file bytes, held only until Cornerstone has decoded the
-// slice (then deleted). Bounded by the driver's chunk concurrency, so this map
-// never holds more than ~maxConcurrentChunks * chunkSize slices at once.
+// sopUID -> raw DICOM file bytes. In the default (non-bounded) mode each entry is
+// deleted the instant Cornerstone decodes it, so the map stays tiny. In
+// boundedDecode mode decode is paused near the cache cap, so raw bytes are RETAINED
+// for on-demand decode — which, with several studies/viewports open, can grow
+// without limit. The LRU cap below (P2.2) bounds that raw heap regardless of how
+// many studies are open; evicted bytes simply re-fetch on demand (wadouri) if
+// scrolled to.
 const bulkBuffer = new Map<string, ArrayBuffer>();
+
+// SKM 2026-10-02 (P2.2): byte-bounded LRU wrapper for bulkBuffer. Map preserves
+// insertion order, so evicting from the front drops the oldest-downloaded bytes
+// first. bulkBufferCapBytes = 0 means unbounded (set from config in the driver).
+let bulkBufferBytes = 0;
+let bulkBufferCapBytes = 0;
+function bbSet(sop: string, bytes: ArrayBuffer) {
+  const existing = bulkBuffer.get(sop);
+  if (existing) {
+    bulkBufferBytes -= existing.byteLength;
+  }
+  bulkBuffer.set(sop, bytes);
+  bulkBufferBytes += bytes.byteLength;
+  if (bulkBufferCapBytes > 0 && bulkBufferBytes > bulkBufferCapBytes) {
+    // Evict oldest entries until under cap, but never the one just added.
+    for (const oldSop of Array.from(bulkBuffer.keys())) {
+      if (bulkBufferBytes <= bulkBufferCapBytes) {
+        break;
+      }
+      if (oldSop === sop) {
+        continue;
+      }
+      const old = bulkBuffer.get(oldSop);
+      if (old) {
+        bulkBufferBytes -= old.byteLength;
+        bulkBuffer.delete(oldSop);
+      }
+    }
+  }
+}
+function bbDelete(sop: string) {
+  const existing = bulkBuffer.get(sop);
+  if (existing) {
+    bulkBufferBytes -= existing.byteLength;
+    bulkBuffer.delete(sop);
+  }
+}
+function bbClear() {
+  bulkBuffer.clear();
+  bulkBufferBytes = 0;
+}
 
 // SKM-FIX: Global Semaphore to protect the server and browser from network collapse!
 // When a doctor opens 4 viewports simultaneously, and maxConcurrentChunks is 60,
@@ -264,7 +318,7 @@ export function registerSkmBulkImageLoader(): boolean {
             /* noop */
           }
           if (sop) {
-            bulkBuffer.delete(sop); // raw bytes no longer needed (decoded now)
+            bbDelete(sop); // raw bytes no longer needed (decoded now)
           }
           try {
             dicomImageLoader.wadouri.fileManager.remove?.(fileId);
@@ -277,7 +331,7 @@ export function registerSkmBulkImageLoader(): boolean {
           // Native decode of the bulk bytes failed for any reason → do NOT show a
           // broken image; fall back to the proven per-slice network path.
           if (sop) {
-            bulkBuffer.delete(sop);
+            bbDelete(sop);
           }
           // eslint-disable-next-line no-console
           console.warn('[SKM-BULK] decode fallback to network for', imageId, err);
@@ -290,7 +344,7 @@ export function registerSkmBulkImageLoader(): boolean {
     } catch (e) {
       // Anything unexpected in the bulk path → safe fallback.
       if (sop) {
-        bulkBuffer.delete(sop);
+        bbDelete(sop);
       }
       // eslint-disable-next-line no-console
       console.warn('[SKM-BULK] loader fallback to network for', imageId, e);
@@ -534,7 +588,7 @@ async function driveDisplaySet(
           let gotData = false;
           for (const [sop, bytes] of Array.from(bytesMap.entries())) {
             if (bytes) {
-              bulkBuffer.set(sop, bytes);
+              bbSet(sop, bytes);
               gotData = true;
               const callback = pendingInteractionCallbacks.get(sop);
               if (callback) {
@@ -623,6 +677,8 @@ export function initSkmBulkDriver(
   const maxConcurrentChunks = config?.maxConcurrentChunks ?? 4;
     const takeoverDelay = config?.takeoverDelay ?? 150;
   const boundedDecode = config?.boundedDecode === true; // SKM P2: default OFF
+  // SKM P2.2: bound the retained raw-bytes buffer across all open studies (0 = off).
+  bulkBufferCapBytes = (config?.maxBulkBufferMB ?? 600) * 1024 * 1024;
 
   // SKM 2026-10-02 (P1.1): free bulk state for any study no longer open in a
   // viewport. Selective (per displaySet) and only ever targets CLOSED studies,
@@ -648,7 +704,7 @@ export function initSkmBulkDriver(
       const sops = sopsByDisplaySet.get(dsUID);
       if (sops) {
         for (const sop of Array.from(sops)) {
-          bulkBuffer.delete(sop);
+          bbDelete(sop);
           managedSops.delete(sop);
           pendingInteractionCallbacks.delete(sop);
         }
@@ -815,7 +871,7 @@ export function initSkmBulkDriver(
  * the whole study silently reloads via slow wadouri.
  */
 export function flushBulkMemory() {
-  bulkBuffer.clear();
+  bbClear();
   managedSops.clear();
   pendingInteractionCallbacks.clear();
   sopsByDisplaySet.clear();

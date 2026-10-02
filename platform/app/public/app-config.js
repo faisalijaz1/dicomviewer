@@ -261,6 +261,12 @@ window.config = {
     // Best paired with boundedDecode:true so the shrink evicts gracefully and the
     // download-driven bar stays monotonic.
     multiTabCacheSplit: true,
+    // SKM 2026-10-02 (P2.2): hard cap (MB) on retained raw bulk bytes across ALL
+    // open studies/viewports in a tab. With boundedDecode retaining raw bytes,
+    // opening 4 studies in 4 viewports would otherwise hold 4 studies of raw data
+    // at once and freeze a 16 GB box. Oldest bytes evict first; evicted slices
+    // re-fetch on demand (wadouri) if scrolled to. 0 = unbounded. Default 600.
+    maxBulkBufferMB: 600,
   },
  
    
