@@ -1,32 +1,32 @@
 /**
- * OHIF Viewer v3 — SKM PACS configuration
- *
- * IMPORTANT: this project's production build (`npx yarn run build:viewer`
- * from platform/app, served via the repo's ohif-static-server.js) INLINES
- * this file's content directly into dist/index.html at build time - it is
- * NOT fetched separately at runtime the way a plain `app-config.js` script
- * tag normally would be. Editing this file and only copying it into
- * dist/app-config.js has NO EFFECT on what the browser actually loads;
- * a full rebuild is required for any change here to take effect.
- * (The OHIF_APP_CONFIG env var / `yarn start` workflow mentioned in some
- * upstream OHIF docs is a different run method not used by this project.)
- *
- * DICOMweb endpoint: pacs-dicom-service, reverse-proxied at
- * https://192.192.8.173 (standard HTTPS port, no port suffix)
- * (WADO-RS / QIDO-RS served at /wado/rs)
- *
- * How to deploy OHIF for this project:
- *   1. git clone https://bitbucket.org/skmch/skmch-dicom-viewer.git ohif
- *   2. cd ohif
- *   3. yarn install
- *   4. Edit this file directly at ohif/platform/app/public/app-config.js
- *   5. cd platform/app && npx yarn run build:viewer (rebuilds dist/,
- *      inlining this file's content)
- *   6. From the repo root: node ohif-static-server.js
- *      (set PORT=3000 first to choose the port)
- */
-
-
+* OHIF Viewer v3 — SKM PACS configuration
+*
+* IMPORTANT: this project's production build (`npx yarn run build:viewer`
+* from platform/app, served via the repo's ohif-static-server.js) INLINES
+* this file's content directly into dist/index.html at build time - it is
+* NOT fetched separately at runtime the way a plain `app-config.js` script
+* tag normally would be. Editing this file and only copying it into
+* dist/app-config.js has NO EFFECT on what the browser actually loads;
+* a full rebuild is required for any change here to take effect.
+* (The OHIF_APP_CONFIG env var / `yarn start` workflow mentioned in some
+* upstream OHIF docs is a different run method not used by this project.)
+*
+* DICOMweb endpoint: pacs-dicom-service, reverse-proxied at
+* https://192.192.8.173 (standard HTTPS port, no port suffix)
+* (WADO-RS / QIDO-RS served at /wado/rs)
+*
+* How to deploy OHIF for this project:
+*   1. git clone https://bitbucket.org/skmch/skmch-dicom-viewer.git ohif
+*   2. cd ohif
+*   3. yarn install
+*   4. Edit this file directly at ohif/platform/app/public/app-config.js
+*   5. cd platform/app && npx yarn run build:viewer (rebuilds dist/,
+*      inlining this file's content)
+*   6. From the repo root: node ohif-static-server.js
+*      (set PORT=3000 first to choose the port)
+*/
+ 
+ 
 // Standard SKM PACS data source for production
 const dataSourceConfiguration = {
   friendlyName: 'SKM PACS',
@@ -58,40 +58,71 @@ const dataSourceConfiguration = {
   singlepart: 'pdf,video',
   omitQuotationForMultipartRequest: true,
 };
-
+ 
 const urlParams = new URLSearchParams(window.location.search);
 const storagePath = urlParams.get('storagePath');
 const studyUIDs = urlParams.get('StudyInstanceUIDs');
-
+ 
 // ─── STORAGEPATH INTERCEPTOR ────────────────────────────────────────────────
 // OHIF's DICOMweb client makes many internal calls (series list, metadata,
-// pixel data) without carrying storagePath.  We patch fetch + XHR here so
+// pixel data) without carrying storagePath. We patch fetch + XHR here so
 // every request to our backend automatically carries the storagePath the page
-// was opened with.  The backend keeps storagePath as required per our plan.
+// was opened with. The backend keeps storagePath as required per our plan.
+//
+// ─── SKM 2026-09-30: THREE-ORIGIN ROUND-ROBIN (connection multiplier) ────────
+// By alternating the high-volume pixel-data requests (/wado/uri) across THREE 
+// origins (:443, :8443, :8444), we get 3 independent HTTP/2 multiplexed 
+// connections. This perfectly balances header compression and congestion control,
+// completely eliminating HTTP/2 head-of-line blocking on slow networks.
+//
+// TO REVERT: set _WADO_MULTI_ORIGIN = false — every request then goes to :443
+// (the exact original single-origin behaviour), no rebuild logic changes needed
+// beyond this one flag. 
+// ─── STORAGEPATH & MULTI-ORIGIN INTERCEPTOR ─────────────────────────────────
+var _WADO_MULTI_ORIGIN = false; // master on/off for sharding
 if (storagePath) {
-  var _encodedPath = encodeURIComponent(storagePath);
-  var _backendPattern = '/wado/';
-
-  // Patch fetch()
-  var _origFetch = window.fetch;
-  window.fetch = function(url, opts) {
-    if (typeof url === 'string' && url.indexOf(_backendPattern) !== -1) {
-      url = url + (url.indexOf('?') !== -1 ? '&' : '?') + 'storagePath=' + _encodedPath;
+    var _encodedPath = encodeURIComponent(storagePath);
+    var _backendPattern = '/wado/';
+    var _requestCounter = 0; // Counter for round-robin
+    // Helper to append storage path AND apply multi-origin load balancing
+    function transformUrl(url) {
+        if (typeof url !== 'string' || url.indexOf(_backendPattern) === -1) {
+            return url;
+        }
+        // 1. Append storage path
+        url = url + (url.indexOf('?') !== -1 ? '&' : '?') + 'storagePath=' + _encodedPath;
+        // 2. Multi-Origin Round-Robin (3 Ports)
+        if (_WADO_MULTI_ORIGIN) {
+            var _origins = ['', ':8443', ':8444'];
+            var currentOrigin = _origins[_requestCounter % 3];
+            _requestCounter++;
+            if (currentOrigin !== '') {
+                // If URL is absolute, append the port to the IP
+                if (url.indexOf('192.192.8.173') !== -1) {
+                    url = url.replace('192.192.8.173', '192.192.8.173' + currentOrigin);
+                }
+                // If URL is relative, force it to be an absolute cross-origin URL
+                else if (url.startsWith('/')) {
+                    url = 'https://192.192.8.173' + currentOrigin + url;
+                }
+            }
+        }
+        return url;
     }
-    return _origFetch.call(this, url, opts);
-  };
-
-  // Patch XMLHttpRequest.open()
-  var _origXhrOpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function(method, url) {
-    if (typeof url === 'string' && url.indexOf(_backendPattern) !== -1) {
-      url = url + (url.indexOf('?') !== -1 ? '&' : '?') + 'storagePath=' + _encodedPath;
-    }
-    return _origXhrOpen.apply(this, arguments.length === 2 ? [method, url] : Array.from(arguments).map(function(a, i) { return i === 1 ? url : a; }));
-  };
+    // Patch fetch()
+    var _origFetch = window.fetch;
+    window.fetch = function(url, opts) {
+        return _origFetch.call(this, transformUrl(url), opts);
+    };
+    // Patch XMLHttpRequest.open()
+    var _origXhrOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url) {
+        var newUrl = transformUrl(url);
+        return _origXhrOpen.apply(this, arguments.length === 2 ? [method, newUrl] : Array.from(arguments).map(function(a, i) { return i === 1 ? newUrl : a; }));
+    };
 }
-
-
+ 
+ 
 // ─── AUTO-REDIRECT ──────────────────────────────────────────────────────────
 // When the EMR opens /viewer?storagePath=\\..., fetch the StudyInstanceUID
 // from the backend and redirect OHIF to the correct viewer URL with the UID.
@@ -113,14 +144,15 @@ if (storagePath && !studyUIDs && window.location.pathname.indexOf('/viewer') !==
     })
     .catch(function(err) { console.error('SKM PACS: failed to fetch study metadata', err); });
 }
-
-
+ 
+// Paste this at the VERY TOP of app-config.js
+window._CUSTOM_NETWORK_PROGRESS_BAR = true;
 window.config = {
   routerBasename: '/',
   pacsApiUrl: window.location.origin, // forces secure same-origin HTTPS requests
   extensions: [],
   modes: [],
-
+ 
   // ── DECODE PARALLELISM FIX 2026-09-28 ──────────────────────────────────────
   // OS-level profiling proved the 32s load is CLIENT-SIDE DECODE-BOUND: during
   // load, Chrome pegged ~2.4 CPU cores while the gigabit LAN sat ~70% idle
@@ -135,8 +167,13 @@ window.config = {
   // goes from ~2-3 workers to 7 → roughly 2-3x decode throughput, which is the
   // path from ~32s toward the 15-20s target. It auto-scales per machine (a
   // 4-core box still caps at 3); one core is always left free for the UI.
-  maxNumberOfWebWorkers: 16,
-
+  //maxNumberOfWebWorkers: 16,
+  maxNumberOfWebWorkers: Math.max(2, Math.min(16, (navigator.hardwareConcurrency || 4) - 1)),
+    // --- CUSTOM NETWORK PROGRESS BAR ---
+  // Set to true to display a sleek blue progress bar at the bottom of the screen
+  // that accurately tracks HTTP/2 Bulk API network streaming in real-time.
+ 
+ 
   // RadiAnt-style: load current slice first, prefetch neighbours while scrolling.
   // These control concurrent HTTP requests FROM EACH VIEWER TO THE PACS SERVER -
   // unlike decode (which runs in the browser's own web workers, no server
@@ -160,9 +197,10 @@ window.config = {
     // to keep many requests in flight over the HTTP/2 connection. REQUIRES
     // nginx on http2 (h1 caps the browser at 6 conns/host and nullifies this).
     // ORIGINAL: interaction 8, thumbnail 2, prefetch 20.
-    interaction: 16,
-    thumbnail: 1,
-    prefetch: 48,
+	 // ORIGINAL bulk api: interaction 8, thumbnail 2, prefetch 3.
+    interaction: 8,
+    thumbnail: 2,
+    prefetch: 3
   },
   // ── SKM-BULK 2026-09-28 (Fix 3) ───────────────────────────────────────────
   // Batch pixel retrieval: one request pulls ~50 slices instead of 50 separate
@@ -193,12 +231,32 @@ window.config = {
   // TO RE-ENABLE BULK: set this enabled:true AND set studyPrefetcher.enabled:false
   // (never both true at once).
   // ORIGINAL: enabled: true,
-  skmBulkLoader: {
-    enabled: false,
-    chunkSize: 20,
-    maxConcurrentChunks: 6,
+    skmBulkLoader: {
+    enabled: true,
+    chunkSize: 40,
+    maxConcurrentChunks: 5, // Controls how many chunks a SINGLE viewport asks for   old 6
+    maxGlobalConcurrentChunks: 20, // STRICT LIMIT: The absolute maximum concurrent chunks across the entire browser  old 6
+	takeoverDelay: 500, // (Delay before Bulk API starts, allows 1st slice to load instantly)
+    // SKM 2026-10-02 (P1.1): free a study's bulk bytes/tracking the instant it is
+    // no longer open in ANY viewport (back-to-study-list, closing a pane, or
+    // opening a new study in the same tab) — bounds memory across a long
+    // multi-study reading session. Selective per-study and only ever frees CLOSED
+    // studies, so it can never stall the slice being viewed. Set false to revert
+    // to the old never-flush behaviour.
+    flushOnStudyClose: true,
+    // SKM 2026-10-02 (P2): bounded working-set decode (RadiAnt-style). When true,
+    // the whole study still DOWNLOADS (bar reaches 100%), but background DECODE
+    // pauses once Cornerstone's cache is ~85% full — remaining slices decode
+    // on-demand as the doctor scrolls to them. Eliminates CACHE_SIZE_EXCEEDED churn
+    // and the per-tab full-study decode that causes multi-tab OS freezes. The
+    // vertical scrollbar is download-driven (see hooks.ts SKM_BULK_DOWNLOADED) so it
+    // does NOT stick when decode pauses. Default OFF — turn on to A/B, flip off to
+    // instantly return to full-eager-decode behaviour.
+    boundedDecode: false,
   },
-
+ 
+   
+ 
   studyPrefetcher: {
   // Disabled while skmBulkLoader is ON — the bulk driver loads the full series,
   // so the old per-slice prefetcher would only race it and cause network
@@ -208,7 +266,7 @@ window.config = {
   // otherwise nothing eagerly loads the series and the centre spinner stalls
   // when the progress bar completes (the regression that reappeared). Keep this
   // = !skmBulkLoader.enabled: exactly one of the two loads the full series.
-  enabled: true,
+  enabled: false,
   // Prefetch ONLY the series currently open in the viewport (active series).
   // With our StudyPrefetcherService change the active series is first in the
   // prefetch list, so displaySetsCount:1 = active series only — it loads fully
@@ -219,7 +277,7 @@ window.config = {
   displaySetsCount: 1,
   // Raised 20 → 48 to match maxNumRequests.prefetch (pipeline-feed fix 2026-09-28).
   // ORIGINAL: maxNumPrefetchRequests: 20,
-  maxNumPrefetchRequests: 48,
+  maxNumPrefetchRequests:20,
   order: 'closest',            // load nearest-to-current slice first, then outward
   // Give the first (visible) image a clear runway before the background prefetch
   // flood starts, so time-to-first-image stays low instead of the first image
@@ -239,7 +297,7 @@ window.config = {
   // Keep it near the level proven safe against the storage share.
   skmConcurrentPanesMaxRequests: 96,
   },
-
+ 
   // Hard cap on the Cornerstone image cache (decoded pixel data held in
   // browser memory). Without this the cache grows unbounded as a radiologist
   // scrolls a huge CT (6,000+ slices), climbing past Chrome's ~4 GB tab limit
@@ -262,24 +320,23 @@ window.config = {
   // free RAM), so pick this ceiling for the fleet's guaranteed-min spec.
   // Value is in BYTES (8 * 1024^3).
   maxCacheSize: 6442450944,
-
-
-
+ 
+ 
   showStudyList: true,
   showLoadingIndicator: true,
   showWarningMessageForCrossOrigin: false,
   showCPUFallbackMessage: true,
-
+ 
   // RadiAnt-style: a mouse action (scroll/drag/click) on an unselected pane
   // acts immediately AND makes that pane active, in one step - instead of
   // the OHIF default, where the first interaction on an unselected pane is
   // swallowed just to activate it, and the user has to repeat the same
   // scroll/drag a second time to actually do anything.
   activateViewportBeforeInteraction: false,
-
+ 
   // RadiAnt-style: patient name, MRN, sex, age always visible — no click required
   showPatientInfo: 'visibleReadOnly',
-
+ 
   // Default is 'standard', which pops up "Track measurements for this
   // series?" the moment a radiologist draws their first Length/Bidirectional/
   // etc. measurement - interrupting mid-workflow to ask a question most
@@ -287,7 +344,7 @@ window.config = {
   // and just tracks automatically, without disabling measurement/report
   // functionality the way 'none' would.
   measurementTrackingMode: 'simplified',
-
+ 
   whiteLabeling: {
     createLogoComponentFn: function (React) {
       return React.createElement(
@@ -308,7 +365,7 @@ window.config = {
       );
     },
   },
-
+ 
   dataSources: [
     {
       namespace: '@ohif/extension-default.dataSourcesModule.dicomweb',
@@ -316,15 +373,22 @@ window.config = {
       configuration: dataSourceConfiguration,
     },
   ],
-
+ 
   defaultDataSourceName: 'dicomweb',
-
+ 
   investigationalUseDialog: {
     option: 'never',
   },
-
+ 
   // When opened from PACS workstation with Modality= in URL, sidebar stays on primary study.
   customizationService: {
+	    // SKM-FIX: Hide the confusing blue fill and percentage badge from the vertical scrollbar!
+    // It will now function strictly as a clean, normal scrollbar.
+	  'viewportScrollbar.showLoadedEndpoints': false,
+   //  viewportScrollbar.showLoadedFill': false,
+   //   'viewportScrollbar.showViewedFill': false,
+      'viewportScrollbar.showLoadingPattern': false,
+    //  'viewportScrollbar.showPercentBadge': false,
     'studyBrowser.studyMode': 'primary',
     // PET: use hot colormap + SUV-friendly window presets (matches OHIF PT defaults)
     // NOTE: this whole key replaces (not merges with) the extension's default -
