@@ -467,6 +467,7 @@ export default async function init({
     /* fall back to the configured value */
   }
   if (effectiveCacheSize) {
+    // Base (single-tab) cap.
     cornerstone.cache.setMaxCacheSize(effectiveCacheSize);
     // eslint-disable-next-line no-console
     console.log(
@@ -476,6 +477,99 @@ export default async function init({
       (navigator as any).deviceMemory,
       'GB)'
     );
+
+    // SKM 2026-10-02 (P1.3): divide the cache budget across OPEN TABS so N tabs of
+    // large studies cannot sum past system RAM — the multi-tab OS-freeze fix. Each
+    // tab caps Cornerstone's cache at baseCap / liveTabs (floored at 1 GB), with the
+    // live-tab count maintained over a same-origin BroadcastChannel and the cap
+    // recomputed whenever a tab opens or closes. Gated by
+    // appConfig.skmBulkLoader.multiTabCacheSplit (default on). Best-effort: any
+    // failure leaves the single-tab cap above in place.
+    // TO REVERT: set multiTabCacheSplit:false (each tab keeps the full cap).
+    try {
+      const splitEnabled = (appConfig as any)?.skmBulkLoader?.multiTabCacheSplit !== false;
+      if (splitEnabled && typeof BroadcastChannel !== 'undefined') {
+        const baseCap = effectiveCacheSize;
+        const FLOOR = 1024 * 1024 * 1024; // never divide below 1 GB
+        const myId = Math.random().toString(36).slice(2) + '-' + Date.now();
+        const peers = new Map<string, number>(); // peerId -> last-seen ms
+        const ch = new BroadcastChannel('skm-pacs-tabs');
+        const liveCount = () => {
+          const cutoff = Date.now() - 12000; // drop peers silent >12s (crashed tabs)
+          peers.forEach((t, id) => {
+            if (t < cutoff) {
+              peers.delete(id);
+            }
+          });
+          return peers.size + 1; // include this tab
+        };
+        const applyCap = () => {
+          const n = liveCount();
+          const cap = Math.max(FLOOR, Math.floor(baseCap / n));
+          try {
+            cornerstone.cache.setMaxCacheSize(cap);
+          } catch (e) {
+            /* noop */
+          }
+          // eslint-disable-next-line no-console
+          console.log('[SKM] cache cap split across', n, 'tab(s) =', Math.round(cap / 1048576), 'MB');
+        };
+        ch.onmessage = (ev: any) => {
+          const d = ev?.data;
+          if (!d || !d.id || d.id === myId) {
+            return;
+          }
+          if (d.type === 'hello') {
+            peers.set(d.id, Date.now());
+            try {
+              ch.postMessage({ type: 'ack', id: myId });
+            } catch (e) {
+              /* noop */
+            }
+            applyCap();
+          } else if (d.type === 'ack' || d.type === 'heartbeat') {
+            peers.set(d.id, Date.now());
+            applyCap();
+          } else if (d.type === 'bye') {
+            peers.delete(d.id);
+            applyCap();
+          }
+        };
+        try {
+          ch.postMessage({ type: 'hello', id: myId });
+        } catch (e) {
+          /* noop */
+        }
+        const hb = window.setInterval(() => {
+          try {
+            ch.postMessage({ type: 'heartbeat', id: myId });
+          } catch (e) {
+            /* noop */
+          }
+          applyCap();
+        }, 5000);
+        window.addEventListener('pagehide', () => {
+          try {
+            ch.postMessage({ type: 'bye', id: myId });
+          } catch (e) {
+            /* noop */
+          }
+          try {
+            window.clearInterval(hb);
+          } catch (e) {
+            /* noop */
+          }
+          try {
+            ch.close();
+          } catch (e) {
+            /* noop */
+          }
+        });
+        applyCap();
+      }
+    } catch (e) {
+      /* multi-tab split is best-effort; the single-tab cap above stays in place */
+    }
   }
   // ── end SKM ─────────────────────────────────────────────────────────────
 
