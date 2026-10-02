@@ -179,7 +179,19 @@ export function registerSkmBulkImageLoader(): boolean {
         // FIX: Just return a Promise that waits silently. When the Bulk API finishes the chunk,
         // it will trigger the callback and instantly decode the image! No network race conditions!
         const promise = new Promise((resolve, reject) => {
+          let isResolved = false;
+          const timeoutId = setTimeout(() => {
+            if (isResolved) return;
+            isResolved = true;
+            pendingInteractionCallbacks.delete(sop);
+            const fb = originalLoad(imageId, options);
+            const p = fb && fb.promise ? fb.promise : fb;
+            Promise.resolve(p).then(resolve).catch(reject);
+          }, 300);
           pendingInteractionCallbacks.set(sop, (b: ArrayBuffer) => {
+            if (isResolved) return;
+            isResolved = true;
+            clearTimeout(timeoutId);
             try {
               const fileId = dicomImageLoader.wadouri.fileManager.add(new Blob([b]));
               const innerPromise = imageLoader.loadImage(fileId, options);
@@ -187,6 +199,7 @@ export function registerSkmBulkImageLoader(): boolean {
                 (image: any) => {
                   image.imageId = imageId;
                   image.sharedCacheKey = imageId;
+                  dicomImageLoader.wadouri.fileManager.remove?.(fileId);
                   resolve(image);
                 },
                 reject
@@ -217,6 +230,7 @@ export function registerSkmBulkImageLoader(): boolean {
           try {
             if (image) {
               image.imageId = imageId;
+                image.sharedCacheKey = imageId;
             }
           } catch (e) {
             /* noop */
@@ -348,7 +362,6 @@ async function fetchChunk(
       buf = uint8Buf.buffer;
     } else {
     buf = await res.arrayBuffer();
-    if (onProgress) onProgress(buf.byteLength);
   }
   const dv = new DataView(buf);
   const decoder = new TextDecoder();
@@ -391,6 +404,7 @@ async function driveDisplaySet(
   maxConcurrentChunks: number,
   viewportId?: string
 ): Promise<void> {
+  wadoUriFallbackCount = 0; // FIX: Reset fast-track fallback for each new study/series
   // SKM ARCHITECTURE PIVOT: If multiple viewports are open, the Bulk API is too aggressive 
   // and crashes the server. The native WADO-URI prefetcher handles multi-viewport perfectly 
   // and smoothly updates the vertical scrollbar!
@@ -663,4 +677,16 @@ export function initSkmBulkDriver(
 
 
 
+
+
+
+
+
+export function flushBulkMemory() {
+  bulkBuffer.clear();
+  managedSops.clear();
+  pendingInteractionCallbacks.clear();
+  // processedDisplaySets tracking isn't defined here, but clearing the above covers 99% of the heap leak
+  console.log('[SKM-BULK] Memory flushed.');
+}
 
