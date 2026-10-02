@@ -28,7 +28,7 @@
  */
 
 // eslint-disable-next-line
-import { imageLoader, cache } from '@cornerstonejs/core';
+import { imageLoader, cache, eventTarget } from '@cornerstonejs/core';
 import dicomImageLoader from '@cornerstonejs/dicom-image-loader';
 
 type BulkConfig = {
@@ -50,6 +50,17 @@ type BulkConfig = {
    * never-flush behaviour.
    */
   flushOnStudyClose?: boolean;
+  /**
+   * SKM 2026-10-02 (P2): when true, stop eagerly decoding the ENTIRE study into
+   * Cornerstone's cache. The driver downloads every chunk (so the loading bar still
+   * reaches 100%), but pauses background DECODE once the cache is near its cap —
+   * remaining slices decode on-demand (from retained bulkBuffer bytes, or wadouri if
+   * evicted) when the doctor scrolls to them. This eliminates the CACHE_SIZE_EXCEEDED
+   * churn on very large / multi-tab sessions (bounded working-set, RadiAnt-style).
+   * Requires the download-driven progress bar (see hooks.ts SKM_BULK_DOWNLOADED) so
+   * the bar does not stick when decode pauses. Default OFF — A/B before enabling.
+   */
+  boundedDecode?: boolean;
 };
 
 // sopUID -> raw DICOM file bytes, held only until Cornerstone has decoded the
@@ -419,7 +430,8 @@ async function driveDisplaySet(
   storagePath: string,
   chunkSize: number,
   maxConcurrentChunks: number,
-  viewportId?: string
+  viewportId?: string,
+  boundedDecode = false
 ): Promise<void> {
   wadoUriFallbackCount = 0; // FIX: Reset fast-track fallback for each new study/series
   // SKM ARCHITECTURE PIVOT: If multiple viewports are open, the Bulk API is too aggressive 
@@ -533,10 +545,44 @@ async function driveDisplaySet(
           }
           if (gotData) {
             updateProgress();
+            // SKM 2026-10-02 (P2): announce each DOWNLOADED slice so the vertical
+            // scrollbar can advance on download instead of decode — this lets the
+            // bounded decode below pause without the bar sticking. Only dispatched in
+            // bounded mode (default mode keeps its decode-driven bar unchanged).
+            if (boundedDecode) {
+              for (const id of my) {
+                const s = extractSop(id);
+                if (s && bulkBuffer.has(s)) {
+                  try {
+                    eventTarget.dispatchEvent(
+                      new CustomEvent('SKM_BULK_DOWNLOADED', { detail: { imageId: id } })
+                    );
+                  } catch (e) {
+                    /* non-fatal: bar just won't advance for this slice */
+                  }
+                }
+              }
+            }
             // Gentle background decode: Decode 1 slice at a time with a tiny delay.
             // This completely eliminates UI freezes and fills the vertical scrollbar dynamically!
             (async () => {
               for (const id of my) {
+                // SKM 2026-10-02 (P2): bounded working-set decode. Stop force-decoding
+                // once Cornerstone's cache is near its cap; the remaining slices stay as
+                // raw bytes in bulkBuffer and decode on-demand when scrolled to. This is
+                // what prevents the LRU-vs-decoder race (CACHE_SIZE_EXCEEDED churn) on
+                // huge/multi-tab studies. User scrolling (priority 100) always preempts.
+                if (boundedDecode) {
+                  try {
+                    const max = (cache as any).getMaxCacheSize?.() || 0;
+                    const cur = (cache as any).getCacheSize?.() || 0;
+                    if (max > 0 && cur / max > 0.85) {
+                      break; // cache nearly full → leave the rest for on-demand decode
+                    }
+                  } catch (e) {
+                    /* if the cache API shape differs, fall through to normal decode */
+                  }
+                }
                 if (!cache.getImageLoadObject(id)) {
                   // Use a low priority so user scrolling (priority 100) instantly preempts this!
                   await imageLoader.loadAndCacheImage(id, { priority: -5, requestType: 'prefetch' }).catch(() => {});
@@ -576,6 +622,7 @@ export function initSkmBulkDriver(
   const chunkSize = config?.chunkSize ?? 30;
   const maxConcurrentChunks = config?.maxConcurrentChunks ?? 4;
     const takeoverDelay = config?.takeoverDelay ?? 150;
+  const boundedDecode = config?.boundedDecode === true; // SKM P2: default OFF
 
   // SKM 2026-10-02 (P1.1): free bulk state for any study no longer open in a
   // viewport. Selective (per displaySet) and only ever targets CLOSED studies,
@@ -674,7 +721,7 @@ export function initSkmBulkDriver(
         setTimeout(() => {
         // eslint-disable-next-line no-console
         console.log(`[SKM-BULK] bulk-loading ${imageIds.length} slices for ${dsUID}`);
-        driveDisplaySet(imageIds, storagePath, chunkSize, maxConcurrentChunks, activeViewportId).catch(e => {
+        driveDisplaySet(imageIds, storagePath, chunkSize, maxConcurrentChunks, activeViewportId, boundedDecode).catch(e => {
           // eslint-disable-next-line no-console
           console.warn('[SKM-BULK] driver error', e);
         });
