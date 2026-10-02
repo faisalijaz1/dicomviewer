@@ -166,6 +166,13 @@ export function useLoadedSliceBytes({
     clearByte: clearLoadedByte,
   } = loadedState;
 
+  // SKM 2026-10-02 (P2): indices marked "downloaded" by the bulk loader
+  // (SKM_BULK_DOWNLOADED). These stay lit on the bar even if Cornerstone's LRU later
+  // evicts their decoded copy, so bounded-decode mode cannot make the bar regress.
+  // Empty unless the bulk loader is running in boundedDecode mode, so default
+  // (decode-driven) behaviour is completely unchanged.
+  const bulkDownloadedRef = useRef<Set<number>>(new Set());
+
   /**
    * Keeps the loaded byte array in sync with Cornerstone cache: seed from cache whenever stack /
    * mode / slice count changes, then subscribe so cache add/remove updates stay incremental.
@@ -173,6 +180,8 @@ export function useLoadedSliceBytes({
    */
   useEffect(() => {
     if (isFullMode && numberOfSlices) {
+      // SKM P2: realign the download-marks set with THIS stack before reseeding.
+      bulkDownloadedRef.current.clear();
       resetLoaded(bytes => {
         for (let i = 0; i < bytes.length; i++) {
           const imageId = imageIds[i];
@@ -198,6 +207,21 @@ export function useLoadedSliceBytes({
       }
     };
 
+    // SKM 2026-10-02 (P2): a slice whose BYTES have arrived (bulk download complete)
+    // counts as "available" on the bar even before/without decode — so the bar tracks
+    // download and reaches 100% while bounded-decode keeps memory in check.
+    const markDownloaded = (event: any) => {
+      const imageId = event?.detail?.imageId;
+      if (!imageId) {
+        return;
+      }
+      const index = imageIdToIndex.get(imageId);
+      if (index !== undefined) {
+        bulkDownloadedRef.current.add(index);
+        setLoadedByte(index);
+      }
+    };
+
     const markRemoved = event => {
       const imageId = getImageIdFromCacheEvent(event);
       if (!imageId) {
@@ -205,14 +229,22 @@ export function useLoadedSliceBytes({
       }
       const index = imageIdToIndex.get(imageId);
       if (index !== undefined) {
+        // SKM P2: keep the bar MONOTONIC — a downloaded slice stays lit even when
+        // Cornerstone's LRU evicts its decoded copy (bounded-decode). Its bytes are
+        // still available (bulkBuffer) or re-fetchable, so it is not "lost".
+        if (bulkDownloadedRef.current.has(index)) {
+          return;
+        }
         clearLoadedByte(index);
       }
     };
 
+    eventTarget.addEventListener('SKM_BULK_DOWNLOADED', markDownloaded);
     eventTarget.addEventListener(Enums.Events.IMAGE_CACHE_IMAGE_ADDED, markLoaded);
     eventTarget.addEventListener(Enums.Events.IMAGE_CACHE_IMAGE_REMOVED, markRemoved);
 
     return () => {
+      eventTarget.removeEventListener('SKM_BULK_DOWNLOADED', markDownloaded);
       eventTarget.removeEventListener(Enums.Events.IMAGE_CACHE_IMAGE_ADDED, markLoaded);
       eventTarget.removeEventListener(Enums.Events.IMAGE_CACHE_IMAGE_REMOVED, markRemoved);
     };
