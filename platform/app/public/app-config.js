@@ -253,6 +253,14 @@ window.config = {
     // does NOT stick when decode pauses. Default OFF — turn on to A/B, flip off to
     // instantly return to full-eager-decode behaviour.
     boundedDecode: false,
+    // SKM 2026-10-02 (P1.3): divide the Cornerstone cache budget across open tabs
+    // (same-origin BroadcastChannel) so N tabs of large studies can't sum past
+    // system RAM — the fix for the multi-tab OS freeze on 16 GB machines. Each tab
+    // caps at (adaptiveCap / liveTabs), floored at 1 GB, recomputed as tabs open/
+    // close. Default ON. Set false to give every tab the full cap (old behaviour).
+    // Best paired with boundedDecode:true so the shrink evicts gracefully and the
+    // download-driven bar stays monotonic.
+    multiTabCacheSplit: true,
   },
  
    
