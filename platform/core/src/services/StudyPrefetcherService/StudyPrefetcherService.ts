@@ -88,6 +88,26 @@ type StudyPrefetcherConfig = {
   /** Half-size of the windowed-prefetch window, in slices. Default 250. */
   windowRadius?: number;
   /**
+   * ── SKM 2026-10-04 (Option B — skmPriorityPrefetch) ─────────────────────
+   * Priority-aware, direction-adaptive scheduling. When true, the DECODE window
+   * is ordered center-out with an ahead-bias in the scroll direction (nearest +
+   * ahead slices load first), and a FAR JUMP (|Δindex| > farJumpThreshold)
+   * cancels stale queued/in-flight prefetch and rebuilds the window around the new
+   * centre — so background work around slice 80 never competes with a jump to 1500.
+   * The currently-displayed slice is still loaded by the viewport at 'interaction'
+   * priority (untouched); this only reorders the background 'prefetch' lane.
+   * Set false to restore the previous index-order windowed prefetch.
+   */
+  priorityPrefetch?: boolean;
+  /** Priority-2 immediate neighbourhood half-size (loaded first, center-out). Default 15. */
+  immediateRadius?: number;
+  /** Ahead-biased DECODE window: slices ahead of the doctor (scroll direction). Default = windowRadius. */
+  windowAhead?: number;
+  /** Ahead-biased DECODE window: slices behind the doctor. Default = windowRadius. */
+  windowBehind?: number;
+  /** |Δindex| beyond which a move is treated as a far jump (cancel stale work). Default 120. */
+  farJumpThreshold?: number;
+  /**
    * ── SKM 2026-09-28: concurrent multi-viewport prefetch ──────────────────
    * When multiple panes/studies are open (Ctrl+click), interleave every open
    * series' image requests (round-robin) so all viewport progress bars advance
@@ -161,6 +181,25 @@ class StudyPrefetcherService extends PubSubService {
   private _inflightRequests = new Map<string, ImageRequest>();
   // SKM 2026-10-03 (W2-full): throttle timer for scroll-driven re-windowing.
   private _rewindowTimer: ReturnType<typeof setTimeout> | null = null;
+  // SKM 2026-10-04 (Option B): last known centre index + inferred scroll direction
+  // (+1 forward / -1 backward) of the active series, for ahead-biased ordering and
+  // far-jump detection. _schedulerStats is a read-only snapshot for skmTelemetry.
+  private _lastCenter: number | null = null;
+  private _direction = 1;
+  private _schedulerStats = {
+    requestedCenterIndex: 0,
+    prefetchCenterIndex: 0,
+    direction: 1,
+    prefetchAhead: 0,
+    prefetchBehind: 0,
+    queueSize: 0,
+    inflight: 0,
+    lastJumpDelta: 0,
+    farJumps: 0,
+    cancelledRequests: 0,
+    p2Immediate: 0,
+    p3Directional: 0,
+  };
   private _isRunning = false;
   private _startDelayTimer: ReturnType<typeof setTimeout> | null = null;
   private _displaySetLoadingStates = new Map<string, DisplaySetLoadingState>();
@@ -614,14 +653,59 @@ class StudyPrefetcherService extends PubSubService {
     return imageIds.slice(start, end);
   }
 
-  // Scroll-driven re-window: Cornerstone fires a new-image event as the doctor
-  // scrolls; the extension forwards it here (see initStudyPrefetcherService). We
-  // throttle, then rebuild the prefetch window around the new centre. Cheap no-op
-  // unless windowedPrefetch is on and the service is running.
+  // The centre index of the active (focused-first) series, or 0.
+  private _getActiveCenter(): number {
+    const activeUID = this._activeDisplaySetsInstanceUIDs?.[0];
+    if (!activeUID) {
+      return 0;
+    }
+    return this._getCenterIndexForDisplaySet(activeUID);
+  }
+
+  // Scroll-driven re-window: Cornerstone fires STACK_NEW_IMAGE / IMAGE_LOADED as the
+  // doctor scrolls; the extension forwards it here (see initStudyPrefetcherService).
+  // We infer scroll direction, detect FAR JUMPS (cancel stale work immediately), and
+  // rebuild the window around the new centre. Cheap no-op unless windowedPrefetch is
+  // on and the service is running.
   public onActiveSliceChanged(): void {
     if (!this.config.windowedPrefetch || !this._isRunning) {
       return;
     }
+
+    // ── SKM 2026-10-04 (Option B): direction + far-jump handling ──────────────
+    if (this.config.priorityPrefetch) {
+      const center = this._getActiveCenter();
+      if (this._lastCenter !== null) {
+        const delta = center - this._lastCenter;
+        if (delta !== 0) {
+          this._direction = delta > 0 ? 1 : -1;
+        }
+        const farJumpThreshold =
+          typeof this.config.farJumpThreshold === 'number' ? this.config.farJumpThreshold : 120;
+        if (Math.abs(delta) > farJumpThreshold) {
+          // FAR JUMP: cancel stale queued + in-flight prefetch so background work
+          // around the OLD position can't compete with the new target, then rebuild
+          // the window around the new centre right away (not throttled).
+          this._schedulerStats.lastJumpDelta = delta;
+          this._schedulerStats.farJumps++;
+          this._cancelPendingPrefetch();
+          this._lastCenter = center;
+          if (this._rewindowTimer) {
+            clearTimeout(this._rewindowTimer);
+            this._rewindowTimer = null;
+          }
+          try {
+            this._loadDisplaySets();
+            this._sendNextRequests();
+          } catch (e) {
+            /* best-effort far-jump re-window */
+          }
+          return;
+        }
+      }
+      this._lastCenter = center;
+    }
+
     if (this._rewindowTimer) {
       return;
     }
@@ -634,6 +718,104 @@ class StudyPrefetcherService extends PubSubService {
         /* best-effort re-window */
       }
     }, 200);
+  }
+
+  // SKM 2026-10-04 (Option B): drop queued prefetch and abort in-flight so a far jump
+  // isn't held behind stale work. In-flight requests are marked aborted (their
+  // completion handlers no-op); the pool's queued (not-yet-dispatched) prefetch stack
+  // is cleared too. Pending-request state is rebuilt by the caller.
+  private _cancelPendingPrefetch(): void {
+    this._schedulerStats.cancelledRequests +=
+      this._pendingRequests.length + this._inflightRequests.size;
+    this._pendingRequests = [];
+    this._inflightRequests.forEach(req => (req.aborted = true));
+    this._inflightRequests.clear();
+    try {
+      this.imageLoadPoolManager.clearRequestStack(this.requestType);
+    } catch (e) {
+      /* best-effort */
+    }
+  }
+
+  // SKM 2026-10-04 (Option B): order a display set's windowed imageIds center-out with
+  // an ahead-bias in the current scroll direction — the Priority 2 (immediate
+  // neighbourhood) slices first, then Priority 3 (directional) outward. Returns the
+  // ordered subset to enqueue. Falls back to the plain contiguous window when
+  // priorityPrefetch is off.
+  private _orderedWindowImageIds(displaySet: DisplaySet, imageIds: string[]): string[] {
+    if (!this.config.priorityPrefetch || !this.config.windowedPrefetch || imageIds.length <= 1) {
+      return this._windowImageIds(displaySet, imageIds);
+    }
+    const center = this._getCenterIndexForDisplaySet(displaySet.displaySetInstanceUID);
+    const immediate =
+      typeof this.config.immediateRadius === 'number' ? this.config.immediateRadius : 15;
+    const radius =
+      typeof this.config.windowRadius === 'number' && this.config.windowRadius > 0
+        ? this.config.windowRadius
+        : 250;
+    const ahead = typeof this.config.windowAhead === 'number' ? this.config.windowAhead : radius;
+    const behind = typeof this.config.windowBehind === 'number' ? this.config.windowBehind : radius;
+    const dir = this._direction >= 0 ? 1 : -1;
+    const last = imageIds.length - 1;
+    const aheadEnd = Math.min(last, center + (dir > 0 ? ahead : behind));
+    const behindEnd = Math.max(0, center - (dir > 0 ? behind : ahead));
+    const start = Math.min(center, behindEnd);
+    const end = Math.max(center, aheadEnd);
+
+    const ordered: string[] = [];
+    const push = (idx: number) => {
+      if (idx >= 0 && idx <= last && imageIds[idx]) {
+        ordered.push(imageIds[idx]);
+      }
+    };
+    // Priority 2: immediate neighbourhood, center-out.
+    push(center);
+    for (let d = 1; d <= immediate; d++) {
+      push(center + d * dir);
+      push(center - d * dir);
+    }
+    // Priority 3: directional remainder, ahead-biased (2 ahead : 1 behind).
+    let a = center + immediate * dir + dir;
+    let b = center - immediate * dir - dir;
+    const aStep = dir;
+    const bStep = -dir;
+    while (a >= start - 0 && a <= end) {
+      push(a);
+      push(a + aStep);
+      a += aStep * 2;
+      if (b >= start && b <= end) {
+        push(b);
+        b += bStep;
+      }
+    }
+    // De-dupe while preserving order (immediate overlaps directional at the seam).
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const id of ordered) {
+      if (!seen.has(id)) {
+        seen.add(id);
+        result.push(id);
+      }
+    }
+    // Record for telemetry.
+    this._schedulerStats.prefetchCenterIndex = center;
+    this._schedulerStats.direction = dir;
+    this._schedulerStats.prefetchAhead = Math.abs(aheadEnd - center);
+    this._schedulerStats.prefetchBehind = Math.abs(center - behindEnd);
+    return result;
+  }
+
+  // SKM 2026-10-04 (Option B): publish a read-only scheduler snapshot for skmTelemetry
+  // (no behaviour change; the extension's telemetry reads window.__skmScheduler).
+  private _publishStats(): void {
+    try {
+      this._schedulerStats.requestedCenterIndex = this._getActiveCenter();
+      this._schedulerStats.queueSize = this._pendingRequests.length;
+      this._schedulerStats.inflight = this._inflightRequests.size;
+      (globalThis as any).__skmScheduler = { ...this._schedulerStats };
+    } catch (e) {
+      /* noop */
+    }
   }
 
   private _updateDisplaySetLoadingProgress(displaySetLoadingState: DisplaySetLoadingState) {
@@ -716,7 +898,8 @@ class StudyPrefetcherService extends PubSubService {
     const perSet = displaySets.map(ds => ({
       displaySetInstanceUID: ds.displaySetInstanceUID,
       // SKM 2026-10-03 (W2-full): window each pane's series around its current slice.
-      imageIds: this._windowImageIds(ds, this._getImageIdsForDisplaySet(ds)),
+      // SKM 2026-10-04 (Option B): center-out ahead-biased order when priorityPrefetch on.
+      imageIds: this._orderedWindowImageIds(ds, this._getImageIdsForDisplaySet(ds)),
     }));
     const maxLen = perSet.reduce((m, s) => Math.max(m, s.imageIds.length), 0);
     for (let i = 0; i < maxLen; i++) {
@@ -919,13 +1102,23 @@ class StudyPrefetcherService extends PubSubService {
 
       inflightRequests.set(imageId, imageRequest);
     });
+
+    // SKM 2026-10-04 (Option B): publish a read-only scheduler snapshot for telemetry.
+    if (this.config.priorityPrefetch) {
+      this._publishStats();
+    }
   }
 
   private _enqueueDisplaySetImagesRequests(displaySet: DisplaySet) {
     const { displaySetInstanceUID } = displaySet;
     // SKM 2026-10-03 (W2-full): only the window around the current slice when
     // windowedPrefetch is on (otherwise the full series, as before).
-    const imageIds = this._windowImageIds(displaySet, this._getImageIdsForDisplaySet(displaySet));
+    // SKM 2026-10-04 (Option B): when priorityPrefetch is on, the window is ordered
+    // center-out with an ahead-bias so the nearest + scroll-ahead slices load first.
+    const imageIds = this._orderedWindowImageIds(
+      displaySet,
+      this._getImageIdsForDisplaySet(displaySet)
+    );
 
     imageIds.forEach(imageId => {
       if (this.cache.isImageCached(imageId)) {
@@ -973,6 +1166,11 @@ class StudyPrefetcherService extends PubSubService {
       return;
     }
     this._isRunning = false;
+
+    // SKM 2026-10-04 (Option B): reset direction tracking so the next series doesn't
+    // read the previous centre as a far jump.
+    this._lastCenter = null;
+    this._direction = 1;
 
     // Mark all inflight requests as aborted before clearing the map.
     this._inflightRequests.forEach(inflightRequest => (inflightRequest.aborted = true));

@@ -50,6 +50,10 @@ type Counters = {
   longTaskMs: number;
   jsHeapSamplesMB: number[];
   cacheSizeSamplesMB: number[];
+  // SKM 2026-10-04 (Option B): UX responsiveness.
+  scrollToDisplayMs: number[]; // STACK_VIEWPORT_SCROLL → STACK_NEW_IMAGE latency
+  spinnerStarts: number; // displays that crossed the 50 ms spinner threshold
+  spinnerMs: number; // approx cumulative visible-spinner time
 };
 
 function freshCounters(): Counters {
@@ -67,6 +71,9 @@ function freshCounters(): Counters {
     longTaskMs: 0,
     jsHeapSamplesMB: [],
     cacheSizeSamplesMB: [],
+    scrollToDisplayMs: [],
+    spinnerStarts: 0,
+    spinnerMs: 0,
   };
 }
 
@@ -79,6 +86,36 @@ function p95(arr: number[]): number {
   }
   const s = [...arr].sort((a, b) => a - b);
   return Math.round(s[Math.min(s.length - 1, Math.floor(s.length * 0.95))]);
+}
+function p50(arr: number[]): number {
+  if (!arr.length) {
+    return 0;
+  }
+  const s = [...arr].sort((a, b) => a - b);
+  return Math.round(s[Math.floor(s.length * 0.5)]);
+}
+// SKM 2026-10-04 (Option B): read the read-only scheduler snapshot the
+// StudyPrefetcherService publishes (window.__skmScheduler). Returns {} if absent.
+function schedulerSnapshot(): Record<string, number> {
+  try {
+    const s = (globalThis as any).__skmScheduler;
+    if (!s) {
+      return {};
+    }
+    return {
+      sched_center: s.prefetchCenterIndex ?? 0,
+      sched_requested: s.requestedCenterIndex ?? 0,
+      sched_direction: s.direction ?? 0,
+      sched_ahead: s.prefetchAhead ?? 0,
+      sched_behind: s.prefetchBehind ?? 0,
+      sched_queue: s.queueSize ?? 0,
+      sched_inflight: s.inflight ?? 0,
+      sched_farJumps: s.farJumps ?? 0,
+      sched_cancelled: s.cancelledRequests ?? 0,
+    };
+  } catch (e) {
+    return {};
+  }
 }
 function max(arr: number[]): number {
   return arr.length ? Math.round(Math.max(...arr)) : 0;
@@ -148,6 +185,49 @@ export function initSkmTelemetry(): void {
     /* event names differ in this version — report() still has WADO + jank + RAM */
   }
 
+  // ── SKM 2026-10-04 (Option B): scroll → display latency + spinner ─────────
+  // Mirror the loading indicator: it shows "Loading…" if STACK_NEW_IMAGE doesn't
+  // follow STACK_VIEWPORT_SCROLL within 50 ms (ViewportImageSliceLoadingIndicator).
+  // We time that gap per viewport element to measure real perceived responsiveness.
+  const SPINNER_THRESHOLD_MS = 50;
+  const wireElement = (element: any) => {
+    if (!element || element.__skmTelemetryWired) {
+      return;
+    }
+    element.__skmTelemetryWired = true;
+    let scrollT0 = 0;
+    let pending = false;
+    const E: any = Enums.Events as any;
+    const scrollName = E.STACK_VIEWPORT_SCROLL || 'CORNERSTONE_STACK_VIEWPORT_SCROLL';
+    const newImageName = E.STACK_NEW_IMAGE || 'CORNERSTONE_STACK_NEW_IMAGE';
+    element.addEventListener(scrollName, () => {
+      scrollT0 = performance.now();
+      pending = true;
+    });
+    element.addEventListener(newImageName, () => {
+      if (!pending) {
+        return;
+      }
+      pending = false;
+      const dt = performance.now() - scrollT0;
+      if (dt >= 0 && dt < 60000) {
+        c.scrollToDisplayMs.push(dt);
+        if (dt > SPINNER_THRESHOLD_MS) {
+          c.spinnerStarts++;
+          c.spinnerMs += dt - SPINNER_THRESHOLD_MS;
+        }
+      }
+    });
+  };
+  try {
+    const elEnabled = (Enums.Events as any).ELEMENT_ENABLED || 'CORNERSTONE_ELEMENT_ENABLED';
+    eventTarget.addEventListener(elEnabled, (evt: any) => {
+      wireElement(evt?.detail?.element);
+    });
+  } catch (e) {
+    /* element events unavailable — latency rows will be empty */
+  }
+
   // ── Periodic RAM + cache-size sampling ────────────────────────────────────
   const sample = () => {
     try {
@@ -189,6 +269,15 @@ export function initSkmTelemetry(): void {
       jsHeapMB_peak: max(c.jsHeapSamplesMB),
       longTasks_gt50ms: c.longTasks,
       longTaskTotalMs: Math.round(c.longTaskMs),
+      // SKM 2026-10-04 (Option B) — UX responsiveness
+      displayLatencyP50ms: p50(c.scrollToDisplayMs),
+      displayLatencyP95ms: p95(c.scrollToDisplayMs),
+      displaySamples: c.scrollToDisplayMs.length,
+      spinnerStarts: c.spinnerStarts,
+      spinnerTotalMs: Math.round(c.spinnerMs),
+      spinnerRatePct: pct(c.spinnerStarts, c.scrollToDisplayMs.length),
+      // SKM 2026-10-04 (Option B) — scheduler snapshot (from StudyPrefetcherService)
+      ...schedulerSnapshot(),
     };
   };
 

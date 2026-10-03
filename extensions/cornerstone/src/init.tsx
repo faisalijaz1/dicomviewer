@@ -474,7 +474,10 @@ export default async function init({
   } catch (e) {
     /* fall back to the configured value */
   }
-  if (effectiveCacheSize) {
+  // SKM 2026-10-04 (Option B — skmBoundedDecodeCache): master gate. enabled:false runs
+  // the decode cache UNBOUNDED (old behaviour) for an A/B; default on.
+  const boundedDecodeEnabled = (appConfig as any)?.skmBoundedDecodeCache?.enabled !== false;
+  if (effectiveCacheSize && boundedDecodeEnabled) {
     // Base (single-tab) cap.
     cornerstone.cache.setMaxCacheSize(effectiveCacheSize);
     // eslint-disable-next-line no-console

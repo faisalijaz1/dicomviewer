@@ -25,7 +25,7 @@
  */
 
 // eslint-disable-next-line
-import { cache, eventTarget } from '@cornerstonejs/core';
+import { cache, eventTarget, Enums } from '@cornerstonejs/core';
 
 export type SkmWarmerConfig = {
   enabled?: boolean;
@@ -38,6 +38,25 @@ export type SkmWarmerConfig = {
   /** ms to wait after a series becomes active before warming (lets the first image
    *  and the initial decode window win the network first). Default 1500. */
   startDelayMs?: number;
+  /**
+   * ── SKM 2026-10-04 (Option B — skmMovingWindow) ─────────────────────────
+   * When true, warm a MOVING, ahead-biased window of compressed bytes around the
+   * doctor's current slice (into the browser HTTP disk cache, no decode) instead of
+   * the whole series front-to-back. The window follows the doctor and a far jump
+   * abandons the old window and restarts at the new position. This is what makes a
+   * far jump land on already-downloaded bytes → decode-only → no spinner — without
+   * decoding (RAM stays bounded by the separate Cornerstone cap). Set false to
+   * restore whole-series warming.
+   */
+  movingWindow?: boolean;
+  /** Moving window: slices to warm AHEAD of the doctor (scroll direction). Default 1000. */
+  ahead?: number;
+  /** Moving window: slices to warm BEHIND the doctor. Default 250. */
+  behind?: number;
+  /** Throttle (ms) between scroll-driven window re-centres. Default 250. */
+  rethrottleMs?: number;
+  /** |Δindex| beyond which the moving window abandons and restarts (far jump). Default 120. */
+  farJumpThreshold?: number;
 };
 
 /** Event the monotonic progress bar listens to (see scrollbar hooks). */
@@ -47,6 +66,10 @@ let warmerInitialized = false;
 // displaySetInstanceUIDs we've already started warming (avoid re-warming on every
 // grid event). A re-opened series is skipped — its bytes are already in the cache.
 const warmedDisplaySets = new Set<string>();
+// SKM 2026-10-04 (Option B): imageIds whose bytes we've already fetched into the HTTP
+// cache this session, so the sliding moving-window doesn't re-request the same slice
+// each time it re-centres. (If the HTTP cache later evicts, the on-demand path refetches.)
+const warmedImageIds = new Set<string>();
 // Bumps whenever the active series changes; in-flight warmers compare against it
 // and abort when stale, so a series/study switch cancels the previous warm.
 let currentRunId = 0;
@@ -162,6 +185,11 @@ export function initSkmWarmer(
         if (!imageId) {
           continue;
         }
+        // Already fetched this session → bytes are in the HTTP cache; don't re-request.
+        if (warmedImageIds.has(imageId)) {
+          emitAvailable(imageId);
+          continue;
+        }
         // Already decoded in Cornerstone → it's available; mark it without a fetch.
         try {
           if (cache.getImageLoadObject && cache.getImageLoadObject(imageId)) {
@@ -184,6 +212,7 @@ export function initSkmWarmer(
             // Read the body to completion so the cache entry is fully stored, then
             // discard it (no persistent heap).
             await res.arrayBuffer().catch(() => undefined);
+            warmedImageIds.add(imageId);
             emitAvailable(imageId);
           } else if (res.body) {
             await res.body.cancel().catch(() => undefined);
@@ -242,12 +271,154 @@ export function initSkmWarmer(
     }
   };
 
+  // ── SKM 2026-10-04 (Option B): moving-window warmer ───────────────────────
+  // Warm an ahead-biased window of compressed bytes around the doctor's current
+  // slice (HTTP disk cache, no decode), following the doctor and restarting on a
+  // far jump. This replaces whole-series warming when config.movingWindow is true.
+  const mwAhead = Math.max(0, config?.ahead ?? 1000);
+  const mwBehind = Math.max(0, config?.behind ?? 250);
+  const mwThrottle = Math.max(50, config?.rethrottleMs ?? 250);
+  const mwFarJump = Math.max(1, config?.farJumpThreshold ?? 120);
+  let mwLastCenter: number | null = null;
+  let mwDirection = 1;
+  let mwTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const mwGetActiveSeries = (): { dsUID: string; imageIds: string[]; viewportId: string } | null => {
+    try {
+      const { viewportGridService, displaySetService } = servicesManager.services;
+      const state = viewportGridService.getState();
+      const viewportId = state?.activeViewportId;
+      if (!viewportId) {
+        return null;
+      }
+      const activeViewport = state.viewports?.get(viewportId);
+      const dsUID = activeViewport?.displaySetInstanceUIDs?.[0];
+      if (!dsUID) {
+        return null;
+      }
+      const displaySet = displaySetService
+        .getActiveDisplaySets()
+        .find((ds: any) => ds.displaySetInstanceUID === dsUID);
+      if (!displaySet) {
+        return null;
+      }
+      const dataSource = extensionManager.getActiveDataSource()[0];
+      const imageIds: string[] = dataSource.getImageIdsForDisplaySet(displaySet);
+      if (!imageIds || imageIds.length === 0) {
+        return null;
+      }
+      return { dsUID, imageIds, viewportId };
+    } catch (e) {
+      return null;
+    }
+  };
+
+  const mwGetCenter = (viewportId: string): number => {
+    try {
+      const csvs = servicesManager.services.cornerstoneViewportService;
+      const vp = csvs?.getCornerstoneViewport?.(viewportId);
+      const idx = vp?.getCurrentImageIdIndex?.();
+      return typeof idx === 'number' && idx >= 0 ? idx : 0;
+    } catch (e) {
+      return 0;
+    }
+  };
+
+  // Ordered, ahead-biased list of imageIds to warm around `center` (center-out).
+  const mwOrderedWindow = (imageIds: string[], center: number, dir: number): string[] => {
+    const last = imageIds.length - 1;
+    const aEnd = Math.min(last, center + (dir > 0 ? mwAhead : mwBehind));
+    const bEnd = Math.max(0, center - (dir > 0 ? mwBehind : mwAhead));
+    const out: string[] = [];
+    const push = (i: number) => {
+      if (i >= 0 && i <= last && imageIds[i]) {
+        out.push(imageIds[i]);
+      }
+    };
+    push(center);
+    let a = center + dir;
+    let b = center - dir;
+    // 2 ahead : 1 behind interleave.
+    while (a >= bEnd - 0 && a <= aEnd) {
+      push(a);
+      push(a + dir);
+      a += dir * 2;
+      if (b >= bEnd && b <= aEnd) {
+        push(b);
+        b -= dir;
+      }
+    }
+    // drain any remaining behind side
+    while (b >= bEnd && b <= aEnd) {
+      push(b);
+      b -= dir;
+    }
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const id of out) {
+      if (!seen.has(id)) {
+        seen.add(id);
+        result.push(id);
+      }
+    }
+    return result;
+  };
+
+  const mwRecenter = () => {
+    const s = mwGetActiveSeries();
+    if (!s) {
+      return;
+    }
+    const center = mwGetCenter(s.viewportId);
+    if (mwLastCenter !== null && center !== mwLastCenter) {
+      mwDirection = center > mwLastCenter ? 1 : -1;
+    }
+    // Skip tiny moves that don't meaningfully change the window (cheap).
+    if (mwLastCenter !== null && Math.abs(center - mwLastCenter) < 3 && currentRunId > 0) {
+      return;
+    }
+    mwLastCenter = center;
+    currentRunId++; // abandon any in-flight warm from the previous centre
+    const myRun = currentRunId;
+    const list = mwOrderedWindow(s.imageIds, center, mwDirection);
+    // eslint-disable-next-line no-console
+    console.log(
+      `[SKM-WARMER] moving window @${center} dir=${mwDirection} warming ${list.length} slices`
+    );
+    warmSeries(list, myRun).catch(() => undefined);
+  };
+
+  const mwSchedule = () => {
+    if (mwTimer) {
+      return;
+    }
+    mwTimer = setTimeout(() => {
+      mwTimer = null;
+      mwRecenter();
+    }, mwThrottle);
+  };
+
   try {
     const { viewportGridService } = servicesManager.services;
     const E = viewportGridService.EVENTS;
-    viewportGridService.subscribe(E.VIEWPORTS_READY, run);
-    viewportGridService.subscribe(E.ACTIVE_VIEWPORT_ID_CHANGED, run);
-    viewportGridService.subscribe(E.GRID_STATE_CHANGED, run);
+    if (config?.movingWindow) {
+      // Follow the doctor: re-centre on viewport/grid changes and on every slice change.
+      viewportGridService.subscribe(E.VIEWPORTS_READY, mwSchedule);
+      viewportGridService.subscribe(E.ACTIVE_VIEWPORT_ID_CHANGED, mwSchedule);
+      viewportGridService.subscribe(E.GRID_STATE_CHANGED, mwSchedule);
+      try {
+        const stackNewImageName =
+          (Enums.Events as any).STACK_NEW_IMAGE || 'CORNERSTONE_STACK_NEW_IMAGE';
+        eventTarget.addEventListener(stackNewImageName, mwSchedule);
+      } catch (e) {
+        /* older core: viewport/grid events still drive re-centring */
+      }
+    } else {
+      // Whole-series warming (previous behaviour).
+      viewportGridService.subscribe(E.VIEWPORTS_READY, run);
+      viewportGridService.subscribe(E.ACTIVE_VIEWPORT_ID_CHANGED, run);
+      viewportGridService.subscribe(E.GRID_STATE_CHANGED, run);
+    }
   } catch (e) {
     // eslint-disable-next-line no-console
     console.warn('[SKM-WARMER] failed to subscribe', e);

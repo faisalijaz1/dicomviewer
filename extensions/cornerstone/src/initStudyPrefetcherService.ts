@@ -31,12 +31,43 @@ function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager) {
       eventTarget.addEventListener(csEvents.IMAGE_LOADED, onImageLoaded);
       eventTarget.addEventListener(csEvents.IMAGE_LOAD_FAILED, onImageLoadFailed);
 
+      // SKM 2026-10-04 (Option B): re-centre the prefetch window the INSTANT the
+      // displayed slice changes (scroll or far jump), instead of waiting for an
+      // IMAGE_LOADED completion. STACK_NEW_IMAGE fires on every slice change and is
+      // dispatched on the global eventTarget. onActiveSliceChanged is a cheap no-op
+      // unless windowedPrefetch is on, and it internally throttles / far-jump-cancels.
+      const onStackNewImage = () => {
+        try {
+          studyPrefetcherService.onActiveSliceChanged?.();
+        } catch (e) {
+          /* best-effort */
+        }
+      };
+      let stackNewImageName: string | undefined;
+      try {
+        stackNewImageName = (csEvents as any).STACK_NEW_IMAGE || 'CORNERSTONE_STACK_NEW_IMAGE';
+        eventTarget.addEventListener(stackNewImageName, onStackNewImage);
+      } catch (e) {
+        /* older core: fall back to IMAGE_LOADED-driven re-centring only */
+      }
+
       return [
         {
           unsubscribe: () => eventTarget.removeEventListener(csEvents.IMAGE_LOADED, onImageLoaded)
         },
         {
           unsubscribe: () => eventTarget.removeEventListener(csEvents.IMAGE_LOAD_FAILED, onImageLoadFailed)
+        },
+        {
+          unsubscribe: () => {
+            try {
+              if (stackNewImageName) {
+                eventTarget.removeEventListener(stackNewImageName, onStackNewImage);
+              }
+            } catch (e) {
+              /* noop */
+            }
+          }
         },
       ]
     }
