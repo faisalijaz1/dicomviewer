@@ -75,6 +75,19 @@ type StudyPrefetcherConfig = {
   /** Cache fill fraction (0..1) at which bounded prefetch pauses. Default 0.9. */
   boundedPrefetchHighWater?: number;
   /**
+   * SKM 2026-10-03 (W2-full): windowed (working-set) decode, RadiAnt-style. When
+   * true, the prefetcher only loads a WINDOW of slices around each visible
+   * viewport's CURRENT index (± windowRadius) instead of the whole series, and
+   * re-windows as the doctor scrolls (far slices are evicted by the LRU). This
+   * bounds decoded RAM to ~2·windowRadius slices PER VIEWPORT regardless of study
+   * size, so several big series across viewports/tabs fit a modest cache without
+   * CACHE_SIZE_EXCEEDED / thrash / freeze. Set false to restore full-series
+   * prefetch (previous behaviour).
+   */
+  windowedPrefetch?: boolean;
+  /** Half-size of the windowed-prefetch window, in slices. Default 250. */
+  windowRadius?: number;
+  /**
    * ── SKM 2026-09-28: concurrent multi-viewport prefetch ──────────────────
    * When multiple panes/studies are open (Ctrl+click), interleave every open
    * series' image requests (round-robin) so all viewport progress bars advance
@@ -146,6 +159,8 @@ class StudyPrefetcherService extends PubSubService {
   private _activeDisplaySetsInstanceUIDs: string[] = [];
   private _pendingRequests: ImageRequest[] = [];
   private _inflightRequests = new Map<string, ImageRequest>();
+  // SKM 2026-10-03 (W2-full): throttle timer for scroll-driven re-windowing.
+  private _rewindowTimer: ReturnType<typeof setTimeout> | null = null;
   private _isRunning = false;
   private _startDelayTimer: ReturnType<typeof setTimeout> | null = null;
   private _displaySetLoadingStates = new Map<string, DisplaySetLoadingState>();
@@ -227,6 +242,11 @@ class StudyPrefetcherService extends PubSubService {
       clearTimeout(this._startDelayTimer);
       this._startDelayTimer = null;
     }
+    // SKM 2026-10-03 (W2-full): cancel a pending scroll re-window.
+    if (this._rewindowTimer) {
+      clearTimeout(this._rewindowTimer);
+      this._rewindowTimer = null;
+    }
     this._stopPrefetching();
   }
 
@@ -241,6 +261,10 @@ class StudyPrefetcherService extends PubSubService {
       if (!this._inflightRequests.get(imageId)) {
         this._sendNextRequests();
       }
+      // SKM 2026-10-03 (W2-full): a load completing after the doctor scrolls (an
+      // on-demand slice) is our cue to re-centre the prefetch window on the new
+      // position. Throttled + no-op unless windowedPrefetch is on.
+      this.onActiveSliceChanged();
     };
 
     const fnImageLoadedEventListener = evt => {
@@ -541,6 +565,77 @@ class StudyPrefetcherService extends PubSubService {
     return dataSource.getImageIdsForDisplaySet(displaySet);
   }
 
+  // ── SKM 2026-10-03 (W2-full): windowed decode helpers ─────────────────────
+  // The current image index of whatever viewport is showing this display set
+  // (0 if we can't determine it). Used to centre the prefetch window.
+  private _getCenterIndexForDisplaySet(displaySetInstanceUID: string): number {
+    try {
+      const services: any = this._servicesManager.services;
+      const viewportGridService = services?.viewportGridService;
+      const cornerstoneViewportService = services?.cornerstoneViewportService;
+      if (!viewportGridService || !cornerstoneViewportService) {
+        return 0;
+      }
+      const state = viewportGridService.getState();
+      const viewports = state?.viewports;
+      if (!viewports || typeof viewports.forEach !== 'function') {
+        return 0;
+      }
+      let center = 0;
+      viewports.forEach((vp: any, viewportId: string) => {
+        if (vp?.displaySetInstanceUIDs?.includes?.(displaySetInstanceUID)) {
+          const csVp = cornerstoneViewportService.getCornerstoneViewport?.(viewportId);
+          const idx = csVp?.getCurrentImageIdIndex?.();
+          if (typeof idx === 'number' && idx >= 0) {
+            center = idx;
+          }
+        }
+      });
+      return center;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  // Trim a display set's imageIds to a window around the viewport's current slice
+  // when windowedPrefetch is on; otherwise return them unchanged. Returns the
+  // windowed slice PLUS the absolute start offset (so callers can map back if needed).
+  private _windowImageIds(displaySet: DisplaySet, imageIds: string[]): string[] {
+    if (!this.config.windowedPrefetch || imageIds.length <= 1) {
+      return imageIds;
+    }
+    const radius =
+      typeof this.config.windowRadius === 'number' && this.config.windowRadius > 0
+        ? this.config.windowRadius
+        : 250;
+    const center = this._getCenterIndexForDisplaySet(displaySet.displaySetInstanceUID);
+    const start = Math.max(0, center - radius);
+    const end = Math.min(imageIds.length, center + radius + 1);
+    return imageIds.slice(start, end);
+  }
+
+  // Scroll-driven re-window: Cornerstone fires a new-image event as the doctor
+  // scrolls; the extension forwards it here (see initStudyPrefetcherService). We
+  // throttle, then rebuild the prefetch window around the new centre. Cheap no-op
+  // unless windowedPrefetch is on and the service is running.
+  public onActiveSliceChanged(): void {
+    if (!this.config.windowedPrefetch || !this._isRunning) {
+      return;
+    }
+    if (this._rewindowTimer) {
+      return;
+    }
+    this._rewindowTimer = setTimeout(() => {
+      this._rewindowTimer = null;
+      try {
+        this._loadDisplaySets();
+        this._sendNextRequests();
+      } catch (e) {
+        /* best-effort re-window */
+      }
+    }, 200);
+  }
+
   private _updateDisplaySetLoadingProgress(displaySetLoadingState: DisplaySetLoadingState) {
     const { numInstances, loadedImageIds, failedImageIds } = displaySetLoadingState;
     const loadingProgress = (loadedImageIds.size + failedImageIds.size) / numInstances;
@@ -600,6 +695,13 @@ class StudyPrefetcherService extends PubSubService {
     // together, instead of loading one series fully before the next starts.
     // Guarded by config.skmConcurrentPanes (default false = original behaviour).
     // TO REMOVE: delete this if/else and keep only the original forEach line below.
+    // SKM 2026-10-03 (W2-full): on each (re)window, drop stale queued requests so
+    // the window is rebuilt around the CURRENT centre. In-flight requests continue;
+    // already-cached/in-flight slices are skipped by the enqueue methods, so no
+    // duplicate work. Only when windowedPrefetch is on.
+    if (this.config.windowedPrefetch) {
+      this._pendingRequests = [];
+    }
     if (this.config.skmConcurrentPanes && displaySetsToPrefetch.length > 1) {
       this._enqueueDisplaySetImagesInterleaved(displaySetsToPrefetch);
     } else {
@@ -613,7 +715,8 @@ class StudyPrefetcherService extends PubSubService {
   private _enqueueDisplaySetImagesInterleaved(displaySets: DisplaySet[]) {
     const perSet = displaySets.map(ds => ({
       displaySetInstanceUID: ds.displaySetInstanceUID,
-      imageIds: this._getImageIdsForDisplaySet(ds),
+      // SKM 2026-10-03 (W2-full): window each pane's series around its current slice.
+      imageIds: this._windowImageIds(ds, this._getImageIdsForDisplaySet(ds)),
     }));
     const maxLen = perSet.reduce((m, s) => Math.max(m, s.imageIds.length), 0);
     for (let i = 0; i < maxLen; i++) {
@@ -624,6 +727,9 @@ class StudyPrefetcherService extends PubSubService {
         }
         if (this.cache.isImageCached(imageId)) {
           this._moveImageIdToLoadedSet(imageId);
+          continue;
+        }
+        if (this._inflightRequests.has(imageId)) {
           continue;
         }
         this._pendingRequests.push({
@@ -817,14 +923,19 @@ class StudyPrefetcherService extends PubSubService {
 
   private _enqueueDisplaySetImagesRequests(displaySet: DisplaySet) {
     const { displaySetInstanceUID } = displaySet;
-    const imageIds = this._getImageIdsForDisplaySet(displaySet);
+    // SKM 2026-10-03 (W2-full): only the window around the current slice when
+    // windowedPrefetch is on (otherwise the full series, as before).
+    const imageIds = this._windowImageIds(displaySet, this._getImageIdsForDisplaySet(displaySet));
 
     imageIds.forEach(imageId => {
       if (this.cache.isImageCached(imageId)) {
         this._moveImageIdToLoadedSet(imageId);
         return;
       }
-
+      // Skip already in-flight so scroll-driven re-windowing can't double-dispatch.
+      if (this._inflightRequests.has(imageId)) {
+        return;
+      }
       this._pendingRequests.push({
         displaySetInstanceUID,
         imageId,

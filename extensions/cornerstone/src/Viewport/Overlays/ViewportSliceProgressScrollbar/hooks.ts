@@ -151,6 +151,7 @@ export function useLoadedSliceBytes({
   imageIds,
   imageIdToIndex,
   loadedBatchIntervalMs,
+  monotonic = false,
 }: {
   isFullMode: boolean;
   numberOfSlices: number;
@@ -158,6 +159,11 @@ export function useLoadedSliceBytes({
   imageIds: string[];
   imageIdToIndex: Map<string, number>;
   loadedBatchIntervalMs: number;
+  // SKM 2026-10-03 (W5): when true, a slice that was ever loaded stays lit on the
+  // bar even after the LRU evicts it. Required with windowed decode (W2) — only a
+  // window is resident at a time, so a cache-driven bar would otherwise regress as
+  // you scroll. The bar becomes cumulative progress instead of live-cache state.
+  monotonic?: boolean;
 }) {
   const loadedState = useByteArray(numberOfSlices || 0, loadedBatchIntervalMs);
   const {
@@ -223,15 +229,21 @@ export function useLoadedSliceBytes({
     };
 
     const markRemoved = event => {
+      // SKM 2026-10-03 (W5): in monotonic mode (windowed decode), never un-light a
+      // slice on eviction — only a window is resident at a time, so clearing would
+      // make the bar visibly regress as the doctor scrolls. The bar reads as
+      // cumulative "ever-loaded" progress instead of live-cache state.
+      if (monotonic) {
+        return;
+      }
       const imageId = getImageIdFromCacheEvent(event);
       if (!imageId) {
         return;
       }
       const index = imageIdToIndex.get(imageId);
       if (index !== undefined) {
-        // SKM P2: keep the bar MONOTONIC — a downloaded slice stays lit even when
-        // Cornerstone's LRU evicts its decoded copy (bounded-decode). Its bytes are
-        // still available (bulkBuffer) or re-fetchable, so it is not "lost".
+        // SKM P2: keep the bar MONOTONIC for bulk-downloaded slices even when
+        // Cornerstone's LRU evicts their decoded copy (bytes still available).
         if (bulkDownloadedRef.current.has(index)) {
           return;
         }
@@ -257,6 +269,7 @@ export function useLoadedSliceBytes({
     resetLoaded,
     setLoadedByte,
     clearLoadedByte,
+    monotonic,
   ]);
 
   return loadedState;
