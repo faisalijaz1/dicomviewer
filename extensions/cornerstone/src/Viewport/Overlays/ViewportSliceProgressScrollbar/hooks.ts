@@ -252,11 +252,16 @@ export function useLoadedSliceBytes({
     };
 
     eventTarget.addEventListener('SKM_BULK_DOWNLOADED', markDownloaded);
+    // SKM 2026-10-03 (W3): the background warmer announces each DOWNLOADED slice here
+    // (same {detail:{imageId}} shape) so the bar climbs to 100% on download while
+    // decode stays windowed. Marked monotonically — never cleared on eviction.
+    eventTarget.addEventListener('SKM_SLICE_AVAILABLE', markDownloaded);
     eventTarget.addEventListener(Enums.Events.IMAGE_CACHE_IMAGE_ADDED, markLoaded);
     eventTarget.addEventListener(Enums.Events.IMAGE_CACHE_IMAGE_REMOVED, markRemoved);
 
     return () => {
       eventTarget.removeEventListener('SKM_BULK_DOWNLOADED', markDownloaded);
+      eventTarget.removeEventListener('SKM_SLICE_AVAILABLE', markDownloaded);
       eventTarget.removeEventListener(Enums.Events.IMAGE_CACHE_IMAGE_ADDED, markLoaded);
       eventTarget.removeEventListener(Enums.Events.IMAGE_CACHE_IMAGE_REMOVED, markRemoved);
     };
