@@ -35,6 +35,10 @@ import { registerSkmBulkImageLoader, initSkmBulkDriver } from './skmBulkImageLoa
 // cache for the active series so the progress bar reaches 100% while decode stays
 // windowed. No-op unless appConfig.skmWarmer.enabled. See skmBackgroundWarmer.ts.
 import { initSkmWarmer } from './skmBackgroundWarmer';
+// SKM 2026-10: read-only in-app telemetry (cache hit ratio, eviction, RAM, jank,
+// CACHE_SIZE_EXCEEDED) surfaced via the DevTools console — the measurement harness
+// for validating the caching/RAM architecture. No-op unless appConfig.skmTelemetry.enabled.
+import { initSkmTelemetry } from './skmTelemetry';
 import interleaveCenterLoader from './utils/interleaveCenterLoader';
 import nthLoader from './utils/nthLoader';
 import interleaveTopToBottom from './utils/interleaveTopToBottom';
@@ -723,6 +727,12 @@ export default async function init({
   // it never decodes or touches the stack/MPR. No-op when the flag is off.
   if (appConfig?.skmWarmer?.enabled) {
     initSkmWarmer(servicesManager, extensionManager, appConfig.skmWarmer);
+  }
+
+  // SKM 2026-10: in-app telemetry harness (read-only). Enable during the validation
+  // phase; call skmTelemetry.report() in the DevTools console. No host scripting.
+  if (appConfig?.skmTelemetry?.enabled) {
+    initSkmTelemetry();
   }
 
   measurementService.subscribe(measurementService.EVENTS.JUMP_TO_MEASUREMENT, evt => {
