@@ -192,7 +192,49 @@ export function initSkmTelemetry(): void {
     };
   };
 
+  // ── Phase-1 cap-sweep knob ────────────────────────────────────────────────
+  // Lets the tester sweep 512 / 768 / 1024 MB WITHOUT rebuilding (locked-down
+  // workstations can't rebuild). Changes ONLY the Cornerstone decode-cache ceiling;
+  // when the cap is lowered below the current fill, Cornerstone evicts LRU down to it
+  // immediately. Works cleanly because Phase 1 sets multiTabCacheSplit:false, so no
+  // BroadcastChannel heartbeat in init.tsx fights this value. Call per tab.
+  //     window.skmSetCacheCap(512)   // then re-run reset()/scroll test/report()
+  //     window.skmGetCacheCap()      // -> { capMB, usedMB, fillPct }
+  const setCap = (mb: number) => {
+    try {
+      const bytes = Math.round(mb * 1048576);
+      (cache as any).setMaxCacheSize(bytes);
+      const usedMB = Math.round(((cache as any).getCacheSize?.() || 0) / 1048576);
+      // eslint-disable-next-line no-console
+      console.log(
+        `[SKM-TELEMETRY] cache cap set to ${mb} MB (now using ${usedMB} MB). ` +
+          `Run skmTelemetry.reset(), do your scroll/jump test, then skmTelemetry.report().`
+      );
+      return { capMB: mb, usedMB };
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn('[SKM-TELEMETRY] setCap failed', e);
+      return null;
+    }
+  };
+  const getCap = () => {
+    try {
+      const capMB = Math.round(((cache as any).getMaxCacheSize?.() || 0) / 1048576);
+      const usedMB = Math.round(((cache as any).getCacheSize?.() || 0) / 1048576);
+      const r = { capMB, usedMB, fillPct: capMB ? Math.round((100 * usedMB) / capMB) : 0 };
+      // eslint-disable-next-line no-console
+      console.log('[SKM-TELEMETRY] cache', r);
+      return r;
+    } catch (e) {
+      return null;
+    }
+  };
+  (window as any).skmSetCacheCap = setCap;
+  (window as any).skmGetCacheCap = getCap;
+
   (window as any).skmTelemetry = {
+    setCacheCap: setCap,
+    getCacheCap: getCap,
     report() {
       const r = buildReport();
       // eslint-disable-next-line no-console
