@@ -47,6 +47,19 @@ function ViewportSliceProgressScrollbar({
   // viewportScrollbar.* toggles above/below. Default on.
   const showPercentBadge =
     customizationService.getCustomization('viewportScrollbar.showPercentBadge') !== false;
+  // SKM 2026-10-03 (W5): monotonic progress — a slice that was ever loaded stays lit
+  // even after the LRU evicts it. Required with windowed decode (studyPrefetcher.
+  // windowedPrefetch), where only a window is resident so a live-cache bar would
+  // regress as the doctor scrolls. Default on. Set
+  // viewportScrollbar.monotonicProgress:false to restore live-cache behaviour.
+  const monotonicProgress =
+    customizationService.getCustomization('viewportScrollbar.monotonicProgress') !== false;
+  // SKM 2026-10-04 (Option B): the "download frontier" — a thin marker showing how far
+  // AHEAD of the doctor the background moving-window warmer has downloaded, so the bar
+  // communicates the background download position (not just the available range + thumb).
+  // Default on; set viewportScrollbar.showDownloadFrontier:false to hide.
+  const showDownloadFrontier =
+    customizationService.getCustomization('viewportScrollbar.showDownloadFrontier') !== false;
   const viewedDwellMs =
     typeof viewedDwellMsRaw === 'number' && viewedDwellMsRaw >= 0 ? viewedDwellMsRaw : 0;
   const loadedBatchIntervalMs =
@@ -94,6 +107,7 @@ function ViewportSliceProgressScrollbar({
     imageIds,
     imageIdToIndex,
     loadedBatchIntervalMs,
+    monotonic: monotonicProgress,
   });
 
   const { bytes: viewedBytes, version: viewedVersion } = useViewedSliceBytes({
@@ -151,6 +165,41 @@ function ViewportSliceProgressScrollbar({
   }, [loadedVersion, numberOfSlices]);
 
   const showBadge = isFullMode && showPercentBadge && isLoading;
+
+  // SKM 2026-10-04 (Option B): the furthest contiguously-downloaded slice AHEAD of the
+  // doctor's current position — the leading edge of the moving download window. Computed
+  // from the same loadedBytes source as the fill, so it never disagrees with it. -1 when
+  // there is no meaningful reach ahead (current slice not yet downloaded, or none ahead).
+  const downloadFrontier = useMemo(() => {
+    if (!numberOfSlices || numberOfSlices <= 1) {
+      return -1;
+    }
+    const cur = imageIndex || 0;
+    if (!loadedBytes[cur]) {
+      return -1;
+    }
+    // Leading edge of the contiguous downloaded run on each side of the doctor; the
+    // frontier is the further edge (the ahead-biased moving-window side).
+    let up = cur;
+    while (up + 1 < numberOfSlices && loadedBytes[up + 1]) {
+      up++;
+    }
+    let down = cur;
+    while (down - 1 >= 0 && loadedBytes[down - 1]) {
+      down--;
+    }
+    return up - cur >= cur - down ? up : down;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadedVersion is the change
+    // signal for the mutable loadedBytes array (same reference each render).
+  }, [loadedVersion, imageIndex, numberOfSlices]);
+
+  const showFrontier =
+    isFullMode &&
+    showDownloadFrontier &&
+    downloadFrontier >= 0 &&
+    downloadFrontier !== (imageIndex || 0) &&
+    numberOfSlices > 1;
+  const frontierTopPct = showFrontier ? (downloadFrontier / (numberOfSlices - 1)) * 100 : 0;
 
   if (!numberOfSlices || numberOfSlices <= 1) {
     return null;
@@ -266,6 +315,29 @@ function ViewportSliceProgressScrollbar({
             />
           )}
         </SmartScrollbar>
+        {/*
+          SKM 2026-10-04 (Option B): download-frontier marker — a thin bright line at the
+          leading edge of the contiguous downloaded run ahead of the doctor, i.e. "the
+          background warmer has downloaded up to here." Distinct from the available-range
+          fill (cyan block) and the position thumb. pointer-events-none so it never
+          intercepts a scrollbar drag. TO REVERT: delete this block + the showFrontier/
+          downloadFrontier calc + the showDownloadFrontier customization.
+        */}
+        {showFrontier && (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute left-0 right-0 z-10"
+            style={{
+              top: `${frontierTopPct}%`,
+              height: '2px',
+              transform: 'translateY(-1px)',
+              background: 'rgba(90,204,230,0.95)',
+              boxShadow: '0 0 6px 1px rgba(90,204,230,0.8)',
+              borderRadius: '1px',
+              transition: 'top 150ms ease-out',
+            }}
+          />
+        )}
       </div>
     </div>
   );
