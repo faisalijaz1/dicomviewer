@@ -63,6 +63,18 @@ type StudyPrefetcherConfig = {
    */
   prefetchStartDelayMs?: number;
   /**
+   * SKM 2026-10-03 (W2): bounded prefetch. When true (default), the background
+   * prefetcher PAUSES once the decoded cache passes `boundedPrefetchHighWater`
+   * (fraction, default 0.9) instead of flooding it — which is what overflowed a
+   * cache smaller than the series and threw Cornerstone's CACHE_SIZE_EXCEEDED. The
+   * slices beyond that point load on-demand as the doctor scrolls (Cornerstone
+   * evicts LRU to fit each one). Bounds decoded RAM to ~the cache cap regardless of
+   * study size. Set false to restore the old flood-the-whole-series behaviour.
+   */
+  boundedPrefetch?: boolean;
+  /** Cache fill fraction (0..1) at which bounded prefetch pauses. Default 0.9. */
+  boundedPrefetchHighWater?: number;
+  /**
    * ── SKM 2026-09-28: concurrent multi-viewport prefetch ──────────────────
    * When multiple panes/studies are open (Ctrl+click), interleave every open
    * series' image requests (round-robin) so all viewport progress bars advance
@@ -98,6 +110,8 @@ type PubSubServiceSubscription = { unsubscribe: () => any };
 
 interface ICache {
   isImageCached(imageId: string): boolean;
+  /** SKM 2026-10-03 (W2): decoded-cache fill fraction (0..1); optional/best-effort. */
+  getFillFraction?(): number;
 }
 
 interface IImageLoadPoolManager {
@@ -734,6 +748,23 @@ class StudyPrefetcherService extends PubSubService {
     // get called again when each of those requests are fulfilled.
     if (!this._isRunning) {
       return;
+    }
+
+    // SKM 2026-10-03 (W2): bounded prefetch. If the decoded cache is near its cap,
+    // STOP feeding the prefetch queue — flooding a cache smaller than the series is
+    // exactly what makes Cornerstone throw CACHE_SIZE_EXCEEDED (the popup). The
+    // remaining slices load on-demand as the doctor scrolls (interaction priority;
+    // Cornerstone evicts an old prefetched slice to fit each one). Pending requests
+    // stay queued and resume automatically if the cache frees. Best-effort: if the
+    // cache can't report its fill, this is a no-op and behaviour is unchanged.
+    if (this.config.boundedPrefetch !== false && typeof this.cache.getFillFraction === 'function') {
+      const highWater =
+        typeof this.config.boundedPrefetchHighWater === 'number'
+          ? this.config.boundedPrefetchHighWater
+          : 0.9;
+      if (this.cache.getFillFraction() >= highWater) {
+        return;
+      }
     }
 
     // NOTE: previously this returned early until the active display set was 100% loaded.
