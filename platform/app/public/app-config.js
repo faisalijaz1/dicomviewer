@@ -364,8 +364,19 @@ window.config = {
   // this is not "numerically huge" — the byte budget caps it); combined with on-demand decodes
   // the budget-based evictor KEEPS, the decoded working set reaches ~90% of the cap around the
   // doctor → far fewer re-decodes on revisits/jumps. ORIGINAL: 300/150.
-  windowAhead: 600,
-  windowBehind: 300,
+  // SKM 2026-10-06 (Fix 4): 600/300 → 6000/6000. The windowed prefetcher only decoded
+  // `windowAhead` slices past the current index, so background decode STOPPED at ~600 slices
+  // and the loading bar froze at ~14% (603/4403) on a series switch until the doctor scrolled
+  // (scrolling advanced the window → "scroll a little → resumes"). It also meant decoded fill
+  // never rose, so the eviction/orphan machinery never engaged. With the 4 GB cap + reactive
+  // evictor + boundedPrefetch(0.90) now bounding RAM, widen the window to span any clinical
+  // series so the WHOLE active series decodes in the background (bar → 100% with no scroll,
+  // RadiAnt-style), and a series switch pushes fill high enough for the evictor to reclaim the
+  // previous series. priorityPrefetch still orders it center-out ahead-biased and cancels stale
+  // work on a far jump. A series larger than the cap still pauses at boundedPrefetch and loads
+  // the remainder on scroll (bounded). ORIGINAL: windowAhead 600, windowBehind 300.
+  windowAhead: 6000,
+  windowBehind: 6000,
   farJumpThreshold: 120,
   order: 'closest',            // load nearest-to-current slice first, then outward
   // Give the first (visible) image a clear runway before the background prefetch
@@ -605,9 +616,14 @@ window.config = {
     // 300→600-ahead and 150→300-behind bands that the prefetcher was already fetching
     // via Cornerstone XHR → a guaranteed double-request band. Keeping these == the
     // prefetch window makes the warmer start strictly BEYOND the prefetcher's reach.
-    // ORIGINAL: nearSkipAhead 300, nearSkipBehind 150.
-    nearSkipAhead: 600,
-    nearSkipBehind: 300,
+    // SKM 2026-10-06 (Fix 4): matched to the widened prefetch window (6000/6000). The prefetcher
+    // now decodes the whole clinical series (and HTTP-caches its bytes via its own XHR), so the
+    // warmer must skip that whole band to avoid re-fetching the same slices (the double-fetch Fix
+    // 1 removed). For a series ≤ 6000 slices the warmer is therefore idle (prefetch covers it);
+    // for a larger series it byte-warms only the far tail beyond the decode window.
+    // ORIGINAL: nearSkipAhead 300/150 → 600/300 → this.
+    nearSkipAhead: 6000,
+    nearSkipBehind: 6000,
     concurrency: 4,
     globalConcurrency: 8,
     rethrottleMs: 250,
