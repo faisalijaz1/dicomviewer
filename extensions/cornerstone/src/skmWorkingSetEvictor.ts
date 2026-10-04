@@ -35,9 +35,24 @@ import { subscribeStackNewImage } from './utils/skmStackNewImage';
 
 export type SkmEvictionConfig = {
   enabled?: boolean;
-  /** Decoded slices to KEEP ahead of the doctor (scroll direction). Default 400. */
+  /**
+   * SKM 2026-10-04 (Phase B item 1): BUDGET-BASED working set. When true (default), the
+   * number of decoded slices kept around the doctor is computed from the decoded-cache
+   * budget (budgetFraction × maxCacheSize ÷ measured avg slice bytes), NOT a fixed window —
+   * so the decoded set fills the committed 768 MB budget (adapting to real slice size)
+   * without exceeding it, instead of under-using it (~350 MB) and forcing re-decode on fast
+   * scroll. Set false to use the fixed keepAhead/keepBehind window.
+   */
+  budgetBased?: boolean;
+  /** Fraction of maxCacheSize the decoded working set may fill. Default 0.9 (headroom below cap). */
+  budgetFraction?: number;
+  /** Of the budget, fraction allocated AHEAD (scroll direction). Default 0.65. */
+  aheadBias?: number;
+  /** Fallback avg decoded bytes/slice when the cache can't be measured yet. Default 524288 (~0.5 MB). */
+  avgSliceBytesEstimate?: number;
+  /** Fixed-window fallback (used when budgetBased is false): slices to KEEP ahead. Default 400. */
   keepAhead?: number;
-  /** Decoded slices to KEEP behind the doctor. Default 250. */
+  /** Fixed-window fallback: slices to KEEP behind. Default 250. */
   keepBehind?: number;
   /** Extra safety margin added on both sides of the keep-window. Default 50. */
   margin?: number;
@@ -60,12 +75,59 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
   }
   evictorInitialized = true;
 
+  const budgetBased = config?.budgetBased !== false;
+  const budgetFraction = Math.min(0.98, Math.max(0.1, config?.budgetFraction ?? 0.9));
+  const aheadBias = Math.min(0.9, Math.max(0.1, config?.aheadBias ?? 0.65));
+  const avgSliceBytesEstimate = Math.max(1, config?.avgSliceBytesEstimate ?? 524288);
   const keepAhead = Math.max(1, config?.keepAhead ?? 400);
   const keepBehind = Math.max(1, config?.keepBehind ?? 250);
   const margin = Math.max(0, config?.margin ?? 50);
   const maxEvictPerTick = Math.max(1, config?.maxEvictPerTick ?? 300);
   const throttleMs = Math.max(50, config?.throttleMs ?? 250);
   const skipWhenVolumePresent = config?.skipWhenVolumePresent !== false;
+
+  // Measure average decoded bytes/slice from the live cache (adapts to real slice size);
+  // fall back to the estimate before anything is decoded.
+  const measureAvgSliceBytes = (): number => {
+    try {
+      const ic = (cache as any)._imageCache;
+      const total = (cache as any).getCacheSize?.() || 0;
+      if (ic && typeof ic.forEach === 'function' && total > 0) {
+        let n = 0;
+        ic.forEach((ci: any) => {
+          if (ci && ci.sizeInBytes > 0) {
+            n++;
+          }
+        });
+        if (n > 0) {
+          return total / n;
+        }
+      }
+    } catch (e) {
+      /* fall through */
+    }
+    return avgSliceBytesEstimate;
+  };
+
+  // Budget-based per-viewport keep (slices), split ahead/behind by scroll direction. The
+  // total across all open stack viewports stays within budgetFraction × cap, so N panes share
+  // the budget instead of each demanding a full window.
+  const computeKeep = (dir: number, nStack: number): { ahead: number; behind: number } => {
+    if (!budgetBased) {
+      return {
+        ahead: dir >= 0 ? keepAhead : keepBehind,
+        behind: dir >= 0 ? keepBehind : keepAhead,
+      };
+    }
+    const capBytes = (cache as any).getMaxCacheSize?.() || 768 * 1048576;
+    const avg = measureAvgSliceBytes();
+    const totalSlices = Math.max(1, Math.floor((budgetFraction * capBytes) / avg));
+    const perViewport = Math.max(1, Math.floor(totalSlices / Math.max(1, nStack)));
+    const ahead = Math.max(1, Math.floor(perViewport * aheadBias));
+    const behind = Math.max(1, perViewport - ahead);
+    // Direction flips the ahead/behind allocation (keep more in the scroll direction).
+    return dir >= 0 ? { ahead, behind } : { ahead: behind, behind: ahead };
+  };
 
   let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -111,37 +173,50 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
         return; // MPR/3D session → leave memory to Cornerstone's volume management
       }
 
-      // Build the set of imageIds to KEEP (window around each stack viewport's current index).
-      const keep = new Set<string>();
-      let sawStack = false;
+      // First pass: collect the open STACK viewports (and update scroll direction) so the
+      // budget can be split across them.
+      const stackVps: { imageIds: string[]; idx: number }[] = [];
       viewports.forEach((_vpState: any, viewportId: string) => {
         const vp = csvs.getCornerstoneViewport?.(viewportId);
         if (!isStackViewport(vp)) {
           return;
         }
-        sawStack = true;
         const imageIds: string[] = vp.getImageIds() || [];
         if (!imageIds.length) {
           return;
         }
         const idx = vp.getCurrentImageIdIndex?.() ?? 0;
-        if (lastCenter !== null && idx !== lastCenter) {
-          direction = idx > lastCenter ? 1 : -1;
-        }
-        lastCenter = idx;
-        const ahead = direction >= 0 ? keepAhead : keepBehind;
-        const behind = direction >= 0 ? keepBehind : keepAhead;
-        const lo = Math.max(0, idx - behind - margin);
-        const hi = Math.min(imageIds.length - 1, idx + ahead + margin);
+        stackVps.push({ imageIds, idx });
+      });
+
+      if (!stackVps.length) {
+        return;
+      }
+
+      // Update direction from the first (active) viewport's centre.
+      const activeIdx = stackVps[0].idx;
+      if (lastCenter !== null && activeIdx !== lastCenter) {
+        direction = activeIdx > lastCenter ? 1 : -1;
+      }
+      lastCenter = activeIdx;
+
+      // Budget-based keep window (slices), shared across the open stack viewports.
+      const { ahead: keepAheadN, behind: keepBehindN } = computeKeep(direction, stackVps.length);
+
+      // Build the union keep-set (a slice kept by ANY viewport is never evicted).
+      const keep = new Set<string>();
+      let keepLo = Infinity;
+      let keepHi = -Infinity;
+      for (const { imageIds, idx } of stackVps) {
+        const lo = Math.max(0, idx - keepBehindN - margin);
+        const hi = Math.min(imageIds.length - 1, idx + keepAheadN + margin);
+        keepLo = Math.min(keepLo, lo);
+        keepHi = Math.max(keepHi, hi);
         for (let i = lo; i <= hi; i++) {
           if (imageIds[i]) {
             keep.add(imageIds[i]);
           }
         }
-      });
-
-      if (!sawStack) {
-        return;
       }
 
       // Evict decoded slices outside the union keep-set, bounded per tick.
@@ -194,6 +269,11 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
       const last = {
         center: lastCenter,
         direction,
+        keepAhead: keepAheadN,
+        keepBehind: keepBehindN,
+        keepLo: keepLo === Infinity ? 0 : keepLo,
+        keepHi: keepHi === -Infinity ? 0 : keepHi,
+        stackViewports: stackVps.length,
         protectedCount: keep.size,
         candidates,
         removed: evicted,
@@ -206,8 +286,10 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
       if (evicted > 0) {
         // eslint-disable-next-line no-console
         console.log(
-          `[SKM-EVICTOR] center=${lastCenter} protected=${keep.size} removed=${evicted} ` +
-            `absent=${alreadyAbsent} decodedMB ${sizeBeforeMB}→${sizeAfterMB} (total ${evictionCount})`
+          `[SKM-EVICTOR] center=${lastCenter} keep=[${keepLo === Infinity ? 0 : keepLo}..` +
+            `${keepHi === -Infinity ? 0 : keepHi}] (${keepBehindN}+${keepAheadN}×${stackVps.length}vp) ` +
+            `protected=${keep.size} removed=${evicted} decodedMB ${sizeBeforeMB}→${sizeAfterMB} ` +
+            `(total ${evictionCount})`
         );
       }
       // If we hit the per-tick cap there is more to purge → schedule a follow-up pass.
@@ -246,6 +328,9 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
 
   // eslint-disable-next-line no-console
   console.log(
-    `[SKM-EVICTOR] active working-set eviction on: keep ${keepBehind}+${keepAhead} (+${margin}) slices`
+    budgetBased
+      ? `[SKM-EVICTOR] active, BUDGET-BASED: fill ${Math.round(budgetFraction * 100)}% of cap, ` +
+          `aheadBias ${aheadBias}, margin ${margin} (keep window sized live from avg slice bytes)`
+      : `[SKM-EVICTOR] active, fixed window: keep ${keepBehind}+${keepAhead} (+${margin}) slices`
   );
 }

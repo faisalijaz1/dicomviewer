@@ -54,6 +54,9 @@ type Counters = {
   scrollToDisplayMs: number[]; // STACK_VIEWPORT_SCROLL → STACK_NEW_IMAGE latency
   spinnerStarts: number; // displays that crossed the 50 ms spinner threshold
   spinnerMs: number; // approx cumulative visible-spinner time
+  displayTotal: number; // total scroll→display events classified
+  decodedHits: number; // display ≤ 8 ms (slice already decoded → instant)
+  reDecodes: number; // display > 8 ms (re-decode / network needed)
 };
 
 function freshCounters(): Counters {
@@ -74,6 +77,9 @@ function freshCounters(): Counters {
     scrollToDisplayMs: [],
     spinnerStarts: 0,
     spinnerMs: 0,
+    displayTotal: 0,
+    decodedHits: 0,
+    reDecodes: 0,
   };
 }
 
@@ -116,6 +122,30 @@ function cacheKeyStats(): Record<string, number> {
     const purgeWrapperCalls = ps?.calls || 0;
     const purgeWrapperCleared = ps?.cleared || 0;
     return { sharedKeyImages, pureStackImages, volumesInCache, purgeWrapperCalls, purgeWrapperCleared };
+  } catch (e) {
+    return {};
+  }
+}
+
+// SKM Phase B: read the budget-based evictor's last-pass snapshot (window.__skmEvictorLast):
+// the protected keep range, per-viewport keep size, and the last decodedMB before→after.
+function evictorSnapshot(): Record<string, number> {
+  try {
+    const e = (globalThis as any).__skmEvictorLast;
+    if (!e) {
+      return {};
+    }
+    return {
+      evict_keepLo: e.keepLo ?? 0,
+      evict_keepHi: e.keepHi ?? 0,
+      evict_keepAhead: e.keepAhead ?? 0,
+      evict_keepBehind: e.keepBehind ?? 0,
+      evict_protected: e.protectedCount ?? 0,
+      evict_stackViewports: e.stackViewports ?? 0,
+      evict_lastRemoved: e.removed ?? 0,
+      evict_decodedBeforeMB: e.decodedBeforeMB ?? 0,
+      evict_decodedAfterMB: e.decodedAfterMB ?? 0,
+    };
   } catch (e) {
     return {};
   }
@@ -245,6 +275,7 @@ export function initSkmTelemetry(): void {
   // follow STACK_VIEWPORT_SCROLL within 50 ms (ViewportImageSliceLoadingIndicator).
   // We time that gap per viewport element to measure real perceived responsiveness.
   const SPINNER_THRESHOLD_MS = 50;
+  const DECODE_HIT_MS = 8; // ≤ this = slice was already decoded (instant display)
   const wireElement = (element: any) => {
     if (!element || element.__skmTelemetryWired) {
       return;
@@ -267,6 +298,15 @@ export function initSkmTelemetry(): void {
       const dt = performance.now() - scrollT0;
       if (dt >= 0 && dt < 60000) {
         c.scrollToDisplayMs.push(dt);
+        // SKM Phase B: classify whether the scrolled-to slice was ALREADY decoded (instant,
+        // dt ≤ 8 ms) vs required a re-decode/network (dt > 8 ms). This directly measures the
+        // fast-scroll UX: high decodedHitRatio = lands on decoded images = smooth.
+        c.displayTotal++;
+        if (dt <= DECODE_HIT_MS) {
+          c.decodedHits++;
+        } else {
+          c.reDecodes++;
+        }
         if (dt > SPINNER_THRESHOLD_MS) {
           c.spinnerStarts++;
           c.spinnerMs += dt - SPINNER_THRESHOLD_MS;
@@ -332,11 +372,17 @@ export function initSkmTelemetry(): void {
       displayLatencyP50ms: p50(c.scrollToDisplayMs),
       displayLatencyP95ms: p95(c.scrollToDisplayMs),
       displaySamples: c.scrollToDisplayMs.length,
+      // SKM Phase B: fraction of scrolls that landed on an already-decoded slice (instant).
+      // High = smooth fast scroll; low = re-decode churn. The headline UX metric.
+      decodedHitRatioPct: pct(c.decodedHits, c.displayTotal),
+      reDecodes: c.reDecodes,
       spinnerStarts: c.spinnerStarts,
       spinnerTotalMs: Math.round(c.spinnerMs),
       spinnerRatePct: pct(c.spinnerStarts, c.scrollToDisplayMs.length),
       // SKM 2026-10-04 (Option B) — scheduler snapshot (from StudyPrefetcherService)
       ...schedulerSnapshot(),
+      // SKM Phase B — evictor keep window (protected range) from the budget-based evictor
+      ...evictorSnapshot(),
     };
   };
 
