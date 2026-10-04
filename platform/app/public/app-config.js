@@ -146,7 +146,7 @@ if (storagePath && !studyUIDs && window.location.pathname.indexOf('/viewer') !==
 }
  
 // Paste this at the VERY TOP of app-config.js
-window._CUSTOM_NETWORK_PROGRESS_BAR = true;
+window._CUSTOM_NETWORK_PROGRESS_BAR = false;
 window.config = {
   routerBasename: '/',
   pacsApiUrl: window.location.origin, // forces secure same-origin HTTPS requests
@@ -198,9 +198,14 @@ window.config = {
     // nginx on http2 (h1 caps the browser at 6 conns/host and nullifies this).
     // ORIGINAL: interaction 8, thumbnail 2, prefetch 20.
 	 // ORIGINAL bulk api: interaction 8, thumbnail 2, prefetch 3.
+    // SKM 2026-10-04 (Phase 1): interaction (the slice the doctor is on) keeps the
+    // highest lane so a far-jump slice is never starved by background prefetch.
+    // prefetch lowered 20 → 8 so a SMALL decoded cache isn't overrun by too many
+    // simultaneously-in-flight (non-evictable) images → avoids CACHE_SIZE_EXCEEDED.
+    // ORIGINAL: interaction 8, thumbnail 2, prefetch 20.
     interaction: 8,
     thumbnail: 2,
-    prefetch: 3
+    prefetch: 8
   },
   // ── SKM-BULK 2026-09-28 (Fix 3) ───────────────────────────────────────────
   // Batch pixel retrieval: one request pulls ~50 slices instead of 50 separate
@@ -232,7 +237,7 @@ window.config = {
   // (never both true at once).
   // ORIGINAL: enabled: true,
     skmBulkLoader: {
-    enabled: true,
+    enabled: false,
     chunkSize: 40,
     maxConcurrentChunks: 5, // Controls how many chunks a SINGLE viewport asks for   old 6
     maxGlobalConcurrentChunks: 20, // STRICT LIMIT: The absolute maximum concurrent chunks across the entire browser  old 6
@@ -260,13 +265,20 @@ window.config = {
     // close. Default ON. Set false to give every tab the full cap (old behaviour).
     // Best paired with boundedDecode:true so the shrink evicts gracefully and the
     // download-driven bar stays monotonic.
-    multiTabCacheSplit: true,
+    // SKM 2026-10-04 (Phase 1): true → FALSE for the bounded-decode experiment. The cap
+    // is now small (maxCacheSize ≈ 768 MB), so N tabs sum to N × cap (e.g. 2 tabs ≈
+    // 1.5 GB decoded) — already bounded, no need to DIVIDE. Dividing would also make the
+    // per-tab cap drift below the 512/768/1024 values we are sweeping, muddying the
+    // results. Each tab gets the FULL cap, so skmSetCacheCap(mb) in the console sets the
+    // exact per-tab working set with no heartbeat fighting it. Re-enable (true) only if a
+    // LARGE base cap is restored and tabs should share one budget. ORIGINAL: true.
+    multiTabCacheSplit: false,
     // SKM 2026-10-02 (P2.2): hard cap (MB) on retained raw bulk bytes across ALL
     // open studies/viewports in a tab. With boundedDecode retaining raw bytes,
     // opening 4 studies in 4 viewports would otherwise hold 4 studies of raw data
     // at once and freeze a 16 GB box. Oldest bytes evict first; evicted slices
     // re-fetch on demand (wadouri) if scrolled to. 0 = unbounded. Default 600.
-    maxBulkBufferMB: 600,
+    maxBulkBufferMB: 400,
   },
  
    
@@ -280,7 +292,7 @@ window.config = {
   // otherwise nothing eagerly loads the series and the centre spinner stalls
   // when the progress bar completes (the regression that reappeared). Keep this
   // = !skmBulkLoader.enabled: exactly one of the two loads the full series.
-  enabled: false,
+  enabled: true,
   // Prefetch ONLY the series currently open in the viewport (active series).
   // With our StudyPrefetcherService change the active series is first in the
   // prefetch list, so displaySetsCount:1 = active series only — it loads fully
@@ -291,7 +303,70 @@ window.config = {
   displaySetsCount: 1,
   // Raised 20 → 48 to match maxNumRequests.prefetch (pipeline-feed fix 2026-09-28).
   // ORIGINAL: maxNumPrefetchRequests: 20,
-  maxNumPrefetchRequests:20,
+  // SKM 2026-10-03 (W1): 40 → 30. Lower in-flight prefetch pressure now that only
+  // the ACTIVE series prefetches (skmConcurrentPanes:false below). ORIGINAL: 40.
+  // SKM 2026-10-04 (Phase 1): 30 → 12. With a SMALL bounded decode cache, too many
+  // prefetched-but-not-yet-evictable images in flight can transiently push the cache
+  // past the cap → CACHE_SIZE_EXCEEDED. 12 keeps the pipeline fed while leaving the
+  // cache room to evict. ORIGINAL: 30 (W1), 40 (pre-W1).
+  // SKM 2026-10-04 (correction): 12 → 6. CS3D 4.22.10 does not evict active-stack images,
+  // so a burst of concurrent decodes could overshoot the cap. 6 bounds the burst; the
+  // active evictor keeps overall decoded RAM in check. ORIGINAL: 12.
+  maxNumPrefetchRequests: 6,
+  // SKM 2026-10-03 (W2): pause background prefetch once the decoded cache is ~90%
+  // full, instead of flooding it (which overflowed a cache smaller than the series
+  // and threw CACHE_SIZE_EXCEEDED). Remaining slices load on-demand as the doctor
+  // scrolls. Bounds decoded RAM to ~the cache cap regardless of study size. Set
+  // false to restore the old flood-the-whole-series behaviour.
+  boundedPrefetch: true,
+  // SKM 2026-10-04 (Phase 1): 0.9 → 0.85. With a small cap, pause the prefetch flood a
+  // little earlier so in-flight decodes that land after the pause can't tip the cache
+  // over 100% → zero CACHE_SIZE_EXCEEDED headroom. ORIGINAL: 0.9.
+  // SKM 2026-10-04 (correction): 0.85 → 0.70. Larger headroom for fast-scroll bursts, and
+  // with the active evictor freeing space the fill now actually drops below this again so
+  // prefetch RESUMES (the old 0.85 + no-eviction combo deadlocked prefetch). ORIGINAL: 0.85.
+  // SKM 2026-10-04 (Phase B item 1): 0.70 → 0.90. The 0.70 pause meant the prefetcher only
+  // ever filled ~70% of the cap (~535 MB), under-using the committed 768 MB budget → fast
+  // scroll re-decoded constantly. With Phase A (purgeable images) + the budget-based evictor
+  // keeping a large decoded working set, it's safe to let decode fill to ~90% of the cap; the
+  // evictor + native LRU bound it, and the ~77 MB headroom easily absorbs a 250 ms burst
+  // (~7 decodes) so the native LRU does not cancel in-flight loads. ORIGINAL: 0.85 → 0.70.
+  boundedPrefetchHighWater: 0.90,
+  // SKM 2026-10-03 (W2-full): windowed (working-set) decode — the RadiAnt-style fix
+  // for multi-viewport / multi-tab freezes. Only a window of ±windowRadius slices
+  // around each visible viewport's CURRENT slice is prefetched/decoded (re-centred as
+  // you scroll); far slices evict. Bounds decoded RAM to ~2·windowRadius slices PER
+  // viewport regardless of study size, so several big series fit a modest cache with
+  // no CACHE_SIZE_EXCEEDED / thrash / freeze. Scrolling past the window loads on-
+  // demand. Set windowedPrefetch:false to restore full-series prefetch.
+  windowedPrefetch: true,
+  windowRadius: 250,
+  // SKM 2026-10-04 (Option B — skmPriorityPrefetch): priority-aware, direction-adaptive
+  // DECODE scheduling. The window is ordered center-out with an ahead-bias in the scroll
+  // direction (nearest + ahead slices decode first), and a FAR JUMP cancels stale queued
+  // + in-flight prefetch and rebuilds around the new centre — so background work around
+  // the old slice never competes with a jump to a far one. The displayed slice itself is
+  // still loaded by the viewport at 'interaction' priority (untouched). This governs the
+  // small DECODE window (RAM); the larger DOWNLOAD window is skmWarmer above.
+  //   windowAhead / windowBehind: ahead-biased DECODE window (slices). Kept modest so
+  //     decoded RAM stays bounded: 400 + 150 ≈ 550 slices ≈ ~275 MB (< maxCacheSize).
+  //   immediateRadius : Priority-2 neighbourhood decoded first, center-out.
+  //   farJumpThreshold: |Δindex| treated as a far jump (cancel stale, re-centre now).
+  // TO REVERT: priorityPrefetch:false → previous index-order windowed prefetch.
+  priorityPrefetch: true,
+  immediateRadius: 15,
+  // SKM 2026-10-04 (correction): decode window trimmed 400→300 ahead so steady decoded RAM
+  // is smaller and sits well below the cap, leaving headroom for fast-scroll bursts. The
+  // active evictor (skmActiveEviction) keeps the actual working set bounded; this window is
+  // what the prefetcher DECODES ahead. ORIGINAL: windowAhead 400.
+  // SKM 2026-10-04 (Phase B item 1): 300/150 → 600/300. A bigger decode-ahead window lets the
+  // prefetcher actually FILL the budget (bounded by boundedPrefetchHighWater 0.90 in BYTES, so
+  // this is not "numerically huge" — the byte budget caps it); combined with on-demand decodes
+  // the budget-based evictor KEEPS, the decoded working set reaches ~90% of the cap around the
+  // doctor → far fewer re-decodes on revisits/jumps. ORIGINAL: 300/150.
+  windowAhead: 600,
+  windowBehind: 300,
+  farJumpThreshold: 120,
   order: 'closest',            // load nearest-to-current slice first, then outward
   // Give the first (visible) image a clear runway before the background prefetch
   // flood starts, so time-to-first-image stays low instead of the first image
@@ -306,7 +381,13 @@ window.config = {
   // (bounded by skmConcurrentPanesMaxRequests). Only helps to the extent the
   // storage/network has spare capacity. Set to false to revert to the original
   // "one series fully, then the next" behaviour — no other change needed.
-  skmConcurrentPanes: true,
+  // SKM 2026-10-03 (W1): true → FALSE. Prefetching EVERY open pane's full series at
+  // once (4 viewports = 4 full studies decoded) is what ballooned RAM to ~9 GB and
+  // froze 16 GB boxes. With false, only the ACTIVE pane's series prefetches; other
+  // panes load on-demand when activated (RadiAnt-style). Scroll-sync across panes is
+  // kept smooth by W4 (sync-window prefetch). Set back to true to restore the old
+  // all-panes-at-once behaviour. ORIGINAL: skmConcurrentPanes: true,
+  skmConcurrentPanes: false,
   // Ceiling for the pane-scaled cap (default = maxNumPrefetchRequests * 2 = 96).
   // Keep it near the level proven safe against the storage share.
   skmConcurrentPanesMaxRequests: 96,
@@ -333,9 +414,167 @@ window.config = {
   // deviceMemory reports TOTAL installed RAM, not FREE RAM (no browser API exposes
   // free RAM), so pick this ceiling for the fleet's guaranteed-min spec.
   // Value is in BYTES (8 * 1024^3).
-  maxCacheSize: 6442450944,
- 
- 
+  // SKM 2026-10-03 (W2): 2.5 GB was too low — a single ~3600-slice series needs
+  // ~3.6 GB decoded, so prefetch overflowed the cache and threw CACHE_SIZE_EXCEEDED.
+  // Set to 5 GB so one large study (up to ~4400 slices) fits for smooth scrolling on
+  // a single tab; multiTabCacheSplit divides it per tab (2 tabs → 2.5 GB each). This
+  // is now SAFE even when divided small because studyPrefetcher.boundedPrefetch pauses
+  // the prefetch flood near the cap (no overflow, no popup) — the cap is respected,
+  // not exceeded. Aggressive users (many panes/tabs) stay bounded; normal users get a
+  // big working set. 32 GB consultants can raise further. ORIGINAL: 6442450944 (6 GB).
+  // SKM 2026-10-04 (Phase 1 — RAM Optimization / Bounded Decode): 5 GB → 768 MB.
+  // This is now the PRIMARY RAM lever. A small cap means decoded RAM plateaus at ~the
+  // cap regardless of study size (2000 or 4400 slices), instead of growing to ~1 GB+
+  // per full study. 768 MB ≈ ~1500 decoded slices (~0.5 MB/slice) — a large working
+  // set around the doctor's position; slices outside it evict (LRU) and re-decode from
+  // the browser HTTP cache (now that SSL is trusted, transferSize 0) on scroll-back, or
+  // re-fetch from WADO if the HTTP cache evicted too. boundedPrefetch + the lowered
+  // prefetch concurrency keep the cache from being overrun → zero CACHE_SIZE_EXCEEDED.
+  //
+  // EXPERIMENT: do NOT treat 768 MB as final. Sweep 512 / 768 / 1024 WITHOUT rebuilding
+  // using the DevTools console:  window.skmSetCacheCap(512)  (then 768, 1024).
+  // Pick the smallest cap that keeps scrolling smooth with zero CACHE_SIZE_EXCEEDED,
+  // then set it here permanently. Value is in BYTES. ORIGINAL: 6442450944 (6 GB).
+  //   512 MB = 536870912 | 768 MB = 805306368 | 1024 MB = 1073741824
+  maxCacheSize: 805306368, // 768 MB (Phase 1 starting point — sweep with skmSetCacheCap)
+
+  // SKM 2026-10-04 (Option B — skmBoundedDecodeCache): master gate for the bounded
+  // Cornerstone decoded-RAM cap applied in init.tsx. enabled:true applies maxCacheSize
+  // (above) + the device/tab scaling. Set enabled:false to run UNBOUNDED (old pre-cap
+  // behaviour) for an A/B. This cap is INDEPENDENT of the skmWarmer download window:
+  // decoded RAM is bounded here; downloaded compressed bytes live in the HTTP disk cache.
+  skmBoundedDecodeCache: {
+    enabled: true,
+  },
+
+  // SKM 2026-10-04 (Phase A — skmPurgeableStackImages): THE Cornerstone-level fix.
+  // The WADO-URI loader stamps image.sharedCacheKey = <dataset URL> on every image, and
+  // CS3D 4.22.10 treats ANY sharedCacheKey image as non-purgeable (isCacheable excludes it,
+  // the native LRU skips it, _decacheImage throws). So with a cap below the study size the
+  // cache can NEVER evict → CACHE_SIZE_EXCEEDED (what we measured: decode pegged at 768,
+  // evictions 0). When enabled, a thin wrapper around the stock wadouri loader clears that
+  // legacy sharedCacheKey on the resolved image, so Cornerstone's OWN native LRU evicts at
+  // the cap → bounded decoded RAM, zero CACHE_SIZE_EXCEEDED, scroll-back from HTTP cache.
+  // Safe for MPR (the volume path re-stamps sharedCacheKey=volumeId afterwards) and for
+  // multi-frame (dataset sharing is handled separately by dataSetCacheManager).
+  // DEFAULT OFF for a clean A/B — enable ONLY on the validation workstation to test.
+  skmPurgeableStackImages: {
+    enabled: true,
+  },
+
+  // SKM 2026-10-04 (Option B correction — skmActiveEviction): the REAL RAM bound.
+  // CS3D 4.22.10 does NOT LRU-evict decoded images that belong to the active stack — it
+  // THROWS CACHE_SIZE_EXCEEDED at the cap (observed: decode pinned at 768 MB, 0 evictions,
+  // then the blocking modal at ~slice 1753). So maxCacheSize alone is a hard wall, not a
+  // bound. This evictor purges decoded STACK slices OUTSIDE a window around the doctor
+  // (cache.removeImageLoadObject), keeping decoded RAM ≈ the window (~250–350 MB) so the
+  // cap is never reached (no throw) and scroll-back re-decodes from the HTTP cache.
+  //   keepAhead/keepBehind : decoded slices to retain around the doctor (direction-aware).
+  //                          Must be >= the prefetch decode window above so we don't evict
+  //                          what the prefetcher just decoded.
+  //   margin               : extra safety band never evicted.
+  //   maxEvictPerTick      : long-task guard (purge in bounded batches).
+  //   skipWhenVolumePresent: true → eviction is DISABLED whenever an MPR/3D viewport is
+  //                          open, so volumes/crosshairs are never disturbed.
+  // TO REVERT: enabled:false → Cornerstone's own (non-evicting) cap behaviour.
+  //
+  // SKM 2026-10-04 (Phase B item 1): BUDGET-BASED working set. Instead of a fixed small window
+  // (~350 MB, which under-used the 768 MB budget and forced re-decode on fast scroll), the keep
+  // window is sized LIVE from the byte budget: budgetFraction × maxCacheSize ÷ measured avg
+  // slice bytes, split ahead/behind by aheadBias and scroll direction, and SHARED across open
+  // stack viewports. This fills the committed decoded budget (adapting to real slice size)
+  // WITHOUT exceeding the 768 MB cap → most fast-scroll/jumps land on already-decoded slices.
+  //   budgetBased     : true = fill the byte budget (this); false = fixed keepAhead/keepBehind.
+  //   budgetFraction  : fraction of the cap the decoded working set may fill (0.90 → ~690 MB,
+  //                     leaving headroom below the cap so the native LRU doesn't cancel in-flight).
+  //   aheadBias       : fraction of the per-viewport budget allocated ahead (scroll direction).
+  //   avgSliceBytesEstimate : fallback bytes/slice before the cache can be measured (~0.5 MB).
+  //   keepAhead/keepBehind  : fixed-window FALLBACK (only used when budgetBased:false).
+  //   maxEvictPerTick : long-task guard (purge in bounded batches; raised for larger jumps).
+  //   skipWhenVolumePresent : eviction DISABLED whenever an MPR/3D viewport is open.
+  skmActiveEviction: {
+    enabled: true,
+    budgetBased: true,
+    budgetFraction: 0.9,
+    aheadBias: 0.65,
+    avgSliceBytesEstimate: 524288,
+    keepAhead: 400,
+    keepBehind: 250,
+    margin: 50,
+    maxEvictPerTick: 400,
+    throttleMs: 250,
+    skipWhenVolumePresent: true,
+  },
+
+  // SKM 2026-10-03 (W3 "indicator" warmer): background-download the ACTIVE series
+  // into the browser HTTP cache so the vertical progress bar reaches 100% while
+  // decode stays windowed (W2). It never decodes or touches the stack/MPR — it only
+  // fetches bytes (same /wado/uri URLs Cornerstone uses → cache parity) and emits
+  // SKM_SLICE_AVAILABLE for the bar. Default OFF; set enabled:true to A/B test.
+  //   concurrency         : per-tab background fetches (keep low to not starve the
+  //                         on-screen slice). Default 3.
+  //   globalConcurrency   : absolute cap across ALL tabs (BroadcastChannel) — the
+  //                         NAS-burst guard. Default 6.
+  //   activeSeriesOnly    : warm only the active series (true) vs all open (false).
+  //   startDelayMs        : wait after a series opens before warming, so first image
+  //                         + initial window win the network first. Default 1500.
+  // TO REVERT: enabled:false (whole module dormant; identical to the W2 build).
+  // SKM 2026-10: DISABLED after telemetry showed it overwhelmed the server
+  // (net::ERR_FAILED) while delivering 0% cache reuse (~2.9 GB downloaded, no hits).
+  // THAT failure was caused by the bypassed self-signed cert disabling the HTTP cache
+  // (0% reuse) + whole-series flooding. BOTH are now fixed: the cert is trusted
+  // (transferSize 0 on re-fetch) and the warmer runs as a bounded MOVING WINDOW.
+  //
+  // SKM 2026-10-04 (Option B — skmMovingWindow): the warmer now downloads an
+  // ahead-biased MOVING WINDOW of compressed bytes around the doctor (into the browser
+  // HTTP disk cache, NO decode → no RAM), following the doctor and restarting on a far
+  // jump. This is what makes a far jump land on already-downloaded bytes → decode-only
+  // (~16 ms) → no spinner, while decoded RAM stays bounded by maxCacheSize (independent).
+  //   movingWindow     : true = moving-window mode (Option B); false = old whole-series.
+  //   ahead / behind   : slices to warm ahead/behind the doctor (CONFIGURABLE; these are
+  //                      byte downloads to disk, NOT simultaneous requests — concurrency
+  //                      below bounds how many fetch at once).
+  //   concurrency      : per-tab concurrent background fetches (bounded; keep low so the
+  //                      on-screen slice is never starved). Current request always wins.
+  //   globalConcurrency: absolute cap across ALL tabs (BroadcastChannel) — NAS-burst guard.
+  //   rethrottleMs     : min gap between scroll-driven window re-centres.
+  //   farJumpThreshold : |Δindex| beyond which the window abandons + restarts.
+  // TO REVERT: enabled:false (whole module dormant; identical to the pre-Option-B build).
+  // ORIGINAL: enabled: false (and whole-series when it was on).
+  skmWarmer: {
+    enabled: true,
+    movingWindow: true,
+    // SKM 2026-10-04 (Phase B): sweep the WHOLE study (near-doctor first, ahead-biased)
+    // into the HTTP cache so the Ready N/Total frontier keeps advancing to 100% in the
+    // background instead of stopping at the initial window. ahead/behind below only set the
+    // PRIORITY ordering; the sweep continues past them to the ends. false = bounded window.
+    warmWholeStudy: true,
+    ahead: 1000,
+    behind: 250,
+    // SKM 2026-10-04 (fix G): warm only the FAR band — skip the near band the prefetcher
+    // already decodes+HTTP-caches, so the warmer's fetch() never double-requests those
+    // slices. Keep these == the prefetch decode window (studyPrefetcher.windowAhead/Behind).
+    nearSkipAhead: 300,
+    nearSkipBehind: 150,
+    concurrency: 4,
+    globalConcurrency: 8,
+    rethrottleMs: 250,
+    farJumpThreshold: 120,
+    activeSeriesOnly: true,
+    startDelayMs: 1500,
+  },
+
+  // SKM 2026-10: read-only in-app telemetry for VALIDATING the caching/RAM
+  // architecture with real measurements (HTTP-cache hit ratio, eviction frequency,
+  // decode-cache size, CACHE_SIZE_EXCEEDED count, JS heap, scroll jank). Surfaced via
+  // the DevTools console — NO PowerShell / host scripting:
+  //   skmTelemetry.reset()   before a scroll/jump test
+  //   skmTelemetry.report()  after → console.table summary
+  // Changes NO behaviour. Enable during validation; set false for production.
+  skmTelemetry: {
+    enabled: true,
+  },
+
   showStudyList: true,
   showLoadingIndicator: true,
   showWarningMessageForCrossOrigin: false,
@@ -398,10 +637,10 @@ window.config = {
   customizationService: {
 	    // SKM-FIX: Hide the confusing blue fill and percentage badge from the vertical scrollbar!
     // It will now function strictly as a clean, normal scrollbar.
-	  'viewportScrollbar.showLoadedEndpoints': false,
+	//  'viewportScrollbar.showLoadedEndpoints': false,
    //  viewportScrollbar.showLoadedFill': false,
    //   'viewportScrollbar.showViewedFill': false,
-      'viewportScrollbar.showLoadingPattern': false,
+   //   'viewportScrollbar.showLoadingPattern': false,
     //  'viewportScrollbar.showPercentBadge': false,
     'studyBrowser.studyMode': 'primary',
     // PET: use hot colormap + SUV-friendly window presets (matches OHIF PT defaults)

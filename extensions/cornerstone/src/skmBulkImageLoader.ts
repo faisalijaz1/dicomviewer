@@ -70,6 +70,15 @@ type BulkConfig = {
    * unbounded. Default 600.
    */
   maxBulkBufferMB?: number;
+  /**
+   * SKM 2026-10-03 (P2.3): the max number of distinct display sets (studies/series)
+   * that may be open before the bulk engine STEPS ASIDE and lets on-demand wadouri
+   * handle loading (only viewed slices). Caps total WORK — the fix for the multi-
+   * viewport / multi-study freeze, where eagerly downloading+decoding every slice of
+   * every open study overwhelms a 16 GB box. Default 1 (bulk only a single-series
+   * view). Set very high (e.g. 99) to always bulk, as before.
+   */
+  bulkMaxDisplaySets?: number;
 };
 
 // sopUID -> raw DICOM file bytes. In the default (non-bounded) mode each entry is
@@ -739,6 +748,20 @@ export function initSkmBulkDriver(
         /* ignore — prune is best-effort */
       }
       pruneClosedStudies(openDsUids);
+
+      // SKM 2026-10-03 (P2.3): cap the WORK, not just memory. When more than
+      // bulkMaxDisplaySets studies/series are open at once (multi-pane / multi-tab
+      // multi-study), eagerly downloading AND decoding EVERY slice of EVERY one is
+      // what pegs the CPU and swaps RAM on a 16 GB box — the multi-viewport freeze.
+      // In that case we DO NOT bulk-drive: those viewports load on-demand through the
+      // wadouri fallback (only the slices actually viewed), exactly like RadiAnt. A
+      // single open study/series still gets the fast full bulk load. Gated by
+      // bulkMaxDisplaySets (default 1 = bulk only for a single-series view). Set it
+      // very high to always bulk (previous behaviour).
+      const bulkMaxDisplaySets = config?.bulkMaxDisplaySets ?? 1;
+      if (openDsUids.size > bulkMaxDisplaySets) {
+        return;
+      }
 
       const activeViewportId = state?.activeViewportId;
       if (!activeViewportId) {
