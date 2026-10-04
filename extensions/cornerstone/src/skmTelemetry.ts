@@ -112,7 +112,10 @@ function cacheKeyStats(): Record<string, number> {
       });
     }
     const volumesInCache = vc && typeof vc.size === 'number' ? vc.size : 0;
-    return { sharedKeyImages, pureStackImages, volumesInCache };
+    const ps = (globalThis as any).__skmPurgeStats;
+    const purgeWrapperCalls = ps?.calls || 0;
+    const purgeWrapperCleared = ps?.cleared || 0;
+    return { sharedKeyImages, pureStackImages, volumesInCache, purgeWrapperCalls, purgeWrapperCleared };
   } catch (e) {
     return {};
   }

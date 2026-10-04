@@ -69,10 +69,16 @@ export function initSkmPurgeableStackImages(): void {
       return;
     }
 
+    // Diagnostics (window.__skmPurgeStats): prove the wrapper is actually invoked and is
+    // clearing the key. Samples the first few before/after values.
+    const stats: any = { calls: 0, cleared: 0, samples: [] as any[] };
+    (globalThis as any).__skmPurgeStats = stats;
+
     const wrapped = (imageId: string, options: any) => {
       // Call the stock loader unchanged (preserves webworker decode, beforeSend headers,
       // cancelFn, decache, options, etc.).
       const imageLoadObject: any = original(imageId, options);
+      stats.calls++;
       if (
         imageLoadObject &&
         imageLoadObject.promise &&
@@ -83,8 +89,13 @@ export function initSkmPurgeableStackImages(): void {
         // Mutate .promise in place to keep cancelFn/decache on the same object.
         imageLoadObject.promise = imageLoadObject.promise.then((image: any) => {
           if (image) {
+            const before = image.sharedCacheKey;
             try {
               image.sharedCacheKey = undefined;
+              stats.cleared++;
+              if (stats.samples.length < 3) {
+                stats.samples.push({ imageId, before, after: image.sharedCacheKey });
+              }
             } catch (e) {
               /* non-fatal */
             }
@@ -95,13 +106,17 @@ export function initSkmPurgeableStackImages(): void {
       return imageLoadObject;
     };
 
-    // Override ONLY the wadouri scheme (the only scheme this app uses). This runs AFTER
-    // dicomImageLoader.init() (initWADOImageLoader) has registered the stock loaders.
-    registerImageLoader('wadouri', wrapped);
+    // Override EVERY scheme the stock dicom-image-loader registers to this SAME loadImage
+    // (register.js: dicomweb, wadouri, dicomfile). This app's imageIds are 'dicomweb:'
+    // (DicomWebDataSource/utils/getImageId.js → "dicomweb:" + wadouri URL), so wrapping
+    // only 'wadouri' was a no-op. Wrapping all three is identical + safe (one function).
+    // Runs AFTER dicomImageLoader.init() (initWADOImageLoader) registered the stock loaders.
+    ['dicomweb', 'wadouri', 'dicomfile'].forEach(scheme => registerImageLoader(scheme, wrapped));
 
     // eslint-disable-next-line no-console
     console.log(
-      '[SKM-PURGEABLE] wadouri images now cached WITHOUT sharedCacheKey → purgeable by native LRU'
+      '[SKM-PURGEABLE] dicomweb/wadouri/dicomfile images now cached WITHOUT sharedCacheKey ' +
+        '→ purgeable by native LRU (inspect window.__skmPurgeStats)'
     );
   } catch (e) {
     // eslint-disable-next-line no-console
