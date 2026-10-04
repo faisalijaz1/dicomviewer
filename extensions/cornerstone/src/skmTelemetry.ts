@@ -145,6 +145,14 @@ function evictorSnapshot(): Record<string, number> {
       evict_lastRemoved: e.removed ?? 0,
       evict_decodedBeforeMB: e.decodedBeforeMB ?? 0,
       evict_decodedAfterMB: e.decodedAfterMB ?? 0,
+      // SKM 2026-10-05 (Fix 2): non-blocking idle-batched eviction telemetry.
+      evict_batchCap: e.batchCap ?? 0, // configured per-batch cap (maxEvictPerTick)
+      evict_batchesLastPass: e.batches ?? 0, // batches used to drain the last pass
+      evict_maxBatch: e.maxBatch ?? 0, // largest single batch (should be ≤ batchCap)
+      evict_yields: e.yields ?? 0, // batches deferred because the doctor was scrolling
+      evict_aborted: e.aborted ?? 0, // 1 if the last pass aborted on a far jump
+      evict_passMs: e.passMs ?? 0, // wall time of the last pass (incl. idle gaps)
+      evict_evictMs: e.evictMs ?? 0, // main-thread time actually spent removing
     };
   } catch (e) {
     return {};

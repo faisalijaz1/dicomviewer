@@ -501,7 +501,12 @@ window.config = {
     keepAhead: 400,
     keepBehind: 250,
     margin: 50,
-    maxEvictPerTick: 400,
+    // SKM 2026-10-05 (Fix 2): 400 → 50. The evictor no longer purges a whole pass in one
+    // synchronous main-thread task; it drains candidates in small idle-scheduled batches of
+    // this size, yielding to the viewport between batches (see skmWorkingSetEvictor.ts). A
+    // small batch bounds the worst-case single-task cost; the idle pump still drains the full
+    // working-set overflow across batches, so the RAM bound is unchanged. ORIGINAL: 400.
+    maxEvictPerTick: 50,
     throttleMs: 250,
     skipWhenVolumePresent: true,
   },
@@ -554,8 +559,15 @@ window.config = {
     // SKM 2026-10-04 (fix G): warm only the FAR band — skip the near band the prefetcher
     // already decodes+HTTP-caches, so the warmer's fetch() never double-requests those
     // slices. Keep these == the prefetch decode window (studyPrefetcher.windowAhead/Behind).
-    nearSkipAhead: 300,
-    nearSkipBehind: 150,
+    // SKM 2026-10-05 (Fix 1): matched to the prefetch DECODE window
+    // (studyPrefetcher.windowAhead:600 / windowBehind:300). Previously 300/150, which
+    // was NARROWER than the prefetch window, so the warmer's fetch() re-requested the
+    // 300→600-ahead and 150→300-behind bands that the prefetcher was already fetching
+    // via Cornerstone XHR → a guaranteed double-request band. Keeping these == the
+    // prefetch window makes the warmer start strictly BEYOND the prefetcher's reach.
+    // ORIGINAL: nearSkipAhead 300, nearSkipBehind 150.
+    nearSkipAhead: 600,
+    nearSkipBehind: 300,
     concurrency: 4,
     globalConcurrency: 8,
     rethrottleMs: 250,
