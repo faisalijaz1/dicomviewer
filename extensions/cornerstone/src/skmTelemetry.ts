@@ -177,6 +177,8 @@ function evictorSnapshot(): Record<string, number> {
       evict_fillPct: e.fillPct ?? 0,
       evict_reactiveSkips: e.reactiveSkips ?? 0,
       evict_reactiveSkip: e.reactiveSkip ? 1 : 0,
+      // SKM 2026-10-06 (Fix 3b): orphan (closed-series) images queued for eviction last pass.
+      evict_orphans: e.orphans ?? 0,
     };
   } catch (e) {
     return {};

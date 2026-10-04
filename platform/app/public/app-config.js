@@ -447,8 +447,17 @@ window.config = {
   // so eviction never runs for a single open series; anything larger stays bounded. Safe on the
   // ≥32 GB reading workstations (3 GB decoded + ~2-3 GB heap leaves ample headroom); the
   // init.tsx device-memory clamp still shrinks this on <8 GB boxes. ORIGINAL: 805306368 (768 MB).
-  //   2 GB = 2147483648 | 3 GB = 3221225472 | 4 GB = 4294967296
-  maxCacheSize: 3221225472, // 3 GB (Fix 3 — holds a full clinical series decoded-resident)
+  //   2 GB = 2147483648 | 3 GB = 3221225472 | 3.5 GB = 3670016000 | 4 GB = 4294967296
+  // SKM 2026-10-06 (Fix 3b): 3 GB → 3.5 GB. Office A/B: the 2001 series (~1001 MB decoded) is
+  // smooth at 3 GB, but the 4403 series needs ~2790 MB decoded-resident, which exceeds the
+  // 0.85 × 3 GB = 2.55 GB reactive high-water → eviction treadmill returned (lag + frequent
+  // loading). At 3.5 GB the high-water is 0.85 × 3.5 = 2.98 GB > 2790 MB, so the 4403 series
+  // stays fully resident (verified smooth at skmSetCacheCap(3500): evictionsPerMin 0,
+  // decodedHitRatio 100%, displayP95 2ms, 0 spinners). RAM at that point is ~6 GB for the tab
+  // (decoded ~2.8 GB + heap) — safe on the ≥32 GB reading workstations. NOTE: multiTabCacheSplit
+  // is false, so N tabs each take up to this; keep that in mind for multi-study-per-tab use.
+  // ORIGINAL: 805306368 (768 MB) → 3221225472 (3 GB) → this.
+  maxCacheSize: 3670016000, // 3.5 GB (holds the 4403-slice series fully decoded-resident)
 
   // SKM 2026-10-04 (Option B — skmBoundedDecodeCache): master gate for the bounded
   // Cornerstone decoded-RAM cap applied in init.tsx. enabled:true applies maxCacheSize

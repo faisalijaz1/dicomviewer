@@ -253,6 +253,7 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
   let passMaxBatch = 0;
   let passYields = 0;
   let passAborted = 0;
+  let passOrphans = 0; // orphan (closed-series) images queued for eviction this pass (Fix 3b)
   let passStartT = 0;
   let passEvictMs = 0; // cumulative time spent in removeImageLoadObject loops this pass
   let passKeepLo = 0;
@@ -303,6 +304,7 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
       batchCap: maxEvictPerTick,
       reactiveSkip: false, // this snapshot is from a real eviction pass
       reactiveSkips,
+      orphans: passOrphans, // orphan (closed-series) images queued this pass (Fix 3b)
     };
     (globalThis as any).__skmEvictorLast = last;
     return last;
@@ -323,7 +325,7 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
       console.log(
         `[SKM-EVICTOR] pass#${passSeq} ${reason}: center=${lastCenter} ` +
           `keep=[${last.keepLo}..${last.keepHi}] removed=${passRemoved} in ${passBatches} batch(es) ` +
-          `(max ${passMaxBatch}/${maxEvictPerTick}, yields ${passYields}) ` +
+          `(max ${passMaxBatch}/${maxEvictPerTick}, yields ${passYields}, orphans ${passOrphans}) ` +
           `decodedMB ${passDecodedBeforeMB}→${last.decodedAfterMB} evictMs ${last.evictMs} ` +
           `(total ${evictionCount})`
       );
@@ -501,8 +503,19 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
         }
       }
 
-      // Collect decoded slices OUTSIDE the keep-set (the eviction candidates), deduped.
+      // Full set of imageIds belonging to ANY open stack viewport — never orphan-evict these.
+      const allOpenIds = new Set<string>();
+      for (const { imageIds } of stackVps) {
+        for (const id of imageIds) {
+          if (id) {
+            allOpenIds.add(id);
+          }
+        }
+      }
+
+      // Collect decoded slices OUTSIDE the keep-set (the windowed eviction candidates), deduped.
       const candidateSet = new Set<string>();
+      const windowed: string[] = [];
       for (const { imageIds } of stackVps) {
         for (let i = 0; i < imageIds.length; i++) {
           const imageId = imageIds[i];
@@ -517,14 +530,45 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
           }
           if (present) {
             candidateSet.add(imageId);
+            windowed.push(imageId);
           }
         }
       }
 
-      // Prime pass state.
+      // ── Fix 3b (ORPHAN eviction) ───────────────────────────────────────────
+      // Decoded images belonging to series NO LONGER displayed in any viewport (e.g. after the
+      // doctor switches from the 2001 series to the 4403 series) are never in a current
+      // viewport's image list, so the windowed scan above never frees them. They pin the decoded
+      // budget, and once the fill sits at the prefetcher's high-water pause the new series can't
+      // finish loading → the "switch series → progress pauses → viewer stuck until you scroll"
+      // symptom. Evict these FIRST (they are entirely unneeded by any open viewport).
+      const orphans: string[] = [];
+      try {
+        const ic = (cache as any)._imageCache;
+        if (ic && typeof ic.forEach === 'function') {
+          ic.forEach((ci: any, key: any) => {
+            const imageId = typeof key === 'string' && key ? key : ci && ci.imageId;
+            if (
+              typeof imageId === 'string' &&
+              imageId &&
+              !allOpenIds.has(imageId) &&
+              !candidateSet.has(imageId)
+            ) {
+              candidateSet.add(imageId);
+              orphans.push(imageId);
+            }
+          });
+        }
+      } catch (e) {
+        /* cache map shape differs → no orphan sweep (windowed eviction still runs) */
+      }
+
+      // Prime pass state. Order: windowed first, orphans last, so runBatch (which pops from the
+      // END) evicts ORPHANS FIRST — the fastest way to break the series-switch stall.
       passSeq++;
       passActive = true;
-      passCandidates = Array.from(candidateSet);
+      passOrphans = orphans.length;
+      passCandidates = windowed.concat(orphans);
       passKeep = keep;
       passCenterAtStart = activeIdx;
       passActiveViewportId = stackVps[0].viewportId;
