@@ -47,6 +47,9 @@ import { initSkmWorkingSetEvictor } from './skmWorkingSetEvictor';
 import { initSkmPurgeableStackImages } from './skmPurgeableStackImages';
 // SKM 2026-10: read-only in-app telemetry (cache hit ratio, eviction, RAM, jank,
 // CACHE_SIZE_EXCEEDED) surfaced via the DevTools console — the measurement harness
+// SKM 2026-10-07 (Fix 5): adaptive, multi-tab-aware decoded-RAM governor — owns the
+// Cornerstone cache cap, the per-tab budget split, and the derived decode window.
+import { initSkmMemoryBudget } from './skmMemoryBudget';
 // for validating the caching/RAM architecture. No-op unless appConfig.skmTelemetry.enabled.
 import { initSkmTelemetry } from './skmTelemetry';
 import interleaveCenterLoader from './utils/interleaveCenterLoader';
@@ -487,17 +490,12 @@ export default async function init({
   // SKM 2026-10-04 (Option B — skmBoundedDecodeCache): master gate. enabled:false runs
   // the decode cache UNBOUNDED (old behaviour) for an A/B; default on.
   const boundedDecodeEnabled = (appConfig as any)?.skmBoundedDecodeCache?.enabled !== false;
-  if (effectiveCacheSize && boundedDecodeEnabled) {
-    // Base (single-tab) cap.
-    cornerstone.cache.setMaxCacheSize(effectiveCacheSize);
-    // eslint-disable-next-line no-console
-    console.log(
-      '[SKM] Cornerstone cache cap =',
-      Math.round(effectiveCacheSize / (1024 * 1024)),
-      'MB (deviceMemory =',
-      (navigator as any).deviceMemory,
-      'GB)'
-    );
+  if (boundedDecodeEnabled) {
+    // SKM 2026-10-07 (Fix 5 — adaptive budget governor): owns the Cornerstone cache cap,
+    // the multi-tab per-tab split, and the derived decode/prefetch window. Replaces the old
+    // single-tab setMaxCacheSize + skm-pacs-tabs split block below (that split stays disabled
+    // via skmBulkLoader.multiTabCacheSplit:false). See skmMemoryBudget.ts.
+    initSkmMemoryBudget(servicesManager, appConfig, (appConfig as any)?.skmMemoryBudget || {});
 
     // SKM 2026-10-02 (P1.3): divide the cache budget across OPEN TABS so N tabs of
     // large studies cannot sum past system RAM — the multi-tab OS-freeze fix. Each

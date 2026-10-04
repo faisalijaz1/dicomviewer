@@ -375,8 +375,14 @@ window.config = {
   // previous series. priorityPrefetch still orders it center-out ahead-biased and cancels stale
   // work on a far jump. A series larger than the cap still pauses at boundedPrefetch and loads
   // the remainder on scroll (bounded). ORIGINAL: windowAhead 600, windowBehind 300.
-  windowAhead: 6000,
-  windowBehind: 6000,
+  // SKM 2026-10-07 (Fix 5): these are now only INITIAL SEEDS. The adaptive memory-budget
+  // governor (skmMemoryBudget.ts) recomputes windowAhead/windowBehind at runtime from the live
+  // per-tab decoded budget ÷ measured slice size and writes them into this service's config, so
+  // the decode window scales with machine RAM tier and tab count (no fixed 6000). Seeds are sized
+  // for the 2048 MB single-tab default so behaviour is sane even if the governor is disabled.
+  // ORIGINAL: 600/300 → 6000/6000 (fixed, removed) → runtime-derived.
+  windowAhead: 1100,
+  windowBehind: 580,
   farJumpThreshold: 120,
   order: 'closest',            // load nearest-to-current slice first, then outward
   // Give the first (visible) image a clear runway before the background prefetch
@@ -483,6 +489,31 @@ window.config = {
   // decoded RAM is bounded here; downloaded compressed bytes live in the HTTP disk cache.
   skmBoundedDecodeCache: {
     enabled: true,
+  },
+
+  // SKM 2026-10-07 (Fix 5 — adaptive, multi-tab-aware decoded-RAM governor). Single universal
+  // build for both hardware tiers. The governor (skmMemoryBudget.ts) owns the Cornerstone cache
+  // cap, the per-tab budget split across live tabs (BroadcastChannel), and the derived decode/
+  // prefetch window + warmer near-skip — superseding the static maxCacheSize + multiTabCacheSplit
+  // below. Machine decoded budget per WORKSTATION:
+  //   - default 2048 MB  → 16 GB-safe for every client with no action
+  //   - 32 GB Consultant → run once in the console:  skmSetMemoryBudget(5120)
+  //     (persists in that workstation's localStorage; same deployed build/URL for everyone)
+  //   - also settable via ?skmBudgetMB=5120 URL param (persisted)
+  // AGGREGATE GUARANTEE: perTabCap = floor(machineBudget / liveTabs) — strict division, so the
+  // sum across all tabs can never exceed the machine budget. The usable minimum lives on the
+  // decode WINDOW (minWindowSlices), not the cap, so RAM stays strictly bounded at any tab count.
+  // navigator.deviceMemory is NOT trusted to raise the budget (it caps at 8, can't tell 16 from
+  // 32 GB); it can only LOWER it on a genuinely weak box. Tune the two numbers below if needed.
+  skmMemoryBudget: {
+    defaultBudgetMB: 2048,   // 16 GB-safe default (per workstation, overridable at runtime)
+    minBudgetMB: 1024,
+    maxBudgetMB: 8192,
+    workingSetFraction: 0.82, // decode window fills 82% of the per-tab cap (< 0.85 evict high-water)
+    aheadBias: 0.65,
+    minWindowSlices: 300,
+    maxWindowSlices: 8000,
+    recomputeMs: 3000,
   },
 
   // SKM 2026-10-04 (Phase A — skmPurgeableStackImages): THE Cornerstone-level fix.
@@ -616,14 +647,13 @@ window.config = {
     // 300→600-ahead and 150→300-behind bands that the prefetcher was already fetching
     // via Cornerstone XHR → a guaranteed double-request band. Keeping these == the
     // prefetch window makes the warmer start strictly BEYOND the prefetcher's reach.
-    // SKM 2026-10-06 (Fix 4): matched to the widened prefetch window (6000/6000). The prefetcher
-    // now decodes the whole clinical series (and HTTP-caches its bytes via its own XHR), so the
-    // warmer must skip that whole band to avoid re-fetching the same slices (the double-fetch Fix
-    // 1 removed). For a series ≤ 6000 slices the warmer is therefore idle (prefetch covers it);
-    // for a larger series it byte-warms only the far tail beyond the decode window.
-    // ORIGINAL: nearSkipAhead 300/150 → 600/300 → this.
-    nearSkipAhead: 6000,
-    nearSkipBehind: 6000,
+    // SKM 2026-10-07 (Fix 5): FALLBACK seeds only. The warmer reads the live near-skip from the
+    // adaptive governor (window.__skmBudget.nearSkip = the current prefetch decode window) so it
+    // always byte-warms only BEYOND the band the prefetcher decodes — scaling with RAM tier and
+    // tab count. These static values apply only if the governor is absent/disabled.
+    // ORIGINAL: nearSkipAhead 300/150 → 600/300 → 6000/6000 → runtime-derived.
+    nearSkipAhead: 1680,
+    nearSkipBehind: 1680,
     concurrency: 4,
     globalConcurrency: 8,
     rethrottleMs: 250,

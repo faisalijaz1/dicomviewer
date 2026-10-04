@@ -50,6 +50,8 @@ export type SkmWarmerConfig = {
    * restore whole-series warming.
    */
   movingWindow?: boolean;
+  /** Phase B: sweep the whole study (near-first, ahead-biased) into the HTTP cache. Default true. */
+  warmWholeStudy?: boolean;
   /** Moving window: slices to warm AHEAD of the doctor (scroll direction). Default 1000. */
   ahead?: number;
   /** Moving window: slices to warm BEHIND the doctor. Default 250. */
@@ -348,8 +350,24 @@ export function initSkmWarmer(
     const aEnd = mwWholeStudy ? last : Math.min(last, center + (dir > 0 ? mwAhead : mwBehind));
     const bEnd = mwWholeStudy ? 0 : Math.max(0, center - (dir > 0 ? mwBehind : mwAhead));
     // Far-band only: skip the near band the prefetcher decodes (fix G — no double-fetch).
-    const nearLo = center - mwSkipBehind;
-    const nearHi = center + mwSkipAhead;
+    // SKM 2026-10-07 (Fix 5): the prefetch decode window is now derived at runtime from the
+    // adaptive per-tab memory budget (skmMemoryBudget → window.__skmBudget.nearSkip). Read it
+    // live so the warmer always skips exactly the band the prefetcher currently decodes and
+    // byte-warms only BEYOND it — regardless of machine tier or tab count. Falls back to the
+    // static config values when the budget governor isn't present.
+    let skipAhead = mwSkipAhead;
+    let skipBehind = mwSkipBehind;
+    try {
+      const b = (globalThis as any).__skmBudget;
+      if (b && typeof b.nearSkip === 'number' && b.nearSkip > 0) {
+        skipAhead = b.nearSkip;
+        skipBehind = b.nearSkip;
+      }
+    } catch (e) {
+      /* use config fallback */
+    }
+    const nearLo = center - skipBehind;
+    const nearHi = center + skipAhead;
     const out: string[] = [];
     const push = (i: number) => {
       if (i < 0 || i > last || !imageIds[i]) {

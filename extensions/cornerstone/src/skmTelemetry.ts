@@ -215,6 +215,32 @@ function max(arr: number[]): number {
   return arr.length ? Math.round(Math.max(...arr)) : 0;
 }
 
+// SKM 2026-10-07 (Fix 5): read the adaptive memory-budget governor's live snapshot
+// (window.__skmBudget) so validation can see the per-tab cap, live tab count, derived decode
+// window and budget source (default vs per-workstation override). Returns {} if absent.
+function budgetSnapshot(): Record<string, number | string> {
+  try {
+    const b = (globalThis as any).__skmBudget;
+    if (!b) {
+      return {};
+    }
+    return {
+      budget_machineMB: b.machineMB ?? 0,
+      budget_source: b.source ?? 'default',
+      budget_liveTabs: b.liveTabs ?? 1,
+      budget_perTabCapMB: b.perTabCapMB ?? 0,
+      budget_aggregateMB: b.aggregateMB ?? 0,
+      budget_windowSlices: b.windowSlices ?? 0,
+      budget_windowAhead: b.windowAhead ?? 0,
+      budget_windowBehind: b.windowBehind ?? 0,
+      budget_nearSkip: b.nearSkip ?? 0,
+      budget_avgSliceKB: b.avgSliceBytes ? Math.round(b.avgSliceBytes / 1024) : 0,
+    };
+  } catch (e) {
+    return {};
+  }
+}
+
 export function initSkmTelemetry(): void {
   if (telemetryInitialized) {
     return;
@@ -463,6 +489,8 @@ export function initSkmTelemetry(): void {
       ...schedulerSnapshot(),
       // SKM Phase B — evictor keep window (protected range) from the budget-based evictor
       ...evictorSnapshot(),
+      // SKM Fix 5 — adaptive memory-budget governor snapshot (per-tab cap, tabs, window, source)
+      ...budgetSnapshot(),
     };
   };
 

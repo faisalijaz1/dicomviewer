@@ -448,35 +448,6 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
         return; // MPR/3D session → leave memory to Cornerstone's volume management
       }
 
-      // ── Fix 3 (REACTIVE eviction) ──────────────────────────────────────────
-      // Only evict under real memory pressure. While the decoded cache is below
-      // reactiveHighWater × cap, skip entirely → a series that fits stays fully resident
-      // (zero churn), which the A/B proved is the RadiAnt-smooth state. Eviction engages
-      // only when a series exceeds the cap, where it stays bounded.
-      if (reactiveHighWater > 0) {
-        try {
-          const capBytes = (cache as any).getMaxCacheSize?.() || 0;
-          const curBytes = (cache as any).getCacheSize?.() || 0;
-          const fill = capBytes > 0 ? curBytes / capBytes : 0;
-          if (fill < reactiveHighWater) {
-            reactiveSkips++;
-            (globalThis as any).__skmEvictorLast = {
-              ...((globalThis as any).__skmEvictorLast || {}),
-              reactiveSkip: true,
-              fillPct: Math.round(fill * 100),
-              reactiveSkips,
-              decodedBeforeMB: Math.round(curBytes / 1048576),
-              decodedAfterMB: Math.round(curBytes / 1048576),
-              removed: 0,
-              totalEvicted: evictionCount,
-            };
-            return; // under pressure threshold → keep everything decoded
-          }
-        } catch (e) {
-          /* if the cache API shape differs, fall through to window eviction */
-        }
-      }
-
       // Collect open STACK viewports (and update scroll direction) so the budget can be split.
       const stackVps: { imageIds: string[]; idx: number; viewportId: string }[] = [];
       viewports.forEach((_vpState: any, viewportId: string) => {
@@ -529,24 +500,38 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
         }
       }
 
-      // Collect decoded slices OUTSIDE the keep-set (the windowed eviction candidates), deduped.
+      // ── Fix 3 (REACTIVE gate) — gates ONLY windowed eviction, NOT orphan eviction ─────────
+      // Windowed eviction (trimming the CURRENT series' working set) is a RAM-vs-smoothness
+      // tradeoff, so it runs only under real memory pressure (fill ≥ reactiveHighWater): a series
+      // that fits stays fully resident with zero churn. ORPHAN eviction (below) is pure waste
+      // reclamation and runs REGARDLESS of fill (Fix 3b correction), so switching series frees
+      // the old series immediately even with plenty of RAM free — critical on 16 GB/multi-tab.
+      const capBytes = (cache as any).getMaxCacheSize?.() || 0;
+      const curBytes = (cache as any).getCacheSize?.() || 0;
+      const fill = capBytes > 0 ? curBytes / capBytes : 0;
+      const underPressure = reactiveHighWater <= 0 || fill >= reactiveHighWater;
+
+      // Collect decoded slices OUTSIDE the keep-set (windowed candidates), deduped — only under
+      // memory pressure; otherwise the whole resident window is kept.
       const candidateSet = new Set<string>();
       const windowed: string[] = [];
-      for (const { imageIds } of stackVps) {
-        for (let i = 0; i < imageIds.length; i++) {
-          const imageId = imageIds[i];
-          if (!imageId || keep.has(imageId) || candidateSet.has(imageId)) {
-            continue;
-          }
-          let present = false;
-          try {
-            present = !!(cache as any).getImageLoadObject?.(imageId);
-          } catch (e) {
-            present = false;
-          }
-          if (present) {
-            candidateSet.add(imageId);
-            windowed.push(imageId);
+      if (underPressure) {
+        for (const { imageIds } of stackVps) {
+          for (let i = 0; i < imageIds.length; i++) {
+            const imageId = imageIds[i];
+            if (!imageId || keep.has(imageId) || candidateSet.has(imageId)) {
+              continue;
+            }
+            let present = false;
+            try {
+              present = !!(cache as any).getImageLoadObject?.(imageId);
+            } catch (e) {
+              present = false;
+            }
+            if (present) {
+              candidateSet.add(imageId);
+              windowed.push(imageId);
+            }
           }
         }
       }
@@ -577,6 +562,27 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
         }
       } catch (e) {
         /* cache map shape differs → no orphan sweep (windowed eviction still runs) */
+      }
+
+      // Nothing to reclaim this pass (no orphans, and either not under pressure or the window is
+      // intact) → record a reactive-skip and return without starting a drain.
+      if (!windowed.length && !orphans.length) {
+        if (!underPressure) {
+          reactiveSkips++;
+        }
+        (globalThis as any).__skmEvictorLast = {
+          ...((globalThis as any).__skmEvictorLast || {}),
+          reactiveSkip: !underPressure,
+          fillPct: Math.round(fill * 100),
+          reactiveSkips,
+          orphanSweeps,
+          orphanQueuedTotal,
+          decodedBeforeMB: Math.round(curBytes / 1048576),
+          decodedAfterMB: Math.round(curBytes / 1048576),
+          removed: 0,
+          totalEvicted: evictionCount,
+        };
+        return;
       }
 
       // Prime pass state. Order: windowed first, orphans last, so runBatch (which pops from the
