@@ -456,8 +456,14 @@ window.config = {
   // decodedHitRatio 100%, displayP95 2ms, 0 spinners). RAM at that point is ~6 GB for the tab
   // (decoded ~2.8 GB + heap) — safe on the ≥32 GB reading workstations. NOTE: multiTabCacheSplit
   // is false, so N tabs each take up to this; keep that in mind for multi-study-per-tab use.
-  // ORIGINAL: 805306368 (768 MB) → 3221225472 (3 GB) → this.
-  maxCacheSize: 3670016000, // 3.5 GB (holds the 4403-slice series fully decoded-resident)
+  // SKM 2026-10-06 (Fix 3c): 3.5 GB → 4 GB. The 4403 series decodes to ~2900 MB, which sat right
+  // at the 0.85 × 3.5 = 2.98 GB high-water → borderline oscillation + residual lag. 0.85 × 4 GB =
+  // 3.4 GB gives the 4403 series comfortable headroom to stay fully resident with no churn, while
+  // still evicting the previous series on a switch (old+new > 3.4 GB → orphan eviction engages).
+  // Decoded RAM for a single series is the series size (~2.9 GB) regardless of the cap, so this
+  // raises the ceiling for headroom, not steady-state RAM. Safe on the ≥32 GB workstations.
+  // ORIGINAL: 805306368 (768 MB) → 3221225472 (3 GB) → 3670016000 (3.5 GB) → this.
+  maxCacheSize: 4294967296, // 4 GB (comfortable headroom for the 4403-slice series)
 
   // SKM 2026-10-04 (Option B — skmBoundedDecodeCache): master gate for the bounded
   // Cornerstone decoded-RAM cap applied in init.tsx. enabled:true applies maxCacheSize
@@ -538,6 +544,11 @@ window.config = {
     // exceeds the cap, where it stays bounded. Sits below boundedPrefetchHighWater (0.90) so
     // the evictor frees space before the prefetcher pauses (no oscillation). 0 = old behaviour.
     reactiveHighWater: 0.85,
+    // SKM 2026-10-06 (Fix 3c): periodic self-tick (ms) so eviction reclaims the PREVIOUS series
+    // during background decode after a series switch, without waiting for the doctor to scroll.
+    // Without it, switching 2001→4403 left the old series pinned and the prefetcher paused at its
+    // high-water until a scroll "unstuck" it (the reported pause). Near-free while idle. 0 = off.
+    tickMs: 750,
   },
 
   // SKM 2026-10-03 (W3 "indicator" warmer): background-download the ACTIVE series

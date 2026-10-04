@@ -110,6 +110,16 @@ export type SkmEvictionConfig = {
    * recomputes the keep-set around the new position. Default 100.
    */
   abortMoveThreshold?: number;
+  /**
+   * SKM 2026-10-06 (Fix 3c): periodic self-tick (ms). The evictor was only triggered by
+   * STACK_NEW_IMAGE / grid events, so after a SERIES SWITCH with no scroll, background decode of
+   * the new series could climb to the prefetcher's high-water PAUSE while the old series still
+   * occupied the budget — and nothing ran the evictor to reclaim it, so download/decode "paused"
+   * until the doctor scrolled. A low-cost timer re-checks fill on this cadence so orphan/overflow
+   * eviction happens during background decode without any user interaction (it reactive-skips
+   * cheaply while under the high-water). Default 750. Set 0 to disable.
+   */
+  tickMs?: number;
 };
 
 let evictorInitialized = false;
@@ -117,6 +127,8 @@ let evictionCount = 0; // total removeImageLoadObject() calls (window.__skmEvict
 let lastCenter: number | null = null;
 let direction = 1;
 let reactiveSkips = 0; // passes skipped because decoded fill was below reactiveHighWater (Fix 3)
+let orphanSweeps = 0; // passes that queued ≥1 orphan (closed-series) image (Fix 3b, cumulative)
+let orphanQueuedTotal = 0; // total orphan images queued for eviction across all passes (Fix 3b)
 
 // SKM 2026-10-05 (Fix 2): small ring buffer of recent batch records for inspection
 // (window.__skmEvictorBatches). No console output per batch — telemetry only.
@@ -166,6 +178,8 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
   const idleTimeoutMs = Math.max(50, config?.idleTimeoutMs ?? 500);
   // Fix 3: reactive eviction high-water (fraction of cap). 0 disables (always evict by window).
   const reactiveHighWater = Math.min(0.98, Math.max(0, config?.reactiveHighWater ?? 0.85));
+  // Fix 3c: periodic self-tick (ms) so eviction runs during background decode without a scroll.
+  const tickMs = Math.max(0, config?.tickMs ?? 750);
   const inputQuietMs = Math.max(0, config?.inputQuietMs ?? 120);
   const abortMoveThreshold = Math.max(1, config?.abortMoveThreshold ?? 100);
 
@@ -305,6 +319,8 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
       reactiveSkip: false, // this snapshot is from a real eviction pass
       reactiveSkips,
       orphans: passOrphans, // orphan (closed-series) images queued this pass (Fix 3b)
+      orphanSweeps, // cumulative passes that queued ≥1 orphan
+      orphanQueuedTotal, // cumulative orphan images queued (Fix 3b)
     };
     (globalThis as any).__skmEvictorLast = last;
     return last;
@@ -568,6 +584,10 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
       passSeq++;
       passActive = true;
       passOrphans = orphans.length;
+      if (orphans.length) {
+        orphanSweeps++;
+        orphanQueuedTotal += orphans.length;
+      }
       passCandidates = windowed.concat(orphans);
       passKeep = keep;
       passCenterAtStart = activeIdx;
@@ -628,6 +648,14 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
     /* best-effort */
   }
 
+  // Fix 3c: periodic self-tick so eviction can reclaim the previous series (orphans) and any
+  // overflow during BACKGROUND decode after a series switch — without waiting for the doctor to
+  // scroll. schedule() is throttled and the pass reactive-skips cheaply while under the
+  // high-water, so this is near-free when there is nothing to do.
+  if (tickMs > 0) {
+    setInterval(schedule, tickMs);
+  }
+
   // eslint-disable-next-line no-console
   console.log(
     (budgetBased
@@ -636,6 +664,7 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
       : `[SKM-EVICTOR] active, fixed window: keep ${keepBehind}+${keepAhead} (+${margin}) slices`) +
       ` | Fix 2: idle-batched, batchCap ${maxEvictPerTick}, inputQuiet ${inputQuietMs}ms, ` +
       `abortMove ${abortMoveThreshold}, idleTimeout ${idleTimeoutMs}ms` +
-      ` | Fix 3: reactive, evict only when fill ≥ ${Math.round(reactiveHighWater * 100)}% of cap`
+      ` | Fix 3: reactive, evict only when fill ≥ ${Math.round(reactiveHighWater * 100)}% of cap` +
+      ` | Fix 3c: self-tick ${tickMs}ms (orphan reclaim without scroll)`
   );
 }
