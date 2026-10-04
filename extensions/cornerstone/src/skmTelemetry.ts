@@ -57,6 +57,18 @@ type Counters = {
   displayTotal: number; // total scroll→display events classified
   decodedHits: number; // display ≤ 8 ms (slice already decoded → instant)
   reDecodes: number; // display > 8 ms (re-decode / network needed)
+  // ── SKM 2026-10-05: authoritative /wado/uri cache-source breakdown ─────────
+  // Thousands of calls can't be hand-counted in the Network tab, so classify every
+  // /wado/uri PerformanceResourceTiming and expose exact counts + the REVISIT hit
+  // ratio (the number that actually proves whether warmed bytes survive in the HTTP
+  // disk cache, separated from unavoidable first-time downloads).
+  wadoFromCache: number; // transferSize === 0 → served from HTTP (disk/memory) cache
+  wadoFromNetwork: number; // transferSize > 0 with a body → real network download
+  wado304: number; // transferSize > 0 but empty body → 304 revalidation (small network)
+  wadoFirstReq: number; // first time this exact URL was requested in the window
+  wadoRepeatReq: number; // a URL requested again in the window (a revisit)
+  wadoRepeatFromCache: number; // of the revisits, how many were served from cache
+  wadoUrlSeen: Map<string, number>; // per-URL request count (first-vs-repeat detection)
 };
 
 function freshCounters(): Counters {
@@ -80,6 +92,13 @@ function freshCounters(): Counters {
     displayTotal: 0,
     decodedHits: 0,
     reDecodes: 0,
+    wadoFromCache: 0,
+    wadoFromNetwork: 0,
+    wado304: 0,
+    wadoFirstReq: 0,
+    wadoRepeatReq: 0,
+    wadoRepeatFromCache: 0,
+    wadoUrlSeen: new Map<string, number>(),
   };
 }
 
@@ -202,9 +221,35 @@ export function initSkmTelemetry(): void {
           continue;
         }
         c.wadoTotal++;
-        if (e.transferSize === 0) {
-          c.wadoHits++; // served from (disk or memory) HTTP cache
+        // First-vs-repeat: has this EXACT url been requested before in this window?
+        const seen = c.wadoUrlSeen.get(e.name) || 0;
+        c.wadoUrlSeen.set(e.name, seen + 1);
+        const isRepeat = seen > 0;
+        if (isRepeat) {
+          c.wadoRepeatReq++;
         } else {
+          c.wadoFirstReq++;
+        }
+        // Cache-source classification from the ResourceTiming entry:
+        //   transferSize === 0                      → served from HTTP (disk/memory) cache
+        //   transferSize > 0 && encodedBodySize 0   → 304 revalidation (headers only, body cached)
+        //   transferSize > 0 && encodedBodySize > 0 → real network download (bytes over the wire)
+        const fromCache = e.transferSize === 0;
+        if (fromCache) {
+          c.wadoHits++; // kept for backward-compatible cacheHitRatioPct
+          c.wadoFromCache++;
+          if (isRepeat) {
+            c.wadoRepeatFromCache++;
+          }
+        } else if ((e.encodedBodySize || 0) === 0) {
+          c.wado304++;
+          // a 304 still reused the cached body → count as a cache hit for the headline ratio
+          c.wadoHits++;
+          if (isRepeat) {
+            c.wadoRepeatFromCache++;
+          }
+        } else {
+          c.wadoFromNetwork++;
           c.wadoMissBytes += e.transferSize || 0;
           c.wadoMissDurations.push(e.duration || 0);
         }
@@ -363,6 +408,23 @@ export function initSkmTelemetry(): void {
       cacheMisses: c.wadoTotal - c.wadoHits,
       missMBDownloaded: Math.round(c.wadoMissBytes / 1048576),
       missLatencyP95ms: p95(c.wadoMissDurations),
+      // ── SKM 2026-10-05: authoritative cache-source breakdown ───────────────
+      // Exact counts (no hand-counting the Network tab). The headline number is
+      // wadoRepeatHitPct: of URLs requested MORE THAN ONCE, how many revisits were
+      // served from the HTTP cache. ~100% = warmed bytes survive (cache works, low
+      // overall ratio is just first-time loads). Low = the browser disk cache is
+      // evicting warmed bytes → revisits re-download → spinner on scroll-back.
+      wadoFromCache: c.wadoFromCache,
+      wadoFromNetwork: c.wadoFromNetwork,
+      wado304: c.wado304,
+      wadoUniqueUrls: c.wadoUrlSeen.size,
+      wadoFirstReq: c.wadoFirstReq,
+      wadoRepeatReq: c.wadoRepeatReq,
+      wadoRepeatFromCache: c.wadoRepeatFromCache,
+      wadoRepeatHitPct: pct(c.wadoRepeatFromCache, c.wadoRepeatReq),
+      wadoFirstReqMB: Math.round(c.wadoMissBytes / 1048576), // bytes are ~all first-time
+      wadoAvgRequestsPerUrl:
+        c.wadoUrlSeen.size > 0 ? Math.round((100 * c.wadoTotal) / c.wadoUrlSeen.size) / 100 : 0,
       decodesPerMin: Math.round(c.decodes / minutes),
       evictionsPerMin: Math.round(c.cacheRemoves / minutes),
       activeEvictionsTotal: (globalThis as any).__skmEvictions || 0,
@@ -452,6 +514,33 @@ export function initSkmTelemetry(): void {
     },
     snapshot() {
       return { ...c };
+    },
+    // SKM 2026-10-05: focused /wado/uri cache-source breakdown for sharing exact
+    // counts (the Network tab can't be hand-counted across thousands of calls).
+    wadoReport() {
+      const total = c.wadoTotal;
+      const r = {
+        wadoRequests: total,
+        uniqueUrls: c.wadoUrlSeen.size,
+        avgRequestsPerUrl:
+          c.wadoUrlSeen.size > 0 ? Math.round((100 * total) / c.wadoUrlSeen.size) / 100 : 0,
+        fromDiskCache: c.wadoFromCache,
+        revalidated304: c.wado304,
+        fromNetwork: c.wadoFromNetwork,
+        overallCacheHitPct: pct(c.wadoHits, total),
+        firstRequests: c.wadoFirstReq,
+        repeatRequests: c.wadoRepeatReq,
+        repeatFromCache: c.wadoRepeatFromCache,
+        // THE decisive number: of revisited URLs, how many were served from cache.
+        repeatCacheHitPct: pct(c.wadoRepeatFromCache, c.wadoRepeatReq),
+        networkMB: Math.round(c.wadoMissBytes / 1048576),
+        missLatencyP95ms: p95(c.wadoMissDurations),
+      };
+      // eslint-disable-next-line no-console
+      console.table(r);
+      // eslint-disable-next-line no-console
+      console.log('[SKM-TELEMETRY][WADO]', r);
+      return r;
     },
   };
 
