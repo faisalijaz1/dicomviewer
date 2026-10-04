@@ -31,6 +31,7 @@
 
 // eslint-disable-next-line
 import { cache, Enums } from '@cornerstonejs/core';
+import { subscribeStackNewImage } from './utils/skmStackNewImage';
 
 export type SkmEvictionConfig = {
   enabled?: boolean;
@@ -229,17 +230,11 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
   };
 
   // Re-evaluate the working set whenever the displayed slice changes, and on grid changes.
-  // SKM 2026-10-04 (fix): STACK_NEW_IMAGE is a DOM CustomEvent dispatched on the viewport
-  // ELEMENT and bubbles to `document` — it is NOT dispatched on Cornerstone's `eventTarget`
-  // singleton. The previous eventTarget listener never fired, so the evictor never ran while
-  // scrolling (activeEvictionsTotal≈1). Listen on `document` (same pattern as init.tsx).
-  try {
-    const stackNewImageName =
-      (Enums.Events as any).STACK_NEW_IMAGE || 'CORNERSTONE_STACK_NEW_IMAGE';
-    document.addEventListener(stackNewImageName, schedule);
-  } catch (e) {
-    /* older core: grid events still drive it */
-  }
+  // SKM 2026-10-04 (Phase B): STACK_NEW_IMAGE is a NON-bubbling element CustomEvent
+  // (triggerEvent sets no `bubbles`), so neither document nor eventTarget ever received it
+  // and the evictor never ran while scrolling (activeEvictionsTotal≈1). Wire it PER ELEMENT
+  // via ELEMENT_ENABLED (the pattern skmTelemetry uses successfully).
+  subscribeStackNewImage(schedule);
   try {
     const { viewportGridService } = servicesManager.services;
     const E = viewportGridService.EVENTS;

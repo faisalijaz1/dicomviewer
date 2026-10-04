@@ -1,4 +1,5 @@
 import { cache, imageLoadPoolManager, imageLoader, Enums, eventTarget, EVENTS as csEvents } from '@cornerstonejs/core';
+import { subscribeStackNewImage } from './utils/skmStackNewImage';
 
 function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager) {
   const { studyPrefetcherService } = servicesManager.services;
@@ -31,14 +32,11 @@ function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager) {
       eventTarget.addEventListener(csEvents.IMAGE_LOADED, onImageLoaded);
       eventTarget.addEventListener(csEvents.IMAGE_LOAD_FAILED, onImageLoadFailed);
 
-      // SKM 2026-10-04 (Option B): re-centre the prefetch window the INSTANT the
-      // displayed slice changes (scroll or far jump), instead of waiting for an
-      // IMAGE_LOADED completion. onActiveSliceChanged is a cheap no-op unless
-      // windowedPrefetch is on, and it internally throttles / far-jump-cancels.
-      // SKM 2026-10-04 (fix): STACK_NEW_IMAGE is a DOM event on the viewport ELEMENT that
-      // bubbles to `document` — it is NOT dispatched on Cornerstone's `eventTarget`. The
-      // previous eventTarget listener never fired (re-centring fell back to the sparser
-      // IMAGE_LOADED path). Listen on `document` so scroll/jump re-centres immediately.
+      // SKM 2026-10-04 (Phase B): re-centre the prefetch window the INSTANT the displayed
+      // slice changes (scroll or far jump), instead of waiting for an IMAGE_LOADED completion.
+      // STACK_NEW_IMAGE is a NON-bubbling element event, so document/eventTarget listeners
+      // never fired; wire it PER ELEMENT via ELEMENT_ENABLED. onActiveSliceChanged is a cheap
+      // no-op unless windowedPrefetch is on, and it internally throttles / far-jump-cancels.
       const onStackNewImage = () => {
         try {
           studyPrefetcherService.onActiveSliceChanged?.();
@@ -46,13 +44,7 @@ function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager) {
           /* best-effort */
         }
       };
-      let stackNewImageName: string | undefined;
-      try {
-        stackNewImageName = (csEvents as any).STACK_NEW_IMAGE || 'CORNERSTONE_STACK_NEW_IMAGE';
-        document.addEventListener(stackNewImageName, onStackNewImage);
-      } catch (e) {
-        /* older core: fall back to IMAGE_LOADED-driven re-centring only */
-      }
+      const unsubscribeStackNewImage = subscribeStackNewImage(onStackNewImage);
 
       return [
         {
@@ -64,9 +56,7 @@ function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager) {
         {
           unsubscribe: () => {
             try {
-              if (stackNewImageName) {
-                document.removeEventListener(stackNewImageName, onStackNewImage);
-              }
+              unsubscribeStackNewImage();
             } catch (e) {
               /* noop */
             }

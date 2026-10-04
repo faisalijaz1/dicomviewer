@@ -25,7 +25,8 @@
  */
 
 // eslint-disable-next-line
-import { cache, eventTarget, Enums } from '@cornerstonejs/core';
+import { cache, eventTarget } from '@cornerstonejs/core';
+import { subscribeStackNewImage } from './utils/skmStackNewImage';
 
 export type SkmWarmerConfig = {
   enabled?: boolean;
@@ -193,14 +194,15 @@ export function initSkmWarmer(
         if (!imageId) {
           continue;
         }
-        // Already fetched this session → bytes are in the HTTP cache; don't re-request.
+        // Already fetched this session → bytes are in the HTTP cache; skip silently (the bar
+        // is monotonic and already marked it — no redundant event dispatch, Phase B).
         if (warmedImageIds.has(imageId)) {
-          emitAvailable(imageId);
           continue;
         }
-        // Already decoded in Cornerstone → it's available; mark it without a fetch.
+        // Already decoded in Cornerstone → it's available; mark it available without a fetch.
         try {
           if (cache.getImageLoadObject && cache.getImageLoadObject(imageId)) {
+            warmedImageIds.add(imageId);
             emitAvailable(imageId);
             continue;
           }
@@ -288,6 +290,11 @@ export function initSkmWarmer(
   const mwSkipAhead = Math.max(0, config?.nearSkipAhead ?? 300);
   const mwSkipBehind = Math.max(0, config?.nearSkipBehind ?? 150);
   const mwThrottle = Math.max(50, config?.rethrottleMs ?? 250);
+  // SKM 2026-10-04 (Phase B): sweep the WHOLE study (near-doctor first, ahead-biased), not
+  // just ±ahead/behind, so the Ready N/Total frontier keeps advancing to 100% in the
+  // background instead of stopping around the initial window. Bytes only (HTTP cache); the
+  // moving window just prioritises order. Set false to restore the bounded ±ahead window.
+  const mwWholeStudy = config?.warmWholeStudy !== false;
   let mwLastCenter: number | null = null;
   let mwDirection = 1;
   let mwTimer: ReturnType<typeof setTimeout> | null = null;
@@ -336,8 +343,10 @@ export function initSkmWarmer(
   // Ordered, ahead-biased list of imageIds to warm around `center` (center-out).
   const mwOrderedWindow = (imageIds: string[], center: number, dir: number): string[] => {
     const last = imageIds.length - 1;
-    const aEnd = Math.min(last, center + (dir > 0 ? mwAhead : mwBehind));
-    const bEnd = Math.max(0, center - (dir > 0 ? mwBehind : mwAhead));
+    // Phase B: when warming the whole study, extend the walk to both ends (still near-first,
+    // ahead-biased); otherwise keep the bounded ±ahead/behind window.
+    const aEnd = mwWholeStudy ? last : Math.min(last, center + (dir > 0 ? mwAhead : mwBehind));
+    const bEnd = mwWholeStudy ? 0 : Math.max(0, center - (dir > 0 ? mwBehind : mwAhead));
     // Far-band only: skip the near band the prefetcher decodes (fix G — no double-fetch).
     const nearLo = center - mwSkipBehind;
     const nearHi = center + mwSkipAhead;
@@ -348,6 +357,10 @@ export function initSkmWarmer(
       }
       if (i >= nearLo && i <= nearHi) {
         return; // prefetcher owns this slice
+      }
+      if (warmedImageIds.has(imageIds[i])) {
+        return; // already byte-warmed this session — keep the sweep list to UNwarmed only,
+        // so it shrinks as progress advances (no re-scan/re-emit storm). Phase B.
       }
       out.push(imageIds[i]);
     };
@@ -389,17 +402,25 @@ export function initSkmWarmer(
     if (mwLastCenter !== null && center !== mwLastCenter) {
       mwDirection = center > mwLastCenter ? 1 : -1;
     }
-    // Skip tiny moves that don't meaningfully change the window (cheap).
-    if (mwLastCenter !== null && Math.abs(center - mwLastCenter) < 3 && currentRunId > 0) {
+    // Phase B: only RESTART (re-prioritise) the sweep on a meaningful move. The sweep already
+    // warms the whole study near-first and dedups via warmedImageIds, so we don't need to tear
+    // it down and rebuild on every 1-slice scroll (that caused re-scan churn). Between restarts
+    // the running sweep keeps progressing. A far jump (> restart threshold) re-prioritises.
+    const MW_RESTART_THRESHOLD = 50;
+    if (
+      mwLastCenter !== null &&
+      currentRunId > 0 &&
+      Math.abs(center - mwLastCenter) < MW_RESTART_THRESHOLD
+    ) {
       return;
     }
     mwLastCenter = center;
-    currentRunId++; // abandon any in-flight warm from the previous centre
+    currentRunId++; // abandon the previous sweep's workers; dedup keeps completed work
     const myRun = currentRunId;
     const list = mwOrderedWindow(s.imageIds, center, mwDirection);
     // eslint-disable-next-line no-console
     console.log(
-      `[SKM-WARMER] moving window @${center} dir=${mwDirection} warming ${list.length} slices`
+      `[SKM-WARMER] moving window @${center} dir=${mwDirection} warming ${list.length} remaining slices`
     );
     warmSeries(list, myRun).catch(() => undefined);
   };
@@ -422,17 +443,10 @@ export function initSkmWarmer(
       viewportGridService.subscribe(E.VIEWPORTS_READY, mwSchedule);
       viewportGridService.subscribe(E.ACTIVE_VIEWPORT_ID_CHANGED, mwSchedule);
       viewportGridService.subscribe(E.GRID_STATE_CHANGED, mwSchedule);
-      try {
-        // SKM 2026-10-04 (fix): STACK_NEW_IMAGE is a DOM event on the viewport ELEMENT that
-        // bubbles to `document` — NOT dispatched on Cornerstone's `eventTarget`. The previous
-        // eventTarget listener never fired, so the moving window warmed one initial window and
-        // never moved. Listen on `document` so it follows the doctor.
-        const stackNewImageName =
-          (Enums.Events as any).STACK_NEW_IMAGE || 'CORNERSTONE_STACK_NEW_IMAGE';
-        document.addEventListener(stackNewImageName, mwSchedule);
-      } catch (e) {
-        /* older core: viewport/grid events still drive re-centring */
-      }
+      // SKM 2026-10-04 (Phase B): STACK_NEW_IMAGE is a NON-bubbling element event, so the old
+      // document/eventTarget listener never fired and the window only warmed once (@0). Wire it
+      // PER ELEMENT via ELEMENT_ENABLED so the moving window actually follows the doctor.
+      subscribeStackNewImage(mwSchedule);
     } else {
       // Whole-series warming (previous behaviour).
       viewportGridService.subscribe(E.VIEWPORTS_READY, run);
