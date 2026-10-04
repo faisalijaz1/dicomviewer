@@ -53,6 +53,14 @@ export type SkmWarmerConfig = {
   ahead?: number;
   /** Moving window: slices to warm BEHIND the doctor. Default 250. */
   behind?: number;
+  /**
+   * SKM 2026-10-04 (fix G — far band only): skip warming the NEAR band that the prefetcher
+   * already decodes (and thereby HTTP-caches via Cornerstone's own XHR), so the warmer's
+   * fetch() doesn't double-request those slices. Set to the prefetch decode window.
+   * The warmer then warms only the FAR band (beyond the prefetcher's reach). Default 300/150.
+   */
+  nearSkipAhead?: number;
+  nearSkipBehind?: number;
   /** Throttle (ms) between scroll-driven window re-centres. Default 250. */
   rethrottleMs?: number;
   /** |Δindex| beyond which the moving window abandons and restarts (far jump). Default 120. */
@@ -277,8 +285,9 @@ export function initSkmWarmer(
   // far jump. This replaces whole-series warming when config.movingWindow is true.
   const mwAhead = Math.max(0, config?.ahead ?? 1000);
   const mwBehind = Math.max(0, config?.behind ?? 250);
+  const mwSkipAhead = Math.max(0, config?.nearSkipAhead ?? 300);
+  const mwSkipBehind = Math.max(0, config?.nearSkipBehind ?? 150);
   const mwThrottle = Math.max(50, config?.rethrottleMs ?? 250);
-  const mwFarJump = Math.max(1, config?.farJumpThreshold ?? 120);
   let mwLastCenter: number | null = null;
   let mwDirection = 1;
   let mwTimer: ReturnType<typeof setTimeout> | null = null;
@@ -329,11 +338,18 @@ export function initSkmWarmer(
     const last = imageIds.length - 1;
     const aEnd = Math.min(last, center + (dir > 0 ? mwAhead : mwBehind));
     const bEnd = Math.max(0, center - (dir > 0 ? mwBehind : mwAhead));
+    // Far-band only: skip the near band the prefetcher decodes (fix G — no double-fetch).
+    const nearLo = center - mwSkipBehind;
+    const nearHi = center + mwSkipAhead;
     const out: string[] = [];
     const push = (i: number) => {
-      if (i >= 0 && i <= last && imageIds[i]) {
-        out.push(imageIds[i]);
+      if (i < 0 || i > last || !imageIds[i]) {
+        return;
       }
+      if (i >= nearLo && i <= nearHi) {
+        return; // prefetcher owns this slice
+      }
+      out.push(imageIds[i]);
     };
     push(center);
     let a = center + dir;
@@ -407,9 +423,13 @@ export function initSkmWarmer(
       viewportGridService.subscribe(E.ACTIVE_VIEWPORT_ID_CHANGED, mwSchedule);
       viewportGridService.subscribe(E.GRID_STATE_CHANGED, mwSchedule);
       try {
+        // SKM 2026-10-04 (fix): STACK_NEW_IMAGE is a DOM event on the viewport ELEMENT that
+        // bubbles to `document` — NOT dispatched on Cornerstone's `eventTarget`. The previous
+        // eventTarget listener never fired, so the moving window warmed one initial window and
+        // never moved. Listen on `document` so it follows the doctor.
         const stackNewImageName =
           (Enums.Events as any).STACK_NEW_IMAGE || 'CORNERSTONE_STACK_NEW_IMAGE';
-        eventTarget.addEventListener(stackNewImageName, mwSchedule);
+        document.addEventListener(stackNewImageName, mwSchedule);
       } catch (e) {
         /* older core: viewport/grid events still drive re-centring */
       }

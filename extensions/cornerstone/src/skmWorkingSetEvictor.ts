@@ -30,7 +30,7 @@
  */
 
 // eslint-disable-next-line
-import { cache, eventTarget, Enums } from '@cornerstonejs/core';
+import { cache, Enums } from '@cornerstonejs/core';
 
 export type SkmEvictionConfig = {
   enabled?: boolean;
@@ -144,6 +144,10 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
       }
 
       // Evict decoded slices outside the union keep-set, bounded per tick.
+      // Instrumentation (your requirement): prove the decoded cache actually falls.
+      const sizeBeforeMB = Math.round(((cache as any).getCacheSize?.() || 0) / 1048576);
+      let candidates = 0; // decoded + outside keep (eligible)
+      let alreadyAbsent = 0; // outside keep but not decoded
       let evicted = 0;
       viewports.forEach((_vpState: any, viewportId: string) => {
         if (evicted >= maxEvictPerTick) {
@@ -167,8 +171,10 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
             present = false;
           }
           if (!present) {
+            alreadyAbsent++;
             continue;
           }
+          candidates++;
           try {
             (cache as any).removeImageLoadObject(imageId);
             evicted++;
@@ -181,6 +187,27 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
       if (evicted > 0) {
         evictionCount += evicted;
         (globalThis as any).__skmEvictions = evictionCount;
+      }
+      const sizeAfterMB = Math.round(((cache as any).getCacheSize?.() || 0) / 1048576);
+      // Publish last-pass detail for inspection (window.__skmEvictorLast) and log when it acted.
+      const last = {
+        center: lastCenter,
+        direction,
+        protectedCount: keep.size,
+        candidates,
+        removed: evicted,
+        alreadyAbsent,
+        decodedBeforeMB: sizeBeforeMB,
+        decodedAfterMB: sizeAfterMB,
+        totalEvicted: evictionCount,
+      };
+      (globalThis as any).__skmEvictorLast = last;
+      if (evicted > 0) {
+        // eslint-disable-next-line no-console
+        console.log(
+          `[SKM-EVICTOR] center=${lastCenter} protected=${keep.size} removed=${evicted} ` +
+            `absent=${alreadyAbsent} decodedMB ${sizeBeforeMB}→${sizeAfterMB} (total ${evictionCount})`
+        );
       }
       // If we hit the per-tick cap there is more to purge → schedule a follow-up pass.
       if (evicted >= maxEvictPerTick) {
@@ -202,10 +229,14 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
   };
 
   // Re-evaluate the working set whenever the displayed slice changes, and on grid changes.
+  // SKM 2026-10-04 (fix): STACK_NEW_IMAGE is a DOM CustomEvent dispatched on the viewport
+  // ELEMENT and bubbles to `document` — it is NOT dispatched on Cornerstone's `eventTarget`
+  // singleton. The previous eventTarget listener never fired, so the evictor never ran while
+  // scrolling (activeEvictionsTotal≈1). Listen on `document` (same pattern as init.tsx).
   try {
     const stackNewImageName =
       (Enums.Events as any).STACK_NEW_IMAGE || 'CORNERSTONE_STACK_NEW_IMAGE';
-    eventTarget.addEventListener(stackNewImageName, schedule);
+    document.addEventListener(stackNewImageName, schedule);
   } catch (e) {
     /* older core: grid events still drive it */
   }

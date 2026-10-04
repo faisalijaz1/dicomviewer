@@ -33,9 +33,12 @@ function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager) {
 
       // SKM 2026-10-04 (Option B): re-centre the prefetch window the INSTANT the
       // displayed slice changes (scroll or far jump), instead of waiting for an
-      // IMAGE_LOADED completion. STACK_NEW_IMAGE fires on every slice change and is
-      // dispatched on the global eventTarget. onActiveSliceChanged is a cheap no-op
-      // unless windowedPrefetch is on, and it internally throttles / far-jump-cancels.
+      // IMAGE_LOADED completion. onActiveSliceChanged is a cheap no-op unless
+      // windowedPrefetch is on, and it internally throttles / far-jump-cancels.
+      // SKM 2026-10-04 (fix): STACK_NEW_IMAGE is a DOM event on the viewport ELEMENT that
+      // bubbles to `document` — it is NOT dispatched on Cornerstone's `eventTarget`. The
+      // previous eventTarget listener never fired (re-centring fell back to the sparser
+      // IMAGE_LOADED path). Listen on `document` so scroll/jump re-centres immediately.
       const onStackNewImage = () => {
         try {
           studyPrefetcherService.onActiveSliceChanged?.();
@@ -46,7 +49,7 @@ function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager) {
       let stackNewImageName: string | undefined;
       try {
         stackNewImageName = (csEvents as any).STACK_NEW_IMAGE || 'CORNERSTONE_STACK_NEW_IMAGE';
-        eventTarget.addEventListener(stackNewImageName, onStackNewImage);
+        document.addEventListener(stackNewImageName, onStackNewImage);
       } catch (e) {
         /* older core: fall back to IMAGE_LOADED-driven re-centring only */
       }
@@ -62,7 +65,7 @@ function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager) {
           unsubscribe: () => {
             try {
               if (stackNewImageName) {
-                eventTarget.removeEventListener(stackNewImageName, onStackNewImage);
+                document.removeEventListener(stackNewImageName, onStackNewImage);
               }
             } catch (e) {
               /* noop */
