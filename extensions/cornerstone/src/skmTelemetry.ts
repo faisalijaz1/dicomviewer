@@ -94,6 +94,30 @@ function p50(arr: number[]): number {
   const s = [...arr].sort((a, b) => a - b);
   return Math.round(s[Math.floor(s.length * 0.5)]);
 }
+// SKM 2026-10-04 (Phase A): count cached images by sharedCacheKey presence + volumes.
+// Read-only inspection of the cache maps (same data the manual probe reads).
+function cacheKeyStats(): Record<string, number> {
+  try {
+    const ic = (cache as any)._imageCache;
+    const vc = (cache as any)._volumeCache;
+    let sharedKeyImages = 0;
+    let pureStackImages = 0;
+    if (ic && typeof ic.forEach === 'function') {
+      ic.forEach((ci: any) => {
+        if (ci && ci.sharedCacheKey) {
+          sharedKeyImages++;
+        } else {
+          pureStackImages++;
+        }
+      });
+    }
+    const volumesInCache = vc && typeof vc.size === 'number' ? vc.size : 0;
+    return { sharedKeyImages, pureStackImages, volumesInCache };
+  } catch (e) {
+    return {};
+  }
+}
+
 // SKM 2026-10-04 (Option B): read the read-only scheduler snapshot the
 // StudyPrefetcherService publishes (window.__skmScheduler). Returns {} if absent.
 function schedulerSnapshot(): Record<string, number> {
@@ -292,6 +316,9 @@ export function initSkmTelemetry(): void {
       evictionsPerMin: Math.round(c.cacheRemoves / minutes),
       activeEvictionsTotal: (globalThis as any).__skmEvictions || 0,
       cacheSizeExceeded: c.cacheSizeExceeded,
+      // SKM 2026-10-04 (Phase A diagnostics): prove sharedCacheKey is cleared. With the
+      // flag ON, sharedKeyImages should be ~0 and pureStackImages ~= cached count.
+      ...cacheKeyStats(),
       decodeCacheMB_now: c.cacheSizeSamplesMB[c.cacheSizeSamplesMB.length - 1] ?? 0,
       decodeCacheMB_peak: max(c.cacheSizeSamplesMB),
       decodeCacheCapMB: maxCacheMB,

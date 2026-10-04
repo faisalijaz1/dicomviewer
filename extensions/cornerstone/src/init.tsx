@@ -40,6 +40,11 @@ import { initSkmWarmer } from './skmBackgroundWarmer';
 // purges decoded slices outside a window around the doctor to bound RAM and prevent the
 // throw. Stack-only, skips MPR/volume. No-op unless appConfig.skmActiveEviction.enabled.
 import { initSkmWorkingSetEvictor } from './skmWorkingSetEvictor';
+// SKM 2026-10-04 (Phase A): make WADO-URI stack images purgeable by clearing the loader's
+// legacy per-URL sharedCacheKey (which CS3D 4.22.10 treats as non-evictable). Lets the
+// native LRU bound decoded RAM and eliminates CACHE_SIZE_EXCEEDED. No-op unless
+// appConfig.skmPurgeableStackImages.enabled. See skmPurgeableStackImages.ts.
+import { initSkmPurgeableStackImages } from './skmPurgeableStackImages';
 // SKM 2026-10: read-only in-app telemetry (cache hit ratio, eviction, RAM, jank,
 // CACHE_SIZE_EXCEEDED) surfaced via the DevTools console — the measurement harness
 // for validating the caching/RAM architecture. No-op unless appConfig.skmTelemetry.enabled.
@@ -694,6 +699,13 @@ export default async function init({
   };
 
   initWADOImageLoader(userAuthenticationService, appConfig, extensionManager);
+
+  // SKM 2026-10-04 (Phase A): MUST run AFTER initWADOImageLoader (which registers the stock
+  // wadouri loader) so our wrapper overrides it. Makes WADO-URI stack images purgeable so
+  // the native LRU bounds decoded RAM and CACHE_SIZE_EXCEEDED stops. Default OFF.
+  if (appConfig?.skmPurgeableStackImages?.enabled) {
+    initSkmPurgeableStackImages();
+  }
 
   // Add OHIF metadata providers after dicomImageLoader.init().
   // The linked metadata branch clears providers during loader init.
