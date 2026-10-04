@@ -506,7 +506,15 @@ window.config = {
   // navigator.deviceMemory is NOT trusted to raise the budget (it caps at 8, can't tell 16 from
   // 32 GB); it can only LOWER it on a genuinely weak box. Tune the two numbers below if needed.
   skmMemoryBudget: {
-    defaultBudgetMB: 2048,   // 16 GB-safe default (per workstation, overridable at runtime)
+    // SKM 2026-10-07 (tuned from 16 GB hardware measurement): 2048 → 3072. On the 16 GB box the
+    // 4403 series was smooth-limited at 2048 (only ~65% resident → re-decode/eviction waves =
+    // lag) while Edge used only ~4 GB (≈12 GB free) — far too conservative. 3072 gives the 4403
+    // ~90% residency (much smoother) and, because perTabCap = floor(budget/liveTabs) strictly
+    // divides, the TOTAL decoded across all tabs is still capped at 3072 MB (2 tabs→1536 each,
+    // 3 tabs→1024 each) → Edge ≤ ~8-9 GB → ≥7 GB free on 16 GB at ANY tab count. Consultants
+    // override higher at runtime: skmSetMemoryBudget(5120). To sweep on a 16 GB box without a
+    // rebuild: skmSetMemoryBudget(2560 | 3072 | 3500) then re-run the scroll test. ORIGINAL: 2048.
+    defaultBudgetMB: 3072,   // 16 GB-safe default (per workstation, overridable at runtime)
     minBudgetMB: 1024,
     maxBudgetMB: 8192,
     workingSetFraction: 0.82, // decode window fills 82% of the per-tab cap (< 0.85 evict high-water)
