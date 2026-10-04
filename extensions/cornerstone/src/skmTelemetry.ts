@@ -185,6 +185,34 @@ export function initSkmTelemetry(): void {
     /* event names differ in this version — report() still has WADO + jank + RAM */
   }
 
+  // SKM 2026-10-04 (Option B correction): in CS3D 4.22.10 CACHE_SIZE_EXCEEDED is THROWN as
+  // an Error, NOT dispatched on eventTarget — so the listener above never fired and the UI
+  // modal was uncounted. Capture it from the global error channels + the Cornerstone
+  // image-load-failed event instead, matching the message string. (Measurement only.)
+  const looksLikeExceeded = (s: any) =>
+    typeof s === 'string' && s.indexOf('CACHE_SIZE_EXCEEDED') !== -1;
+  try {
+    window.addEventListener('error', (ev: any) => {
+      if (looksLikeExceeded(ev?.message) || looksLikeExceeded(ev?.error?.message)) {
+        c.cacheSizeExceeded++;
+      }
+    });
+    window.addEventListener('unhandledrejection', (ev: any) => {
+      const r = ev?.reason;
+      if (looksLikeExceeded(r) || looksLikeExceeded(r?.message)) {
+        c.cacheSizeExceeded++;
+      }
+    });
+    eventTarget.addEventListener(Enums.Events.IMAGE_LOAD_FAILED, (ev: any) => {
+      const err = ev?.detail?.error;
+      if (looksLikeExceeded(err) || looksLikeExceeded(err?.message)) {
+        c.cacheSizeExceeded++;
+      }
+    });
+  } catch (e) {
+    /* best-effort */
+  }
+
   // ── SKM 2026-10-04 (Option B): scroll → display latency + spinner ─────────
   // Mirror the loading indicator: it shows "Loading…" if STACK_NEW_IMAGE doesn't
   // follow STACK_VIEWPORT_SCROLL within 50 ms (ViewportImageSliceLoadingIndicator).
@@ -262,6 +290,7 @@ export function initSkmTelemetry(): void {
       missLatencyP95ms: p95(c.wadoMissDurations),
       decodesPerMin: Math.round(c.decodes / minutes),
       evictionsPerMin: Math.round(c.cacheRemoves / minutes),
+      activeEvictionsTotal: (globalThis as any).__skmEvictions || 0,
       cacheSizeExceeded: c.cacheSizeExceeded,
       decodeCacheMB_now: c.cacheSizeSamplesMB[c.cacheSizeSamplesMB.length - 1] ?? 0,
       decodeCacheMB_peak: max(c.cacheSizeSamplesMB),

@@ -35,6 +35,11 @@ import { registerSkmBulkImageLoader, initSkmBulkDriver } from './skmBulkImageLoa
 // cache for the active series so the progress bar reaches 100% while decode stays
 // windowed. No-op unless appConfig.skmWarmer.enabled. See skmBackgroundWarmer.ts.
 import { initSkmWarmer } from './skmBackgroundWarmer';
+// SKM 2026-10-04 (Option B correction): active working-set evictor — CS3D 4.22.10 does
+// NOT LRU-evict active-stack decoded images (it throws CACHE_SIZE_EXCEEDED), so this
+// purges decoded slices outside a window around the doctor to bound RAM and prevent the
+// throw. Stack-only, skips MPR/volume. No-op unless appConfig.skmActiveEviction.enabled.
+import { initSkmWorkingSetEvictor } from './skmWorkingSetEvictor';
 // SKM 2026-10: read-only in-app telemetry (cache hit ratio, eviction, RAM, jank,
 // CACHE_SIZE_EXCEEDED) surfaced via the DevTools console — the measurement harness
 // for validating the caching/RAM architecture. No-op unless appConfig.skmTelemetry.enabled.
@@ -730,6 +735,14 @@ export default async function init({
   // it never decodes or touches the stack/MPR. No-op when the flag is off.
   if (appConfig?.skmWarmer?.enabled) {
     initSkmWarmer(servicesManager, extensionManager, appConfig.skmWarmer);
+  }
+
+  // SKM 2026-10-04 (Option B correction): start the active working-set evictor. It keeps
+  // decoded RAM ≈ a window around the doctor and prevents CACHE_SIZE_EXCEEDED on big
+  // single-series stacks (CS3D 4.22.10 won't evict active-stack images itself). Skips
+  // MPR/volume sessions entirely. No-op when the flag is off.
+  if (appConfig?.skmActiveEviction?.enabled !== false) {
+    initSkmWorkingSetEvictor(servicesManager, appConfig.skmActiveEviction || {});
   }
 
   // SKM 2026-10: in-app telemetry harness (read-only). Enable during the validation

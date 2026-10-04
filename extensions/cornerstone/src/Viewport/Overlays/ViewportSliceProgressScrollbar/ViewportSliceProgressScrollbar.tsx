@@ -164,6 +164,20 @@ function ViewportSliceProgressScrollbar({
     // itself would be a no-op dependency (same array reference every render).
   }, [loadedVersion, numberOfSlices]);
 
+  // SKM 2026-10-04 (Option B): count of slices already available locally (decoded or
+  // byte-warmed) — the "Ready N / total" the radiologist sees in the badge, so background
+  // study preparation is visible and non-blocking (not a frozen % or a modal).
+  const readyCount = useMemo(() => {
+    let count = 0;
+    for (let i = 0; i < loadedBytes.length; i++) {
+      if (loadedBytes[i]) {
+        count++;
+      }
+    }
+    return count;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadedVersion, numberOfSlices]);
+
   const showBadge = isFullMode && showPercentBadge && isLoading;
 
   // SKM 2026-10-04 (Option B): the furthest contiguously-downloaded slice AHEAD of the
@@ -249,8 +263,10 @@ function ViewportSliceProgressScrollbar({
         }}
       >
         <Icons.LoadingSpinner className="text-highlight h-2.5 w-2.5 shrink-0" />
+        {/* SKM 2026-10-04 (Option B): show the READY RANGE (available/total) + %, so the
+            radiologist sees background preparation advancing. Non-blocking, corner-anchored. */}
         <span className="text-[10px] font-semibold leading-none text-white [font-variant-numeric:tabular-nums]">
-          {loadedPercent}%
+          {readyCount}/{numberOfSlices} · {loadedPercent}%
         </span>
       </div>
       <div
