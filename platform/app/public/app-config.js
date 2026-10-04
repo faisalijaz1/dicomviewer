@@ -436,7 +436,19 @@ window.config = {
   // Pick the smallest cap that keeps scrolling smooth with zero CACHE_SIZE_EXCEEDED,
   // then set it here permanently. Value is in BYTES. ORIGINAL: 6442450944 (6 GB).
   //   512 MB = 536870912 | 768 MB = 805306368 | 1024 MB = 1073741824
-  maxCacheSize: 805306368, // 768 MB (Phase 1 starting point — sweep with skmSetCacheCap)
+  // SKM 2026-10-06 (Fix 3): 768 MB → 3072 MB (3 GB). The office cap-sweep proved the
+  // fast-scroll bottleneck was decoded RESIDENCY: at 768 MB the ~1 GB active series could not
+  // stay resident, so a full-range scroll ran a constant evict→re-decode→WADO-refetch treadmill
+  // (evictionsPerMin ~2000-3300, spinners, scrollbar lag). When the whole series fit in the
+  // decoded cache (observed at skmSetCacheCap(3500): decodeCacheMB 1001, evictionsPerMin 0,
+  // decodedHitRatio 100%, displayP95 1ms, zero spinner) scrolling was RadiAnt-smooth. Paired
+  // with skmActiveEviction.reactiveHighWater (0.85), 3 GB holds BOTH clinical series fully —
+  // the 2001 series (~1 GB) and the 4403 series (~2.2 GB) both sit under 0.85 × 3 GB = 2.55 GB,
+  // so eviction never runs for a single open series; anything larger stays bounded. Safe on the
+  // ≥32 GB reading workstations (3 GB decoded + ~2-3 GB heap leaves ample headroom); the
+  // init.tsx device-memory clamp still shrinks this on <8 GB boxes. ORIGINAL: 805306368 (768 MB).
+  //   2 GB = 2147483648 | 3 GB = 3221225472 | 4 GB = 4294967296
+  maxCacheSize: 3221225472, // 3 GB (Fix 3 — holds a full clinical series decoded-resident)
 
   // SKM 2026-10-04 (Option B — skmBoundedDecodeCache): master gate for the bounded
   // Cornerstone decoded-RAM cap applied in init.tsx. enabled:true applies maxCacheSize
@@ -509,6 +521,14 @@ window.config = {
     maxEvictPerTick: 50,
     throttleMs: 250,
     skipWhenVolumePresent: true,
+    // SKM 2026-10-06 (Fix 3 — REACTIVE eviction): only evict when the decoded cache is at or
+    // above this fraction of the cap. Below it, eviction is skipped entirely, so any series
+    // that fits under (0.85 × cap) stays 100% decoded-resident with ZERO eviction churn — the
+    // state the office A/B proved gives RadiAnt-smooth scrolling (evictionsPerMin 0,
+    // decodedHitRatio 100%, displayP95 1ms, no spinner). Eviction only engages when a series
+    // exceeds the cap, where it stays bounded. Sits below boundedPrefetchHighWater (0.90) so
+    // the evictor frees space before the prefetcher pauses (no oscillation). 0 = old behaviour.
+    reactiveHighWater: 0.85,
   },
 
   // SKM 2026-10-03 (W3 "indicator" warmer): background-download the ACTIVE series

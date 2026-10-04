@@ -82,6 +82,17 @@ export type SkmEvictionConfig = {
   /** Skip all eviction when a volume/MPR viewport is present. Default true. */
   skipWhenVolumePresent?: boolean;
   /**
+   * SKM 2026-10-06 (Fix 3 — REACTIVE eviction): only evict when the decoded cache fill
+   * (getCacheSize / getMaxCacheSize) is at or above this fraction. Below it, eviction is
+   * skipped entirely, so ANY series that fits under (reactiveHighWater × cap) stays 100%
+   * decoded-resident with ZERO eviction churn — the measured RadiAnt-smooth state. Eviction
+   * only engages under genuine memory pressure (series larger than the cap), where it stays
+   * bounded. Must sit below studyPrefetcher.boundedPrefetchHighWater (0.90) so the evictor
+   * frees space before the prefetcher's own pause, avoiding oscillation. Default 0.85.
+   * Set to 0 to restore the previous always-evict-by-window behaviour.
+   */
+  reactiveHighWater?: number;
+  /**
    * SKM 2026-10-05 (Fix 2): requestIdleCallback timeout (ms) — guarantees a batch still runs
    * even when the browser never reports idle (busy tab), so eviction can't stall forever.
    * Default 500.
@@ -105,6 +116,7 @@ let evictorInitialized = false;
 let evictionCount = 0; // total removeImageLoadObject() calls (window.__skmEvictions)
 let lastCenter: number | null = null;
 let direction = 1;
+let reactiveSkips = 0; // passes skipped because decoded fill was below reactiveHighWater (Fix 3)
 
 // SKM 2026-10-05 (Fix 2): small ring buffer of recent batch records for inspection
 // (window.__skmEvictorBatches). No console output per batch — telemetry only.
@@ -152,6 +164,8 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
   const throttleMs = Math.max(50, config?.throttleMs ?? 250);
   const skipWhenVolumePresent = config?.skipWhenVolumePresent !== false;
   const idleTimeoutMs = Math.max(50, config?.idleTimeoutMs ?? 500);
+  // Fix 3: reactive eviction high-water (fraction of cap). 0 disables (always evict by window).
+  const reactiveHighWater = Math.min(0.98, Math.max(0, config?.reactiveHighWater ?? 0.85));
   const inputQuietMs = Math.max(0, config?.inputQuietMs ?? 120);
   const abortMoveThreshold = Math.max(1, config?.abortMoveThreshold ?? 100);
 
@@ -287,6 +301,8 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
       decodedAfterMB: Math.round(((cache as any).getCacheSize?.() || 0) / 1048576),
       totalEvicted: evictionCount,
       batchCap: maxEvictPerTick,
+      reactiveSkip: false, // this snapshot is from a real eviction pass
+      reactiveSkips,
     };
     (globalThis as any).__skmEvictorLast = last;
     return last;
@@ -412,6 +428,35 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
       }
       if (skipWhenVolumePresent && anyVolumePresent(viewports, csvs)) {
         return; // MPR/3D session → leave memory to Cornerstone's volume management
+      }
+
+      // ── Fix 3 (REACTIVE eviction) ──────────────────────────────────────────
+      // Only evict under real memory pressure. While the decoded cache is below
+      // reactiveHighWater × cap, skip entirely → a series that fits stays fully resident
+      // (zero churn), which the A/B proved is the RadiAnt-smooth state. Eviction engages
+      // only when a series exceeds the cap, where it stays bounded.
+      if (reactiveHighWater > 0) {
+        try {
+          const capBytes = (cache as any).getMaxCacheSize?.() || 0;
+          const curBytes = (cache as any).getCacheSize?.() || 0;
+          const fill = capBytes > 0 ? curBytes / capBytes : 0;
+          if (fill < reactiveHighWater) {
+            reactiveSkips++;
+            (globalThis as any).__skmEvictorLast = {
+              ...((globalThis as any).__skmEvictorLast || {}),
+              reactiveSkip: true,
+              fillPct: Math.round(fill * 100),
+              reactiveSkips,
+              decodedBeforeMB: Math.round(curBytes / 1048576),
+              decodedAfterMB: Math.round(curBytes / 1048576),
+              removed: 0,
+              totalEvicted: evictionCount,
+            };
+            return; // under pressure threshold → keep everything decoded
+          }
+        } catch (e) {
+          /* if the cache API shape differs, fall through to window eviction */
+        }
       }
 
       // Collect open STACK viewports (and update scroll direction) so the budget can be split.
@@ -546,6 +591,7 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
         `aheadBias ${aheadBias}, margin ${margin} (keep window sized live from avg slice bytes)`
       : `[SKM-EVICTOR] active, fixed window: keep ${keepBehind}+${keepAhead} (+${margin}) slices`) +
       ` | Fix 2: idle-batched, batchCap ${maxEvictPerTick}, inputQuiet ${inputQuietMs}ms, ` +
-      `abortMove ${abortMoveThreshold}, idleTimeout ${idleTimeoutMs}ms`
+      `abortMove ${abortMoveThreshold}, idleTimeout ${idleTimeoutMs}ms` +
+      ` | Fix 3: reactive, evict only when fill ≥ ${Math.round(reactiveHighWater * 100)}% of cap`
   );
 }

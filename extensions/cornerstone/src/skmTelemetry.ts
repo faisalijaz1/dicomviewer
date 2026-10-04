@@ -172,6 +172,11 @@ function evictorSnapshot(): Record<string, number> {
       evict_aborted: e.aborted ?? 0, // 1 if the last pass aborted on a far jump
       evict_passMs: e.passMs ?? 0, // wall time of the last pass (incl. idle gaps)
       evict_evictMs: e.evictMs ?? 0, // main-thread time actually spent removing
+      // SKM 2026-10-06 (Fix 3): reactive eviction — fill% and how many passes were skipped
+      // because the decoded cache was below the high-water mark (series fit → zero churn).
+      evict_fillPct: e.fillPct ?? 0,
+      evict_reactiveSkips: e.reactiveSkips ?? 0,
+      evict_reactiveSkip: e.reactiveSkip ? 1 : 0,
     };
   } catch (e) {
     return {};
