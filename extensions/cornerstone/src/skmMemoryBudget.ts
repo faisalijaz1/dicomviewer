@@ -20,9 +20,11 @@
  *  is the only RAM guard. deviceMemory may only LOWER the budget on a genuinely weak box.
  *
  *  AGGREGATE GUARANTEE: every tab deterministically computes allocations from the shared
- *  BroadcastChannel peer map; idle tabs get ≤ idleFloor, active tabs split the remainder
- *  of the ceiling by desiredMB. Σ allocations ≤ machineHardCeilingMB by construction. With
- *  no active tab it falls back to equal split (ceiling / liveTabs).
+ *  localStorage tab registry; an active tab asks its adaptive desiredMB, an idle tab asks its
+ *  FAIR SHARE min(desiredMB, max(idleFloor, ceiling/liveTabs)) — so a sole/uncontested tab keeps
+ *  its baseline instead of collapsing to idleFloor (Fix 6.2). On overflow, idle tabs shrink
+ *  toward idleMin first, then active tabs scale proportionally; Σ allocations ≤ machineHardCeilingMB
+ *  by construction, with a strict equal split (ceiling / liveTabs) as the last-resort guarantee.
  *
  *  OSCILLATION GUARDS: EMA pressure score + threshold, min dwell between increases (4 s)
  *  and decreases (8 s), gradual ±256 steps, idle-before-decrease 10 s.
@@ -207,6 +209,13 @@ export function initSkmMemoryBudget(
   const now = () =>
     typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
 
+  // FIX 6.2 — seed lastScrollAt at init so a freshly opened viewer is treated as ACTIVE for the
+  // first ACTIVE_TAB_MS. Previously lastScrollAt started at 0, so a brand-new tab was classified
+  // idle on its very first allocation (before the doctor could scroll) and (pre-fix) grabbed only
+  // IDLE_FLOOR. It must use the same monotonic clock as amActive(), hence it is seeded here,
+  // after now() is defined, not at the declaration.
+  lastScrollAt = now();
+
   // scroll activity (drives both "scrolling now" pressure and "active tab" priority)
   subscribeStackNewImage(() => {
     lastScrollAt = now();
@@ -289,16 +298,35 @@ export function initSkmMemoryBudget(
   };
 
   // ── ask-based machine-level allocation (active-priority, Σ ≤ ceiling) ───────
-  // Each tab ASKS for its adaptive desiredMB (active) or an idle floor (idle). Everyone gets
-  // their ask when the asks fit the ceiling; only on overflow do idle tabs shrink first, then
-  // active tabs scale proportionally. So a single tab starts at its baseline (not the ceiling),
-  // and the aggregate across all tabs never exceeds the hard ceiling.
+  // Each tab ASKS for its adaptive desiredMB (active) or an idle *fair share* (idle). Everyone
+  // gets their ask when the asks fit the ceiling; only on overflow do idle tabs shrink first,
+  // then active tabs scale proportionally. The aggregate across all tabs never exceeds the hard
+  // ceiling.
+  //
+  // FIX 6.2 — uncontested / idle fair floor. An idle tab no longer collapses to the flat
+  // IDLE_FLOOR (512 MB): that starved a *sole* tab that simply hadn't scrolled in the last
+  // ACTIVE_TAB_MS, pinning its decode cap at 512 MB and forcing an eviction treadmill ("initial
+  // fast-scroll lag then smooth"). Instead an idle tab asks for its FAIR SHARE of the ceiling,
+  //   idleAsk = min(desiredMB, max(IDLE_FLOOR, floor(ceiling / liveTabs)))
+  // so:
+  //   • 1 live tab  → min(2560, max(512, 4096))  = 2560  (baseline, never 512)
+  //   • 2 idle tabs → min(2560, max(512, 2048))  = 2048 each → Σ 4096 = ceiling
+  //   • many tabs   → fair share shrinks toward IDLE_FLOOR, overflow logic keeps Σ ≤ ceiling
+  // Genuine contention is unchanged: an ACTIVE tab still asks its full desiredMB, and the
+  // overflow pass below shrinks the idle tab toward IDLE_MIN first so the active tab keeps its
+  // allocation — active-tab priority preserved.
   const computeMyAllocationMB = (): number => {
     const ceiling = getCeiling();
     const tabs = readRegistry();
+    const fairShare = Math.max(1, Math.floor(ceiling / Math.max(1, tabs.length)));
     const alloc = new Map<string, number>();
     tabs.forEach(t =>
-      alloc.set(t.id, t.active ? Math.min(ceiling, Math.max(ACTIVE_MIN, t.desiredMB)) : IDLE_FLOOR)
+      alloc.set(
+        t.id,
+        t.active
+          ? Math.min(ceiling, Math.max(ACTIVE_MIN, t.desiredMB))
+          : Math.min(t.desiredMB, Math.max(IDLE_FLOOR, fairShare))
+      )
     );
     let total = 0;
     alloc.forEach(v => (total += v));
