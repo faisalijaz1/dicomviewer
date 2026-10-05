@@ -561,6 +561,52 @@ export function initSkmMemoryBudget(
     return (globalThis as any).__skmBudget;
   };
 
+  // ── UI-facing helpers (Preferences panel) ──────────────────────────────────
+  // These only move the per-workstation override that getBaseline()/getCeiling() already read;
+  // they do NOT change the adaptive allocation algorithm, pressure logic, or multi-tab registry.
+  // The selected value is the MACHINE HARD CEILING, shared across tabs via localStorage, so the
+  // existing ask-based allocation keeps Σ(tab allocations) ≤ ceiling. Takes effect on the next
+  // eval (≤ evalMs) and immediately via the applyAllocation() call below.
+
+  // Set ONLY the hard ceiling. Baseline stays at the configured default (adaptive headroom
+  // preserved) unless the chosen ceiling is lower, in which case baseline drops to the ceiling
+  // (baseline can never exceed the ceiling). Does NOT force the cache to the ceiling — the
+  // governor still starts near baseline and grows under pressure.
+  (window as any).skmSetMemoryCeiling = (ceilingMB: number) => {
+    try {
+      if (Number.isFinite(ceilingMB) && ceilingMB > 0) {
+        const ceil = Math.round(ceilingMB);
+        const base = Math.min(DEF_BASELINE, ceil);
+        localStorage.setItem(LS_CEIL, String(ceil));
+        localStorage.setItem(LS_BASE, String(base));
+      }
+    } catch (e) {
+      /* localStorage blocked — desired reset below still applies for this session */
+    }
+    desiredMB = getBaseline();
+    applyAllocation();
+    // eslint-disable-next-line no-console
+    console.log('[SKM-BUDGET] ceiling set via UI:', (globalThis as any).__skmBudget);
+    return (globalThis as any).__skmBudget;
+  };
+
+  // Auto / Recommended — clear any per-workstation override so the governor uses the app-config
+  // defaults (baseline/hard-ceiling from skmMemoryBudget). NOT a hard-coded alias to 4096: if the
+  // deployed defaults change, Auto follows them. After this, __skmBudget.source === 'default'.
+  (window as any).skmResetMemoryBudget = () => {
+    try {
+      localStorage.removeItem(LS_BASE);
+      localStorage.removeItem(LS_CEIL);
+    } catch (e) {
+      /* noop */
+    }
+    desiredMB = getBaseline();
+    applyAllocation();
+    // eslint-disable-next-line no-console
+    console.log('[SKM-BUDGET] reset to Auto/defaults:', (globalThis as any).__skmBudget);
+    return (globalThis as any).__skmBudget;
+  };
+
   // eslint-disable-next-line no-console
   console.log(
     '[SKM-BUDGET] ADAPTIVE governor active —',
