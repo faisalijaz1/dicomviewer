@@ -225,11 +225,19 @@ function budgetSnapshot(): Record<string, number | string> {
       return {};
     }
     return {
-      budget_machineMB: b.machineMB ?? 0,
+      // Fix 6 adaptive governor
+      budget_baselineMB: b.machineBaselineMB ?? 0,
+      budget_hardCeilingMB: b.machineHardCeilingMB ?? 0,
+      budget_currentMB: b.currentMB ?? 0, // this tab's adaptive ask
+      budget_tabAllocationMB: b.tabAllocationMB ?? b.perTabCapMB ?? 0, // actual per-tab cap
       budget_source: b.source ?? 'default',
       budget_liveTabs: b.liveTabs ?? 1,
-      budget_perTabCapMB: b.perTabCapMB ?? 0,
-      budget_aggregateMB: b.aggregateMB ?? 0,
+      budget_activeTab: b.activeTab ? 1 : 0,
+      budget_pressureScore: b.pressureScore ?? 0,
+      budget_idleTimeMs: b.idleTimeMs ?? 0,
+      budget_increaseCount: b.increaseCount ?? 0,
+      budget_decreaseCount: b.decreaseCount ?? 0,
+      budget_lastChangeReason: b.lastChangeReason ?? '',
       budget_windowSlices: b.windowSlices ?? 0,
       budget_windowAhead: b.windowAhead ?? 0,
       budget_windowBehind: b.windowBehind ?? 0,

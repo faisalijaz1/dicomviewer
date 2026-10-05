@@ -505,23 +505,40 @@ window.config = {
   // decode WINDOW (minWindowSlices), not the cap, so RAM stays strictly bounded at any tab count.
   // navigator.deviceMemory is NOT trusted to raise the budget (it caps at 8, can't tell 16 from
   // 32 GB); it can only LOWER it on a genuinely weak box. Tune the two numbers below if needed.
+  // SKM 2026-10-08 (Fix 6 — ADAPTIVE runtime governor). The governor starts at the BASELINE and
+  // raises the decoded budget in +256 MB steps ONLY under sustained fast-scroll pressure, up to a
+  // per-machine HARD CEILING, then lowers it in −256 MB steps after sustained idle. Across tabs it
+  // allocates the ceiling by ACTIVITY (active tab gets more, idle tabs a small floor); the sum of
+  // all tab allocations never exceeds the hard ceiling. 16 GB validated smooth at 2560 (Edge ~4.5 GB).
+  //   16 GB Resident  : baseline 2560, hardCeiling 4096  (default — no action)
+  //   32 GB Consultant: run once →  skmSetMemoryBudget(5120, 6144)   (persists per workstation)
+  //   URL form:  ?skmBudgetMB=5120&skmCeilingMB=6144
+  // deviceMemory only LOWERS the ceiling on a genuinely weak box; never raises it. The hard
+  // ceilings are safety values for the adaptive experiment — tune after real Edge/Task-Manager
+  // validation on both tiers (they are not yet proven final).
   skmMemoryBudget: {
-    // SKM 2026-10-07 (tuned from 16 GB hardware measurement): 2048 → 3072. On the 16 GB box the
-    // 4403 series was smooth-limited at 2048 (only ~65% resident → re-decode/eviction waves =
-    // lag) while Edge used only ~4 GB (≈12 GB free) — far too conservative. 3072 gives the 4403
-    // ~90% residency (much smoother) and, because perTabCap = floor(budget/liveTabs) strictly
-    // divides, the TOTAL decoded across all tabs is still capped at 3072 MB (2 tabs→1536 each,
-    // 3 tabs→1024 each) → Edge ≤ ~8-9 GB → ≥7 GB free on 16 GB at ANY tab count. Consultants
-    // override higher at runtime: skmSetMemoryBudget(5120). To sweep on a 16 GB box without a
-    // rebuild: skmSetMemoryBudget(2560 | 3072 | 3500) then re-run the scroll test. ORIGINAL: 2048.
-    defaultBudgetMB: 3072,   // 16 GB-safe default (per workstation, overridable at runtime)
+    baselineMB: 2560,       // 16 GB-safe starting budget (validated smooth on the 4403 series)
+    hardCeilingMB: 4096,    // max AGGREGATE decoded across all tabs on a 16 GB machine
     minBudgetMB: 1024,
     maxBudgetMB: 8192,
+    stepMB: 256,            // gradual adaptation step
+    idleFloorMB: 512,       // per idle-tab allocation
+    idleMinMB: 320,         // hard floor an idle tab can be squeezed to under ceiling pressure
+    idleMaxCeilingFraction: 0.3, // idle tabs collectively ≤ 30% of the ceiling
+    activeMinMB: 1024,      // minimum allocation for an active (scrolling) tab
     workingSetFraction: 0.82, // decode window fills 82% of the per-tab cap (< 0.85 evict high-water)
     aheadBias: 0.65,
     minWindowSlices: 300,
     maxWindowSlices: 8000,
-    recomputeMs: 3000,
+    // adaptation timing / oscillation guards
+    evalMs: 1500,
+    increaseDwellMs: 4000,  // min time between increases
+    decreaseDwellMs: 8000,  // min time between decreases (slower down than up)
+    idleBeforeDecreaseMs: 10000,
+    activeScrollMs: 700,    // "scrolling now" window for pressure sampling
+    activeTabMs: 8000,      // "tab active" window for allocation priority
+    pressureFillFraction: 0.82,
+    pressureThreshold: 0.6, // EMA pressure needed to step up
   },
 
   // SKM 2026-10-04 (Phase A — skmPurgeableStackImages): THE Cornerstone-level fix.
