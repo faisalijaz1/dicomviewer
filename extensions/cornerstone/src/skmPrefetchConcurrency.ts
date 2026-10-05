@@ -118,17 +118,48 @@ export function initSkmPrefetchConcurrency(
     }
   };
 
+  // SKM 2026-10-09 (Phase 2 Req 4): count open STACK viewports in THIS tab. Two panes in one
+  // tab share one scheduler, so ≥2 panes should back off like ≥2 browser tabs (protect the
+  // shared HTTP pool + avoid feeding the prefetch/evict churn). Browser-tab count comes from the
+  // governor (liveTabs); this is the per-tab viewport count the governor does not know about.
+  const countStackViewports = (): number => {
+    try {
+      const vgs = servicesManager?.services?.viewportGridService;
+      const csvs = servicesManager?.services?.cornerstoneViewportService;
+      if (!vgs || !csvs) {
+        return 1;
+      }
+      const viewports = vgs.getState?.()?.viewports;
+      if (!viewports || typeof viewports.forEach !== 'function') {
+        return 1;
+      }
+      let n = 0;
+      viewports.forEach((_vp: any, viewportId: string) => {
+        const csVp = csvs.getCornerstoneViewport?.(viewportId);
+        // A stack viewport exposes getCurrentImageIdIndex; volumes/3D do not.
+        if (csVp && typeof csVp.getCurrentImageIdIndex === 'function') {
+          n++;
+        }
+      });
+      return Math.max(1, n);
+    } catch (e) {
+      return 1;
+    }
+  };
+
   const evalLoop = () => {
     try {
       const b = readBudget();
       const active = b ? !!b.activeTab : true;
       const liveTabs = b ? Math.max(1, b.liveTabs || 1) : 1;
+      const stackViewports = countStackViewports();
       const fill = fillFraction();
 
       let target: number;
       if (!active) {
         target = MIN;
-      } else if (liveTabs >= 2) {
+      } else if (liveTabs >= 2 || stackViewports >= 2) {
+        // Multiple browser tabs OR multiple stack panes in this tab → conservative shared cap.
         target = MULTITAB;
       } else if (fill < RAISE_FILL) {
         target = MAX;
@@ -155,6 +186,7 @@ export function initSkmPrefetchConcurrency(
         target,
         active,
         liveTabs,
+        stackViewports,
         fillPct: Math.round(fill * 100),
         min: MIN,
         base: BASE,

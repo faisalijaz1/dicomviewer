@@ -740,8 +740,76 @@ class StudyPrefetcherService extends PubSubService {
     return imageIds.slice(start, end);
   }
 
-  // The centre index of the active (focused-first) series, or 0.
+  // SKM 2026-10-09 (Phase 1): the ACTIVE/focused viewport's own index + the series it shows.
+  // Fixes the two-viewport bug where _getCenterIndexForDisplaySet (last-writer-wins across
+  // viewports) returned the WRONG viewport's index for a series shown in two panes.
+  private _getActiveViewportInfo(): { viewportId: string; uid?: string; idx: number } | null {
+    try {
+      const services: any = this._servicesManager.services;
+      const vgs = services?.viewportGridService;
+      const csvs = services?.cornerstoneViewportService;
+      if (!vgs || !csvs) {
+        return null;
+      }
+      const state = vgs.getState();
+      const activeId = state?.activeViewportId;
+      if (!activeId) {
+        return null;
+      }
+      const vp = state.viewports?.get?.(activeId);
+      const csVp = csvs.getCornerstoneViewport?.(activeId);
+      const idx = csVp?.getCurrentImageIdIndex?.();
+      if (typeof idx !== 'number' || idx < 0) {
+        return null;
+      }
+      return { viewportId: activeId, uid: vp?.displaySetInstanceUIDs?.[0], idx };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // SKM 2026-10-09 (Phase 1/2): ALL viewport indices currently showing a series (deduped),
+  // so prefetch can prioritise the union of both panes' positions instead of a single
+  // (last-writer) centre, and size each pane's window as a share (never starving one pane).
+  private _getViewportCentersForDisplaySet(displaySetInstanceUID: string): number[] {
+    const centers: number[] = [];
+    try {
+      const services: any = this._servicesManager.services;
+      const vgs = services?.viewportGridService;
+      const csvs = services?.cornerstoneViewportService;
+      if (!vgs || !csvs) {
+        return centers;
+      }
+      const state = vgs.getState();
+      const viewports = state?.viewports;
+      if (!viewports || typeof viewports.forEach !== 'function') {
+        return centers;
+      }
+      const seen = new Set<number>();
+      viewports.forEach((vp: any, viewportId: string) => {
+        if (!vp?.displaySetInstanceUIDs?.includes?.(displaySetInstanceUID)) {
+          return;
+        }
+        const csVp = csvs.getCornerstoneViewport?.(viewportId);
+        const idx = csVp?.getCurrentImageIdIndex?.();
+        if (typeof idx === 'number' && idx >= 0 && !seen.has(idx)) {
+          seen.add(idx);
+          centers.push(idx);
+        }
+      });
+    } catch (e) {
+      /* best-effort */
+    }
+    return centers;
+  }
+
+  // The centre index of the ACTIVE (focused) viewport; falls back to the per-series
+  // (last-writer) centre only when no active viewport is resolvable.
   private _getActiveCenter(): number {
+    const info = this._getActiveViewportInfo();
+    if (info) {
+      return info.idx;
+    }
     const activeUID = this._activeDisplaySetsInstanceUIDs?.[0];
     if (!activeUID) {
       return 0;
@@ -759,12 +827,17 @@ class StudyPrefetcherService extends PubSubService {
       return;
     }
 
-    // ── SKM 2026-10-09 (Phase 0 diagnostics — READ-ONLY): detect active-viewport change ──
+    // ── SKM 2026-10-09 (Phase 0 diagnostics + Phase 1 rebase): detect active-viewport change ──
+    // A focus change (pane A → pane B) is NOT a scroll and must NOT be mis-read as a far jump.
+    // We record it and set activeChanged so the far-jump branch below REBASES _lastCenter to the
+    // newly focused viewport's position instead of cancelling the whole queue.
+    let activeChanged = false;
     try {
       const activeVpId =
         this._servicesManager.services?.viewportGridService?.getState?.()?.activeViewportId ?? null;
       this._schedulerStats.activeViewportId = activeVpId ?? '';
       if (activeVpId !== this._lastActiveViewportId) {
+        activeChanged = true;
         this._schedulerStats.activeViewportChanges++;
         this._logSchedulerEvent('activeChange', {
           from: this._lastActiveViewportId,
@@ -780,6 +853,24 @@ class StudyPrefetcherService extends PubSubService {
     // ── SKM 2026-10-04 (Option B): direction + far-jump handling ──────────────
     if (this.config.priorityPrefetch) {
       const center = this._getActiveCenter();
+      // Phase 1: on a focus change, REBASE to the new active viewport's centre and re-window
+      // around it WITHOUT a far-jump cancel storm (the other pane's work stays useful; prefetch
+      // now prioritises the union of both panes via _orderedWindowImageIds).
+      if (activeChanged) {
+        this._lastCenter = center;
+        if (!this._rewindowTimer) {
+          this._rewindowTimer = setTimeout(() => {
+            this._rewindowTimer = null;
+            try {
+              this._loadDisplaySets();
+              this._sendNextRequests();
+            } catch (e) {
+              /* best-effort rebase re-window */
+            }
+          }, 200);
+        }
+        return;
+      }
       if (this._lastCenter !== null) {
         const delta = center - this._lastCenter;
         if (delta !== 0) {
@@ -855,44 +946,38 @@ class StudyPrefetcherService extends PubSubService {
   // neighbourhood) slices first, then Priority 3 (directional) outward. Returns the
   // ordered subset to enqueue. Falls back to the plain contiguous window when
   // priorityPrefetch is off.
-  private _orderedWindowImageIds(displaySet: DisplaySet, imageIds: string[]): string[] {
-    if (!this.config.priorityPrefetch || !this.config.windowedPrefetch || imageIds.length <= 1) {
-      return this._windowImageIds(displaySet, imageIds);
-    }
-    const center = this._getCenterIndexForDisplaySet(displaySet.displaySetInstanceUID);
-    const immediate =
-      typeof this.config.immediateRadius === 'number' ? this.config.immediateRadius : 15;
-    const radius =
-      typeof this.config.windowRadius === 'number' && this.config.windowRadius > 0
-        ? this.config.windowRadius
-        : 250;
-    const ahead = typeof this.config.windowAhead === 'number' ? this.config.windowAhead : radius;
-    const behind = typeof this.config.windowBehind === 'number' ? this.config.windowBehind : radius;
-    const dir = this._direction >= 0 ? 1 : -1;
+  // SKM 2026-10-09 (Phase 1/2): order a single centre's window center-out, ahead-biased,
+  // immediate-neighbourhood first. ahead/behind are the per-centre (already viewport-shared)
+  // extents; everything is clamped to [0, last] so a window can never exceed the series.
+  private _orderCenterOut(
+    imageIds: string[],
+    center: number,
+    ahead: number,
+    behind: number,
+    immediate: number,
+    dir: number
+  ): string[] {
     const last = imageIds.length - 1;
     const aheadEnd = Math.min(last, center + (dir > 0 ? ahead : behind));
     const behindEnd = Math.max(0, center - (dir > 0 ? behind : ahead));
     const start = Math.min(center, behindEnd);
     const end = Math.max(center, aheadEnd);
-
     const ordered: string[] = [];
     const push = (idx: number) => {
       if (idx >= 0 && idx <= last && imageIds[idx]) {
         ordered.push(imageIds[idx]);
       }
     };
-    // Priority 2: immediate neighbourhood, center-out.
     push(center);
     for (let d = 1; d <= immediate; d++) {
       push(center + d * dir);
       push(center - d * dir);
     }
-    // Priority 3: directional remainder, ahead-biased (2 ahead : 1 behind).
     let a = center + immediate * dir + dir;
     let b = center - immediate * dir - dir;
     const aStep = dir;
     const bStep = -dir;
-    while (a >= start - 0 && a <= end) {
+    while (a >= start && a <= end) {
       push(a);
       push(a + aStep);
       a += aStep * 2;
@@ -901,20 +986,75 @@ class StudyPrefetcherService extends PubSubService {
         b += bStep;
       }
     }
-    // De-dupe while preserving order (immediate overlaps directional at the seam).
+    return ordered;
+  }
+
+  private _orderedWindowImageIds(displaySet: DisplaySet, imageIds: string[]): string[] {
+    if (!this.config.priorityPrefetch || !this.config.windowedPrefetch || imageIds.length <= 1) {
+      return this._windowImageIds(displaySet, imageIds);
+    }
+    const immediate =
+      typeof this.config.immediateRadius === 'number' ? this.config.immediateRadius : 15;
+    const radius =
+      typeof this.config.windowRadius === 'number' && this.config.windowRadius > 0
+        ? this.config.windowRadius
+        : 250;
+    const cfgAhead = typeof this.config.windowAhead === 'number' ? this.config.windowAhead : radius;
+    const cfgBehind =
+      typeof this.config.windowBehind === 'number' ? this.config.windowBehind : radius;
+    const dir = this._direction >= 0 ? 1 : -1;
+    const last = imageIds.length - 1;
+
+    // Phase 1: prioritise the UNION of every pane showing this series (active pane first), not a
+    // single last-writer centre. Phase 2: divide the decode window by the number of panes so the
+    // prefetch window per pane matches the evictor's per-viewport keep (budget ÷ nStack) — this
+    // removes the prefetch>evict mismatch that caused the decode→evict→re-decode treadmill. Also
+    // intrinsically clamps the per-series window to the series length (Req 1).
+    let centers = this._getViewportCentersForDisplaySet(displaySet.displaySetInstanceUID);
+    if (!centers.length) {
+      centers = [this._getCenterIndexForDisplaySet(displaySet.displaySetInstanceUID)];
+    }
+    // Active pane's centre first so its neighbourhood wins the earliest slots.
+    const activeInfo = this._getActiveViewportInfo();
+    if (
+      activeInfo &&
+      activeInfo.uid === displaySet.displaySetInstanceUID &&
+      centers.includes(activeInfo.idx)
+    ) {
+      centers = [activeInfo.idx, ...centers.filter(c => c !== activeInfo.idx)];
+    }
+    const nPanes = Math.max(1, centers.length);
+    const effAhead = Math.max(immediate + 1, Math.floor(cfgAhead / nPanes));
+    const effBehind = Math.max(immediate + 1, Math.floor(cfgBehind / nPanes));
+
+    // Build each pane's ordered window, then round-robin merge so no pane starves the other.
+    const perCenter = centers.map(c =>
+      this._orderCenterOut(imageIds, c, effAhead, effBehind, immediate, dir)
+    );
+    const merged: string[] = [];
+    const maxLen = perCenter.reduce((m, arr) => Math.max(m, arr.length), 0);
+    for (let i = 0; i < maxLen; i++) {
+      for (let p = 0; p < perCenter.length; p++) {
+        if (i < perCenter[p].length) {
+          merged.push(perCenter[p][i]);
+        }
+      }
+    }
+
+    // De-dupe while preserving order.
     const seen = new Set<string>();
     const result: string[] = [];
-    for (const id of ordered) {
+    for (const id of merged) {
       if (!seen.has(id)) {
         seen.add(id);
         result.push(id);
       }
     }
-    // Record for telemetry.
-    this._schedulerStats.prefetchCenterIndex = center;
+    // Telemetry (active/first centre).
+    this._schedulerStats.prefetchCenterIndex = centers[0];
     this._schedulerStats.direction = dir;
-    this._schedulerStats.prefetchAhead = Math.abs(aheadEnd - center);
-    this._schedulerStats.prefetchBehind = Math.abs(center - behindEnd);
+    this._schedulerStats.prefetchAhead = Math.min(effAhead, last - centers[0]);
+    this._schedulerStats.prefetchBehind = Math.min(effBehind, centers[0]);
     return result;
   }
 

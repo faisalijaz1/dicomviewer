@@ -451,7 +451,47 @@ auto-select hardware tiers or auto-hide memory options. **[Source-confirmed:
   pool prefetch lane raised **8 → 10** as the hard ceiling. See Section 10.
 - **Status:** **NOT yet office-A/B-proven.** **[Source-confirmed]**
 
-### Scrollbar / badge polish — `82b89de` (2026-10-05) — current HEAD
+### Two-viewport scheduler / eviction / routing fix — Phases 0–4 (2026-10-09)
+
+- **Problem:** two viewports showing the **same** 3674 series in one tab → severe
+  **scheduler/performance pressure** (not capacity pressure): `sched_cancelled 68917`,
+  `longTaskTotalMs 31480`, `displayP95 128 ms`, `spinnerRatePct 13`, decode↔evict
+  treadmill — while the decoded cache stayed below its cap (`peak 2390 < 2816`,
+  `cacheSizeExceeded 0`).
+- **Root causes (confirmed from source):**
+  1. `_getCenterIndexForDisplaySet()` was **per-`displaySetInstanceUID`, last-writer-wins**
+     across viewports → two same-series panes shared one scheduler centre that flip-flopped
+     between their positions → repeated **false far-jumps**, each `_cancelPendingPrefetch()`
+     wiping the queue (`32 farJumps × ~2000 queue ≈ 68917 cancels`).
+  2. The governor-derived **prefetch window (~4618 slices) was NOT divided by pane count**,
+     while the **evictor keep window IS** (`budget ÷ nStack ≈ 2534/pane`) → prefetch decoded
+     slices the evictor immediately dropped → re-decode treadmill.
+- **Phase 0 (`50645cc`) — read-only diagnostics:** per-viewport snapshot, scheduler event
+  log (far-jumps + active-viewport changes with centres/delta/cancel count), duplicate-request
+  counter; `window.skmSchedulerReport()`, `window.__skmSchedulerLog`.
+- **Phase 1 — viewport-aware centre:** `_getActiveCenter()` now reads the **active/focused**
+  viewport's own index (`_getActiveViewportInfo`); a **focus change rebases `_lastCenter`**
+  (never a false far-jump); prefetch prioritises the **union of all panes' centres**
+  (`_getViewportCentersForDisplaySet`, active pane first, round-robin merge).
+- **Phase 2 — prefetch/evict alignment + concurrency:** the decode window is **divided by
+  pane count** (`effAhead/effBehind = cfg ÷ nPanes`) so prefetch-per-pane (≈0.82·cap/n) sits
+  **below** the evictor keep-per-pane (≈0.9·cap/n) → treadmill removed with **no threshold
+  change**; window is intrinsically clamped to series length. `skmPrefetchConcurrency` now
+  counts **stack viewports** and backs off to `multiTabRequests` (6) when ≥2 panes (as for ≥2
+  tabs). Eviction non-blocking (Req 3) is satisfied by removing the treadmill trigger +
+  existing idle batching (no evictor surgery).
+- **Phase 3 — scroll routing:** `activateViewportBeforeInteraction` is **already `false`**
+  (app-config) so the first-interaction-swallow path is not active; the residual "other pane
+  responds" perception was the scheduler-centre bug, fixed in Phase 1. No speculative routing
+  change; Phase 0 telemetry confirms at runtime. **[Documented as handled by Phase 1.]**
+- **Phase 4 — ready-frontier:** delivered by Phase 1 + Cornerstone's own interaction-priority
+  for the displayed slice + the existing full-metadata scrollbar; the far-jump
+  cancel/re-centre (now correctly keyed to the active pane) prioritises any dragged target and
+  cancels stale distant work. **No new caching subsystem** (per instruction).
+- **Not changed:** memory baseline 2816 / ceiling 4096, governor, evictor thresholds,
+  warmer, purge wrapper, multi-tab coordination, Preferences UI, Cornerstone core.
+
+### Scrollbar / badge polish — `82b89de` (2026-10-05)
 
 - **Change (cosmetic only):** moved the download-progress badge clear of the
   scrollbar (overlap fix) and recolored the loaded fill / badge accent / download
