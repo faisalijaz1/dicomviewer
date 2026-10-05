@@ -202,9 +202,7 @@ export function initSkmMemoryBudget(
   let decodeCount = 0;
   let prevDecodeCount = 0;
 
-  // peers: id -> { active, desiredMB, ts }
-  const peers = new Map<string, { active: boolean; desiredMB: number; ts: number }>();
-  let channel: any = null;
+  let channel: any = null; // BroadcastChannel is only an instant "nudge"; counting is via localStorage
 
   const now = () =>
     typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
@@ -223,63 +221,119 @@ export function initSkmMemoryBudget(
 
   const amActive = () => now() - lastScrollAt < ACTIVE_TAB_MS;
 
-  // ── deterministic machine-level allocation (active-priority, Σ ≤ ceiling) ──
+  // ── Multi-tab registry via localStorage (authoritative; reliable across same-origin tabs
+  // even where BroadcastChannel is blocked/flaky in locked-down Edge). Each tab writes its
+  // own entry every eval and reads all live entries to count tabs + learn their asks. ──────
+  const REG_PREFIX = 'skm-tabreg-';
+  const REG_STALE_MS = 12000; // an entry older than this = tab gone
+  const REG_PRUNE_MS = 20000;
+
+  const writeRegistry = () => {
+    try {
+      localStorage.setItem(
+        REG_PREFIX + myId,
+        JSON.stringify({ active: amActive(), desiredMB, ts: Date.now() })
+      );
+    } catch (e) {
+      /* localStorage blocked → single-tab behaviour */
+    }
+  };
+  const readRegistry = (): { id: string; active: boolean; desiredMB: number }[] => {
+    const out: { id: string; active: boolean; desiredMB: number }[] = [];
+    try {
+      const nowTs = Date.now();
+      const stale: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key || key.indexOf(REG_PREFIX) !== 0) {
+          continue;
+        }
+        try {
+          const v = JSON.parse(localStorage.getItem(key) || '{}');
+          const age = nowTs - (v.ts || 0);
+          if (age > REG_PRUNE_MS) {
+            stale.push(key);
+            continue;
+          }
+          if (age <= REG_STALE_MS) {
+            out.push({
+              id: key.slice(REG_PREFIX.length),
+              active: !!v.active,
+              desiredMB: typeof v.desiredMB === 'number' ? v.desiredMB : getBaseline(),
+            });
+          }
+        } catch (e) {
+          stale.push(key);
+        }
+      }
+      stale.forEach(k => {
+        try {
+          localStorage.removeItem(k);
+        } catch (e) {
+          /* noop */
+        }
+      });
+    } catch (e) {
+      /* noop */
+    }
+    // Always include self (registry write may lag or be blocked).
+    if (!out.some(t => t.id === myId)) {
+      out.push({ id: myId, active: amActive(), desiredMB });
+    } else {
+      // refresh self's live values
+      const me = out.find(t => t.id === myId)!;
+      me.active = amActive();
+      me.desiredMB = desiredMB;
+    }
+    return out;
+  };
+
+  // ── ask-based machine-level allocation (active-priority, Σ ≤ ceiling) ───────
+  // Each tab ASKS for its adaptive desiredMB (active) or an idle floor (idle). Everyone gets
+  // their ask when the asks fit the ceiling; only on overflow do idle tabs shrink first, then
+  // active tabs scale proportionally. So a single tab starts at its baseline (not the ceiling),
+  // and the aggregate across all tabs never exceeds the hard ceiling.
   const computeMyAllocationMB = (): number => {
     const ceiling = getCeiling();
-    // Build the live tab set (self + non-stale peers).
-    const cutoff = Date.now() - 12000;
-    const tabs: { id: string; active: boolean; desiredMB: number }[] = [
-      { id: myId, active: amActive(), desiredMB },
-    ];
-    peers.forEach((p, id) => {
-      if (p.ts >= cutoff) {
-        tabs.push({ id, active: p.active, desiredMB: p.desiredMB });
-      }
-    });
-    const liveTabs = tabs.length;
-    const active = tabs.filter(t => t.active);
-    const idle = tabs.filter(t => !t.active);
-
-    // No active tab → safe equal split (strict division fallback).
-    if (active.length === 0) {
-      return Math.max(1, Math.floor(ceiling / liveTabs));
-    }
-
-    // Idle tabs collectively take at most IDLE_MAX_FRAC of the ceiling.
-    const idleBudgetTotal = Math.min(
-      idle.length * IDLE_FLOOR,
-      Math.floor(ceiling * IDLE_MAX_FRAC)
-    );
-    const idleEach = idle.length > 0 ? Math.max(IDLE_MIN, Math.floor(idleBudgetTotal / idle.length)) : 0;
-    const reservedIdle = idleEach * idle.length;
-
-    // Active tabs split the remainder, weighted by their desiredMB.
-    const activePool = Math.max(ACTIVE_MIN * active.length, ceiling - reservedIdle);
-    const sumDesired = active.reduce((s, t) => s + Math.max(ACTIVE_MIN, t.desiredMB), 0);
-
+    const tabs = readRegistry();
     const alloc = new Map<string, number>();
-    idle.forEach(t => alloc.set(t.id, idleEach));
-    let activeAssigned = 0;
-    active.forEach(t => {
-      const share = Math.max(
-        ACTIVE_MIN,
-        Math.floor((activePool * Math.max(ACTIVE_MIN, t.desiredMB)) / Math.max(1, sumDesired))
-      );
-      alloc.set(t.id, share);
-      activeAssigned += share;
-    });
+    tabs.forEach(t =>
+      alloc.set(t.id, t.active ? Math.min(ceiling, Math.max(ACTIVE_MIN, t.desiredMB)) : IDLE_FLOOR)
+    );
+    let total = 0;
+    alloc.forEach(v => (total += v));
 
-    // Enforce the aggregate ceiling: if rounding/clamps overshoot, scale ACTIVE tabs down
-    // proportionally (idle floors are preserved) so Σ ≤ ceiling.
-    let total = reservedIdle + activeAssigned;
-    if (total > ceiling && activeAssigned > 0) {
-      const room = Math.max(active.length, ceiling - reservedIdle);
-      const scale = room / activeAssigned;
-      active.forEach(t => alloc.set(t.id, Math.max(1, Math.floor((alloc.get(t.id) || 0) * scale))));
-      total = reservedIdle + active.reduce((s, t) => s + (alloc.get(t.id) || 0), 0);
+    if (total > ceiling) {
+      // 1) shrink idle tabs toward IDLE_MIN first.
+      const idle = tabs.filter(t => !t.active);
+      let overflow = total - ceiling;
+      const idleReducible = idle.reduce((s, t) => s + Math.max(0, (alloc.get(t.id) || 0) - IDLE_MIN), 0);
+      if (idleReducible > 0 && overflow > 0) {
+        const cut = Math.min(overflow, idleReducible);
+        idle.forEach(t => {
+          const cur = alloc.get(t.id) || 0;
+          const reducible = Math.max(0, cur - IDLE_MIN);
+          alloc.set(t.id, cur - Math.floor((reducible / idleReducible) * cut));
+        });
+        overflow -= cut;
+      }
+      // 2) scale active tabs proportionally (floored at ACTIVE_MIN; final equal-split if still over).
+      if (overflow > 0) {
+        const active = tabs.filter(t => t.active);
+        const activeTotal = active.reduce((s, t) => s + (alloc.get(t.id) || 0), 0);
+        const target = Math.max(active.length * 1, activeTotal - overflow);
+        const scale = activeTotal > 0 ? target / activeTotal : 0;
+        active.forEach(t => alloc.set(t.id, Math.max(1, Math.floor((alloc.get(t.id) || 0) * scale))));
+        let after = 0;
+        alloc.forEach(v => (after += v));
+        if (after > ceiling) {
+          // last-resort strict equal split guarantees Σ ≤ ceiling.
+          const eq = Math.max(1, Math.floor(ceiling / Math.max(1, tabs.length)));
+          return eq;
+        }
+      }
     }
-
-    return Math.max(1, alloc.get(myId) || Math.floor(ceiling / liveTabs));
+    return Math.max(1, alloc.get(myId) || Math.floor(ceiling / Math.max(1, tabs.length)));
   };
 
   const applyAllocation = () => {
@@ -297,13 +351,7 @@ export function initSkmMemoryBudget(
       const windowAhead = Math.max(1, Math.round(windowSlices * AHEAD_BIAS));
       const windowBehind = Math.max(1, windowSlices - windowAhead);
 
-      const cutoff = Date.now() - 12000;
-      let liveTabs = 1;
-      peers.forEach(p => {
-        if (p.ts >= cutoff) {
-          liveTabs++;
-        }
-      });
+      const liveTabs = readRegistry().length;
 
       (globalThis as any).__skmBudget = {
         machineBaselineMB: getBaseline(),
@@ -402,9 +450,10 @@ export function initSkmMemoryBudget(
         lastChangeTs = Date.now();
       }
 
-      // broadcast my state so peers can allocate
+      // publish my state to the shared registry (authoritative) + nudge peers via BroadcastChannel
+      writeRegistry();
       try {
-        channel?.postMessage({ type: 'state', id: myId, active: amActive(), desiredMB, ts: Date.now() });
+        channel?.postMessage({ type: 'state', id: myId, ts: Date.now() });
       } catch (e) {
         /* noop */
       }
@@ -415,45 +464,46 @@ export function initSkmMemoryBudget(
     }
   };
 
-  // ── BroadcastChannel (live tabs + their asks) ──────────────────────────────
+  // ── BroadcastChannel + storage event: instant "a peer changed, re-allocate now" nudges.
+  // Tab COUNTING is via the localStorage registry (reliable); these just trigger a prompt
+  // recompute so allocation reacts within a frame instead of waiting for the next eval tick. ──
   try {
     if (typeof BroadcastChannel !== 'undefined') {
       channel = new BroadcastChannel('skm-budget-tabs');
-      const onPeer = (d: any) => {
-        if (!d || !d.id || d.id === myId) {
-          return;
+      channel.onmessage = (ev: any) => {
+        if (ev?.data?.id && ev.data.id !== myId) {
+          applyAllocation();
         }
-        if (d.type === 'bye') {
-          peers.delete(d.id);
-        } else {
-          peers.set(d.id, {
-            active: !!d.active,
-            desiredMB: typeof d.desiredMB === 'number' ? d.desiredMB : getBaseline(),
-            ts: Date.now(),
-          });
-        }
-        applyAllocation();
       };
-      channel.onmessage = (ev: any) => onPeer(ev?.data);
-      try {
-        channel.postMessage({ type: 'hello', id: myId, active: amActive(), desiredMB, ts: Date.now() });
-      } catch (e) {
-        /* noop */
-      }
-      window.addEventListener('pagehide', () => {
-        try {
-          channel.postMessage({ type: 'bye', id: myId, ts: Date.now() });
-          channel.close();
-        } catch (e) {
-          /* noop */
-        }
-      });
     }
   } catch (e) {
-    /* best-effort; single-tab allocation still works */
+    /* best-effort; registry eval still coordinates */
   }
+  try {
+    window.addEventListener('storage', (e: any) => {
+      if (e && typeof e.key === 'string' && e.key.indexOf('skm-tabreg-') === 0) {
+        applyAllocation();
+      }
+    });
+  } catch (e) {
+    /* noop */
+  }
+  window.addEventListener('pagehide', () => {
+    try {
+      localStorage.removeItem('skm-tabreg-' + myId);
+    } catch (e) {
+      /* noop */
+    }
+    try {
+      channel?.postMessage({ type: 'bye', id: myId, ts: Date.now() });
+      channel?.close();
+    } catch (e) {
+      /* noop */
+    }
+  });
 
-  // initial apply + loops
+  // initial registry write + apply + loops
+  writeRegistry();
   applyAllocation();
   window.setInterval(evalLoop, EVAL_MS);
 
