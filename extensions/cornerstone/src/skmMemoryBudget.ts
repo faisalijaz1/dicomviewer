@@ -7,7 +7,7 @@
  *  mandatory multi-tab use. A single permanent cap is wrong: too small → fast-scroll
  *  lag on the big 4403 series; too large → wasted RAM / multi-tab OS pressure. This
  *  governor uses only as much decoded RAM as the doctor currently needs:
- *    - starts at a SAFE BASELINE (16 GB 2560 MB, 32 GB 5120 MB via runtime override)
+ *    - starts at a SAFE BASELINE (16 GB 2816 MB, 32 GB 5120 MB via runtime override)
  *    - raises the budget in small steps (+256 MB) ONLY under SUSTAINED scroll pressure
  *    - lowers it in steps (−256 MB) after SUSTAINED idle
  *    - never exceeds a per-machine HARD CEILING (16 GB 4096 MB, 32 GB 6144 MB)
@@ -45,7 +45,7 @@ import { cache, eventTarget, Enums } from '@cornerstonejs/core';
 import { subscribeStackNewImage } from './utils/skmStackNewImage';
 
 export type SkmMemoryBudgetConfig = {
-  /** 16 GB-safe starting budget (MB) when no override is set. Default 2560. */
+  /** 16 GB-safe starting budget (MB) when no override is set. Default 2816. */
   baselineMB?: number;
   /** Max aggregate decoded budget across ALL tabs on this machine (MB). Default 4096. */
   hardCeilingMB?: number;
@@ -127,7 +127,7 @@ export function initSkmMemoryBudget(
   initialized = true;
   readUrlOverride();
 
-  const DEF_BASELINE = Math.max(256, config.baselineMB ?? 2560);
+  const DEF_BASELINE = Math.max(256, config.baselineMB ?? 2816);
   const DEF_CEILING = Math.max(DEF_BASELINE, config.hardCeilingMB ?? 4096);
   const MIN_MB = config.minBudgetMB ?? 1024;
   const MAX_MB = config.maxBudgetMB ?? 8192;

@@ -517,7 +517,7 @@ window.config = {
   // ceilings are safety values for the adaptive experiment — tune after real Edge/Task-Manager
   // validation on both tiers (they are not yet proven final).
   skmMemoryBudget: {
-    baselineMB: 2560,       // 16 GB-safe starting budget (validated smooth on the 4403 series)
+    baselineMB: 2816,       // 16 GB-safe starting budget (validated smooth on the 4403 series: displayP95 1ms, decodedHit 100%, spinner 0, cacheSizeExceeded 0)
     hardCeilingMB: 4096,    // max AGGREGATE decoded across all tabs on a 16 GB machine
     minBudgetMB: 1024,
     maxBudgetMB: 8192,

@@ -181,14 +181,25 @@ function DicomMemorySection({ value, onChange, ack, onAckChange, t }: DicomMemor
         </div>
 
         {budget && (
-          <div className="text-muted-foreground text-sm">
-            {t('Maximum', { defaultValue: 'Maximum' })}: {skmFormatGB(maximumMB)}
-            {value === 'auto'
-              ? ` (${t('Recommended', { defaultValue: 'Recommended' })})`
-              : ''}
-            {' · '}
-            {t('CurrentAllocation', { defaultValue: 'Current allocation' })}:{' '}
-            {skmFormatGB(currentMB)}
+          <div className="text-muted-foreground flex flex-col text-sm">
+            <span>
+              {t('Maximum', { defaultValue: 'Maximum' })}: {skmFormatGB(maximumMB)}
+              {value === 'auto'
+                ? ` (${t('Recommended', { defaultValue: 'Recommended' })})`
+                : ''}
+              {' · '}
+              {t('CurrentAllocation', { defaultValue: 'Current allocation' })}:{' '}
+              {skmFormatGB(currentMB)}
+            </span>
+            {value === 'auto' && budget.machineBaselineMB && (
+              <span>
+                {t('RecommendedStartsAt', {
+                  defaultValue: 'Recommended profile starts around {{baseline}} and grows to {{ceiling}} under load',
+                  baseline: skmFormatGB(budget.machineBaselineMB),
+                  ceiling: skmFormatGB(budget.machineHardCeilingMB),
+                })}
+              </span>
+            )}
           </div>
         )}
 
