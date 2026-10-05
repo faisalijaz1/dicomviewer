@@ -251,18 +251,22 @@ function ViewportSliceProgressScrollbar({
       */}
       <div
         aria-hidden={!showBadge}
-        // SKM 2026-09-29: border/glow switched from generic white/black to the
-        // same `highlight` cyan now used by the scrollbar fill below, so the
-        // badge and bar read as ONE cohesive loading system rather than two
-        // independently-styled pieces. ORIGINAL: "border-white/10 shadow-lg"
-        // (with the shadow color left as the default black/60).
-        className="bg-black/75 pointer-events-none absolute right-1 top-1 z-20 flex items-center gap-1 rounded-full border border-highlight/30 px-2 py-0.5 shadow-[0_0_8px_rgba(90,204,230,0.35)] backdrop-blur-sm transition-all duration-300 ease-out"
+        // SKM 2026-10-09: RadiAnt-style professional loading indicator.
+        //  - POSITION: anchored to the LEFT of the scrollbar (right-[20px]) so the pill's
+        //    right edge clears the 11px bar + padding instead of overlapping its top, and
+        //    sits cleanly aligned with the top of the scrollbar track.
+        //  - COLOR: cyan `highlight` accent replaced with a neutral grey (RadiAnt uses a
+        //    greyish/silver fill, not a saturated hue), matching the greyed scrollbar fill
+        //    below so the badge + bar still read as ONE cohesive loading system.
+        // ORIGINAL (2026-09-29): "absolute right-1 top-1 ... border-highlight/30
+        // shadow-[0_0_8px_rgba(90,204,230,0.35)]".
+        className="bg-black/75 pointer-events-none absolute right-[20px] top-1 z-20 flex items-center gap-1 rounded-full border border-white/15 px-2 py-0.5 shadow-[0_2px_8px_rgba(0,0,0,0.5)] backdrop-blur-sm transition-all duration-300 ease-out"
         style={{
           opacity: showBadge ? 1 : 0,
           transform: showBadge ? 'translateY(0)' : 'translateY(-4px)',
         }}
       >
-        <Icons.LoadingSpinner className="text-highlight h-2.5 w-2.5 shrink-0" />
+        <Icons.LoadingSpinner className="h-2.5 w-2.5 shrink-0 text-neutral-300" />
         {/* SKM 2026-10-04 (Option B): show the READY RANGE (available/total) + %, so the
             radiologist sees background preparation advancing. Non-blocking, corner-anchored. */}
         <span className="text-[10px] font-semibold leading-none text-white [font-variant-numeric:tabular-nums]">
@@ -307,11 +311,17 @@ function ViewportSliceProgressScrollbar({
               // flags, segmentation overlays) and risk a split-second
               // "is that a warning?" read next to grayscale anatomy.
               // ORIGINAL: className="bg-neutral/25" loadingClassName="bg-neutral/50"
+              // SKM 2026-10-09: RadiAnt-style greyish/silver fill. The cyan `highlight`
+              // (#5ACCE6) read as too saturated against the grayscale anatomy; RadiAnt uses a
+              // neutral light-grey loaded indicator. Resident range = soft grey; the actively-
+              // downloading edge is a brighter grey that pulses (motion signals live work, not a
+              // colour change). ORIGINAL: "bg-highlight/35 shadow-[...90,204,230...]" /
+              // "bg-highlight/60 ... animate-pulse".
               <SmartScrollbarFill
                 marked={loadedBytes}
                 version={loadedVersion}
-                className="bg-highlight/35 shadow-[0_0_6px_rgba(90,204,230,0.4)]"
-                loadingClassName="bg-highlight/60 shadow-[0_0_8px_rgba(90,204,230,0.6)] animate-pulse"
+                className="bg-[rgba(200,200,200,0.40)] shadow-[0_0_4px_rgba(200,200,200,0.20)]"
+                loadingClassName="bg-[rgba(224,224,224,0.75)] shadow-[0_0_6px_rgba(224,224,224,0.40)] animate-pulse"
               />
             )}
             {isFullMode && showViewedFill && (
@@ -347,8 +357,10 @@ function ViewportSliceProgressScrollbar({
               top: `${frontierTopPct}%`,
               height: '2px',
               transform: 'translateY(-1px)',
-              background: 'rgba(90,204,230,0.95)',
-              boxShadow: '0 0 6px 1px rgba(90,204,230,0.8)',
+              // SKM 2026-10-09: greyed to match the RadiAnt-style grey fill (was cyan
+              // rgba(90,204,230)). Brighter than the resident fill so the frontier still stands out.
+              background: 'rgba(235,235,235,0.95)',
+              boxShadow: '0 0 6px 1px rgba(235,235,235,0.7)',
               borderRadius: '1px',
               transition: 'top 150ms ease-out',
             }}
