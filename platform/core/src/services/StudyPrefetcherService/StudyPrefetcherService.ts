@@ -186,6 +186,12 @@ class StudyPrefetcherService extends PubSubService {
   // far-jump detection. _schedulerStats is a read-only snapshot for skmTelemetry.
   private _lastCenter: number | null = null;
   private _direction = 1;
+  // SKM 2026-10-09 (Phase 0 diagnostics — READ-ONLY): prove/measure the two-viewport
+  // scheduler-center flip-flop + far-jump cancel storm. None of this changes behaviour.
+  private _lastActiveViewportId: string | null = null;
+  private _schedulerEventLog: any[] = [];
+  private _schedulerEventLogMax = 120;
+  private _requestCounts = new Map<string, number>();
   private _schedulerStats = {
     requestedCenterIndex: 0,
     prefetchCenterIndex: 0,
@@ -199,6 +205,11 @@ class StudyPrefetcherService extends PubSubService {
     cancelledRequests: 0,
     p2Immediate: 0,
     p3Directional: 0,
+    // Phase 0 additions (read-only diagnostics):
+    activeViewportChanges: 0,
+    dupRequests: 0, // imageIds enqueued more than once (re-request after cancel)
+    maxRequestsPerImage: 0,
+    activeViewportId: '',
   };
   private _isRunning = false;
   private _startDelayTimer: ReturnType<typeof setTimeout> | null = null;
@@ -607,6 +618,82 @@ class StudyPrefetcherService extends PubSubService {
   // ── SKM 2026-10-03 (W2-full): windowed decode helpers ─────────────────────
   // The current image index of whatever viewport is showing this display set
   // (0 if we can't determine it). Used to centre the prefetch window.
+  // ── SKM 2026-10-09 (Phase 0 diagnostics — READ-ONLY) ───────────────────────
+  // Snapshot every open stack viewport's current index + series UID + active flag,
+  // so we can prove whether two viewports on the SAME series share one scheduler
+  // center and whether switching focus is mis-detected as a far jump.
+  private _perViewportSnapshot(): Array<{
+    viewportId: string;
+    idx: number;
+    seriesUID?: string;
+    active: boolean;
+  }> {
+    const out: Array<{ viewportId: string; idx: number; seriesUID?: string; active: boolean }> = [];
+    try {
+      const services: any = this._servicesManager.services;
+      const viewportGridService = services?.viewportGridService;
+      const cornerstoneViewportService = services?.cornerstoneViewportService;
+      if (!viewportGridService || !cornerstoneViewportService) {
+        return out;
+      }
+      const state = viewportGridService.getState();
+      const activeViewportId = state?.activeViewportId;
+      const viewports = state?.viewports;
+      if (!viewports || typeof viewports.forEach !== 'function') {
+        return out;
+      }
+      viewports.forEach((vp: any, viewportId: string) => {
+        const csVp = cornerstoneViewportService.getCornerstoneViewport?.(viewportId);
+        const idx = csVp?.getCurrentImageIdIndex?.();
+        if (typeof idx !== 'number') {
+          return;
+        }
+        out.push({
+          viewportId,
+          idx,
+          seriesUID: vp?.displaySetInstanceUIDs?.[0],
+          active: viewportId === activeViewportId,
+        });
+      });
+    } catch (e) {
+      /* best-effort */
+    }
+    return out;
+  }
+
+  private _logSchedulerEvent(type: string, extra: Record<string, unknown>): void {
+    try {
+      const services: any = this._servicesManager.services;
+      const activeViewportId = services?.viewportGridService?.getState?.()?.activeViewportId ?? null;
+      this._schedulerEventLog.push({
+        t: Date.now(),
+        type,
+        activeViewportId,
+        perViewport: this._perViewportSnapshot(),
+        ...extra,
+      });
+      if (this._schedulerEventLog.length > this._schedulerEventLogMax) {
+        this._schedulerEventLog.splice(0, this._schedulerEventLog.length - this._schedulerEventLogMax);
+      }
+      (globalThis as any).__skmSchedulerLog = this._schedulerEventLog;
+    } catch (e) {
+      /* never break */
+    }
+  }
+
+  /** Read-only diagnostics for skmTelemetry / console (Phase 0). */
+  public getSchedulerDiagnostics(): Record<string, unknown> {
+    return {
+      stats: { ...this._schedulerStats },
+      perViewport: this._perViewportSnapshot(),
+      activeDisplaySetUIDs: [...this._activeDisplaySetsInstanceUIDs],
+      lastCenter: this._lastCenter,
+      pending: this._pendingRequests.length,
+      inflight: this._inflightRequests.size,
+      recentEvents: this._schedulerEventLog.slice(-40),
+    };
+  }
+
   private _getCenterIndexForDisplaySet(displaySetInstanceUID: string): number {
     try {
       const services: any = this._servicesManager.services;
@@ -672,6 +759,24 @@ class StudyPrefetcherService extends PubSubService {
       return;
     }
 
+    // ── SKM 2026-10-09 (Phase 0 diagnostics — READ-ONLY): detect active-viewport change ──
+    try {
+      const activeVpId =
+        this._servicesManager.services?.viewportGridService?.getState?.()?.activeViewportId ?? null;
+      this._schedulerStats.activeViewportId = activeVpId ?? '';
+      if (activeVpId !== this._lastActiveViewportId) {
+        this._schedulerStats.activeViewportChanges++;
+        this._logSchedulerEvent('activeChange', {
+          from: this._lastActiveViewportId,
+          to: activeVpId,
+          centerBefore: this._lastCenter,
+        });
+        this._lastActiveViewportId = activeVpId;
+      }
+    } catch (e) {
+      /* never break */
+    }
+
     // ── SKM 2026-10-04 (Option B): direction + far-jump handling ──────────────
     if (this.config.priorityPrefetch) {
       const center = this._getActiveCenter();
@@ -686,6 +791,14 @@ class StudyPrefetcherService extends PubSubService {
           // FAR JUMP: cancel stale queued + in-flight prefetch so background work
           // around the OLD position can't compete with the new target, then rebuild
           // the window around the new centre right away (not throttled).
+          // SKM 2026-10-09 (Phase 0): log the jump with centers + the queue it is about to
+          // cancel, attributed to the active viewport. READ-ONLY; cancel logic unchanged.
+          this._logSchedulerEvent('farJump', {
+            centerBefore: this._lastCenter,
+            centerAfter: center,
+            delta,
+            willCancel: this._pendingRequests.length + this._inflightRequests.size,
+          });
           this._schedulerStats.lastJumpDelta = delta;
           this._schedulerStats.farJumps++;
           this._cancelPendingPrefetch();
@@ -1134,6 +1247,18 @@ class StudyPrefetcherService extends PubSubService {
         imageId,
         aborted: false,
       });
+      // SKM 2026-10-09 (Phase 0 diagnostics — READ-ONLY): count how often each imageId is
+      // (re-)enqueued. A count > 1 means the image was queued, cancelled (far jump), then
+      // queued again — the re-request storm. Attributes nothing to a viewport directly, but
+      // dupRequests/maxRequestsPerImage quantify the wasted work.
+      const n = (this._requestCounts.get(imageId) || 0) + 1;
+      this._requestCounts.set(imageId, n);
+      if (n === 2) {
+        this._schedulerStats.dupRequests++;
+      }
+      if (n > this._schedulerStats.maxRequestsPerImage) {
+        this._schedulerStats.maxRequestsPerImage = n;
+      }
     });
   }
 

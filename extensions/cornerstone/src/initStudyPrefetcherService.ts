@@ -65,6 +65,46 @@ function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager) {
       ]
     }
   }
+
+  // SKM 2026-10-09 (Phase 0 diagnostics — READ-ONLY): console reporter proving the
+  // two-viewport scheduler-center / far-jump / cancel behaviour. Changes NO behaviour.
+  //   skmSchedulerReport()  → per-viewport indices + recent far-jumps (center before/after,
+  //                           delta, requests cancelled) + duplicate-request stats.
+  //   window.__skmSchedulerLog → raw ring buffer of events.
+  try {
+    (window as any).skmSchedulerReport = () => {
+      const diag = (studyPrefetcherService as any).getSchedulerDiagnostics?.();
+      if (!diag) {
+        // eslint-disable-next-line no-console
+        console.log('[SKM-SCHED] diagnostics unavailable');
+        return null;
+      }
+      /* eslint-disable no-console */
+      console.log('[SKM-SCHED] stats', diag.stats);
+      console.log('[SKM-SCHED] activeDisplaySetUIDs', diag.activeDisplaySetUIDs, 'lastCenter', diag.lastCenter, 'pending', diag.pending, 'inflight', diag.inflight);
+      if (console.table) {
+        console.table(diag.perViewport);
+        console.table(
+          (diag.recentEvents || []).map((e: any) => ({
+            type: e.type,
+            activeViewportId: e.activeViewportId,
+            centerBefore: e.centerBefore,
+            centerAfter: e.centerAfter,
+            delta: e.delta,
+            willCancel: e.willCancel,
+            viewports: (e.perViewport || []).map((v: any) => `${v.viewportId}:${v.idx}${v.active ? '*' : ''}`).join(' | '),
+          }))
+        );
+      } else {
+        console.log('[SKM-SCHED] perViewport', diag.perViewport);
+        console.log('[SKM-SCHED] recentEvents', diag.recentEvents);
+      }
+      /* eslint-enable no-console */
+      return diag;
+    };
+  } catch (e) {
+    /* best-effort */
+  }
 }
 
 export default initStudyPrefetcherService;

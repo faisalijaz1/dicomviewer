@@ -186,6 +186,36 @@ deployed as an **office-only static build** served against a hospital PACS.
 All **[Source-confirmed]** unless noted — each is encoded in current source
 comments and/or code.
 
+### 4.0 Two distinct kinds of "pressure" (terminology — important for tuning)
+
+The system can be under two **independent** kinds of stress. Future agents must
+not conflate them, because the remedies are opposite.
+
+1. **Decoded-cache CAPACITY pressure** — the decoded pixel cache is approaching
+   its configured byte cap (fill → `reactiveHighWater`/the cap). Remedy: more
+   budget (governor growth) and/or eviction. This is what `budget_pressureScore`
+   measures.
+2. **Scheduler / PERFORMANCE pressure** — excessive queueing, a cancellation
+   storm, duplicate requests, a decode↔evict treadmill, long tasks, high display
+   latency, spinner time. Remedy: **scheduler / concurrency / windowing /
+   viewport-routing** fixes — **never** more memory.
+
+**It is normal and real to have (2) without (1).** The 2026-10-09 two-viewport
+test (Section 6.7) is the canonical example: the decoded cache peaked at
+2390 MB under a 2816 MB cap (**no capacity pressure**, `pressureScore 0`,
+`cacheSizeExceeded 0`) while the scheduler was in severe distress
+(`sched_cancelled 68917`, `longTaskTotalMs 31480`, `displayP95 128 ms`,
+`spinnerRatePct 13`). The correct phrasing is: **"there was no decoded-cache
+capacity pressure, but there was severe scheduler/performance pressure."**
+Do **not** say "there was no pressure."
+
+**Design consequence:** `budget_pressureScore` is intentionally a
+*capacity*-pressure signal only (fill + churn + scrolling). It must **not** be
+extended to react to performance pressure, because increasing the memory
+allocation cannot fix a scheduler bug — doing so would waste RAM and mask the
+real cause. Performance pressure should drive scheduler/concurrency/window
+decisions instead. **[Source-confirmed + design decision 2026-10-09]**
+
 ### 4.1 Cornerstone decoded-cache and `sharedCacheKey`
 
 - Cornerstone keeps a **decoded pixel cache** capped by `setMaxCacheSize`.
