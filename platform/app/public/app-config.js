@@ -203,9 +203,14 @@ window.config = {
     // prefetch lowered 20 → 8 so a SMALL decoded cache isn't overrun by too many
     // simultaneously-in-flight (non-evictable) images → avoids CACHE_SIZE_EXCEEDED.
     // ORIGINAL: interaction 8, thumbnail 2, prefetch 20.
+    // SKM 2026-10-09: prefetch lane raised 8 → 10 as the HARD CEILING for the adaptive
+    // prefetch-concurrency controller (skmPrefetchConcurrency). This only RAISES the
+    // ceiling; the controller still throttles the prefetcher's actual inflight cap between
+    // 4 and 10 from governor state + cache fill, so raising the lane alone changes nothing
+    // until headroom allows. interaction stays 8 (displayed-slice priority preserved).
     interaction: 8,
     thumbnail: 2,
-    prefetch: 8
+    prefetch: 10
   },
   // ── SKM-BULK 2026-09-28 (Fix 3) ───────────────────────────────────────────
   // Batch pixel retrieval: one request pulls ~50 slices instead of 50 separate
@@ -539,6 +544,33 @@ window.config = {
     activeTabMs: 8000,      // "tab active" window for allocation priority
     pressureFillFraction: 0.82,
     pressureThreshold: 0.6, // EMA pressure needed to step up
+  },
+
+  // SKM 2026-10-09 (adaptive prefetch concurrency — skmPrefetchConcurrency):
+  // The StudyPrefetcherService keeps at most maxNumPrefetchRequests prefetch loads in flight.
+  // Validation showed that cap (6) pegged with a 2000+ deep pending queue — background warming
+  // of a large series was throttle-limited, not network/decode/cache limited. This controller
+  // ADAPTS the inflight cap between min and max using the governor's live state
+  // (window.__skmBudget: active tab, live tab count) + decoded-cache fill, so it fills faster
+  // when there is headroom and backs off under memory/multi-tab pressure. It writes ONLY
+  // studyPrefetcherService.config.maxNumPrefetchRequests (read live by the service); it does
+  // NOT touch the governor, evictor, warmer, prefetch ordering, or Cornerstone core. The
+  // INTERACTION lane (displayed slice) is a separate request-pool lane and is never changed, so
+  // the viewed slice keeps top priority. max is clamped to maxNumRequests.prefetch (10 above).
+  // Gated by skmBoundedDecodeCache.enabled (same master switch as the governor).
+  // Diagnostics: window.skmGetPrefetchConcurrency() / window.__skmPrefetchConcurrency.
+  // TO REVERT to the old fixed cap: set enabled:false (the service then uses
+  // studyPrefetcher.maxNumPrefetchRequests, i.e. 6).
+  skmPrefetchConcurrency: {
+    enabled: true,
+    minRequests: 4,       // idle tab / near-cap backoff
+    baseRequests: 8,      // normal single active tab
+    maxRequests: 10,      // headroom-permitting ceiling (≤ maxNumRequests.prefetch)
+    multiTabRequests: 6,  // ≥ 2 live tabs: protect shared HTTP pool + aggregate RAM
+    evalMs: 1000,
+    raiseFill: 0.55,      // single active tab + fill below this → raise toward max
+    backoffFill: 0.88,    // fill at/above this → drop toward min (near the cap)
+    stepPerEval: 2,       // ramp ±2 so concurrency never jumps in one burst
   },
 
   // SKM 2026-10-04 (Phase A — skmPurgeableStackImages): THE Cornerstone-level fix.

@@ -50,6 +50,7 @@ import { initSkmPurgeableStackImages } from './skmPurgeableStackImages';
 // SKM 2026-10-07 (Fix 5): adaptive, multi-tab-aware decoded-RAM governor — owns the
 // Cornerstone cache cap, the per-tab budget split, and the derived decode window.
 import { initSkmMemoryBudget } from './skmMemoryBudget';
+import { initSkmPrefetchConcurrency } from './skmPrefetchConcurrency';
 // for validating the caching/RAM architecture. No-op unless appConfig.skmTelemetry.enabled.
 import { initSkmTelemetry } from './skmTelemetry';
 import interleaveCenterLoader from './utils/interleaveCenterLoader';
@@ -724,6 +725,18 @@ export default async function init({
 
   initCineService(servicesManager);
   initStudyPrefetcherService(servicesManager);
+
+  // SKM 2026-10-09: adaptive background prefetch concurrency. Consumes the governor's live
+  // state (window.__skmBudget) + decoded-cache fill to throttle the prefetcher's inflight cap
+  // between a safe MIN/MAX; the interaction lane is untouched. Gated by the same bounded-decode
+  // master switch as the governor. See skmPrefetchConcurrency.ts.
+  if ((appConfig as any)?.skmBoundedDecodeCache?.enabled !== false) {
+    initSkmPrefetchConcurrency(
+      servicesManager,
+      appConfig,
+      (appConfig as any)?.skmPrefetchConcurrency || {}
+    );
+  }
 
   // SKM-BULK 2026-09-28 (Fix 3): register the bulk-capable dicomweb image loader
   // and the chunk driver. Both are no-ops unless appConfig.skmBulkLoader.enabled
