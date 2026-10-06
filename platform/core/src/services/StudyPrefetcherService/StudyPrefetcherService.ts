@@ -189,6 +189,13 @@ class StudyPrefetcherService extends PubSubService {
   // SKM 2026-10-09 (Phase 0 diagnostics — READ-ONLY): prove/measure the two-viewport
   // scheduler-center flip-flop + far-jump cancel storm. None of this changes behaviour.
   private _lastActiveViewportId: string | null = null;
+  // SKM 2026-10-09 (QA fix — per-viewport center ownership): each viewport's OWN last known
+  // centre index, keyed by viewportId. _lastCenter is a SINGLE global value and was the root
+  // cause of cross-viewport "centerBefore" contamination — when focus moved A→B, prevCenter
+  // read whatever _lastCenter happened to hold from A's last call, not B's own true prior
+  // position. This map makes "this viewport's previous centre" an explicit, owned fact, never
+  // borrowed from whichever pane last ran through onActiveSliceChanged().
+  private _viewportCenters = new Map<string, number>();
   private _schedulerEventLog: any[] = [];
   private _schedulerEventLogMax = 120;
   private _requestCounts = new Map<string, number>();
@@ -349,9 +356,20 @@ class StudyPrefetcherService extends PubSubService {
     );
 
     // Loads new datasets when making a new viewport active
+    // SKM 2026-10-09 (QA fix): previously, focus-change jump classification lived ONLY
+    // inside onActiveSliceChanged(), which fires on image-load events — so it ran whenever
+    // the NEXT background image happened to complete, not synchronously when focus actually
+    // changed. A focus change with no immediately-following image event went undetected
+    // entirely (dormant-pane silent drop); one racing against an unrelated pane's image
+    // load could read a stale/wrong "current" viewport. onActiveViewportChanged() now runs
+    // SYNCHRONOUSLY, directly off this event, so identity + per-viewport jump attribution can
+    // never race against prefetch/decode traffic from any other pane.
     const viewportGridActiveViewportIdSubscription = viewportGridService.subscribe(
       ViewportGridService.EVENTS.ACTIVE_VIEWPORT_ID_CHANGED,
-      ({ viewportId }) => this._syncWithActiveViewport({ activeViewportId: viewportId })
+      ({ viewportId }) => {
+        this._syncWithActiveViewport({ activeViewportId: viewportId });
+        this.onActiveViewportChanged(viewportId);
+      }
     );
 
     // Continue loading datasets after changing the layout (eg: from 1x1 to 2x1)
@@ -823,129 +841,56 @@ class StudyPrefetcherService extends PubSubService {
     return this._getCenterIndexForDisplaySet(activeUID);
   }
 
-  // Scroll-driven re-window: Cornerstone fires STACK_NEW_IMAGE / IMAGE_LOADED as the
-  // doctor scrolls; the extension forwards it here (see initStudyPrefetcherService).
-  // We infer scroll direction, detect FAR JUMPS (cancel stale work immediately), and
-  // rebuild the window around the new centre. Cheap no-op unless windowedPrefetch is
-  // on and the service is running.
-  public onActiveSliceChanged(): void {
-    if (!this.config.windowedPrefetch || !this._isRunning) {
-      return;
-    }
-
-    // ── SKM 2026-10-09 (Phase 0 diagnostics + Phase 1 rebase): detect active-viewport change ──
-    // A focus change (pane A → pane B) is NOT a scroll and must NOT be mis-read as a far jump.
-    // We record it and set activeChanged so the far-jump branch below REBASES _lastCenter to the
-    // newly focused viewport's position instead of cancelling the whole queue.
-    let activeChanged = false;
+  // Resolve a SPECIFIC viewport's own current image index directly from Cornerstone — never
+  // via "whichever viewport is active right now" — so a caller can always ask for a named
+  // viewport's position regardless of which pane is currently focused.
+  private _getIndexForViewportId(viewportId: string): number | null {
     try {
-      const activeVpId =
-        this._servicesManager.services?.viewportGridService?.getState?.()?.activeViewportId ?? null;
-      this._schedulerStats.activeViewportId = activeVpId ?? '';
-      if (activeVpId !== this._lastActiveViewportId) {
-        activeChanged = true;
-        this._schedulerStats.activeViewportChanges++;
-        this._logSchedulerEvent('activeChange', {
-          from: this._lastActiveViewportId,
-          to: activeVpId,
-          centerBefore: this._lastCenter,
-        });
-        this._lastActiveViewportId = activeVpId;
-      }
+      const csvs = (this._servicesManager.services as any)?.cornerstoneViewportService;
+      const csVp = csvs?.getCornerstoneViewport?.(viewportId);
+      const idx = csVp?.getCurrentImageIdIndex?.();
+      return typeof idx === 'number' && idx >= 0 ? idx : null;
     } catch (e) {
-      /* never break */
+      return null;
     }
+  }
 
-    // ── SKM 2026-10-04 (Option B): direction + far-jump handling ──────────────
-    if (this.config.priorityPrefetch) {
-      const center = this._getActiveCenter();
-      // Phase 1: on a focus change, REBASE to the new active viewport's centre and re-window
-      // around it WITHOUT a far-jump cancel storm (the other pane's work stays useful; prefetch
-      // now prioritises the union of both panes via _orderedWindowImageIds).
-      if (activeChanged) {
-        const prevCenter = this._lastCenter;
-        this._lastCenter = center;
-        const farJumpThreshold =
-          typeof this.config.farJumpThreshold === 'number' ? this.config.farJumpThreshold : 120;
-        const delta = prevCenter !== null ? center - prevCenter : 0;
-        if (prevCenter !== null && Math.abs(delta) > farJumpThreshold) {
-          // Focus change accompanied by a genuine large movement: also cancel stale work and
-          // re-window immediately. The activeChange event is already logged above; add farJump.
-          this._logSchedulerEvent('farJump', {
-            centerBefore: prevCenter,
-            centerAfter: center,
-            delta,
-            trigger: 'activeChange+farJump',
-            willCancel: this._pendingRequests.length + this._inflightRequests.size,
-          });
-          this._schedulerStats.lastJumpDelta = delta;
-          this._schedulerStats.farJumps++;
-          this._cancelPendingPrefetch();
-          if (this._rewindowTimer) {
-            clearTimeout(this._rewindowTimer);
-            this._rewindowTimer = null;
-          }
-          try {
-            this._loadDisplaySets();
-            this._sendNextRequests();
-          } catch (e) {
-            /* best-effort far-jump re-window on focus change */
-          }
-          return;
-        }
-        // Pure focus change (small or no movement): soft rebase, no cancel.
-        if (!this._rewindowTimer) {
-          this._rewindowTimer = setTimeout(() => {
-            this._rewindowTimer = null;
-            try {
-              this._loadDisplaySets();
-              this._sendNextRequests();
-            } catch (e) {
-              /* best-effort rebase re-window */
-            }
-          }, 200);
-        }
-        return;
-      }
-      if (this._lastCenter !== null) {
-        const delta = center - this._lastCenter;
-        if (delta !== 0) {
-          this._direction = delta > 0 ? 1 : -1;
-        }
-        const farJumpThreshold =
-          typeof this.config.farJumpThreshold === 'number' ? this.config.farJumpThreshold : 120;
-        if (Math.abs(delta) > farJumpThreshold) {
-          // FAR JUMP: cancel stale queued + in-flight prefetch so background work
-          // around the OLD position can't compete with the new target, then rebuild
-          // the window around the new centre right away (not throttled).
-          // SKM 2026-10-09 (Phase 0): log the jump with centers + the queue it is about to
-          // cancel, attributed to the active viewport. READ-ONLY; cancel logic unchanged.
-          this._logSchedulerEvent('farJump', {
-            centerBefore: this._lastCenter,
-            centerAfter: center,
-            delta,
-            willCancel: this._pendingRequests.length + this._inflightRequests.size,
-          });
-          this._schedulerStats.lastJumpDelta = delta;
-          this._schedulerStats.farJumps++;
-          this._cancelPendingPrefetch();
-          this._lastCenter = center;
-          if (this._rewindowTimer) {
-            clearTimeout(this._rewindowTimer);
-            this._rewindowTimer = null;
-          }
-          try {
-            this._loadDisplaySets();
-            this._sendNextRequests();
-          } catch (e) {
-            /* best-effort far-jump re-window */
-          }
-          return;
-        }
-      }
-      this._lastCenter = center;
+  // SKM 2026-10-09 (QA fix): cancel stale prefetch + rebuild the window around `center`,
+  // logging a farJump attributed to `viewportId` with that viewport's OWN previous centre.
+  // Shared by both the focus-change path (onActiveViewportChanged) and the same-pane
+  // scroll path (onActiveSliceChanged) so the two can never diverge in behaviour.
+  private _fireFarJump(
+    viewportId: string | null,
+    prevCenter: number,
+    center: number,
+    trigger: string
+  ): void {
+    const delta = center - prevCenter;
+    this._logSchedulerEvent('farJump', {
+      viewportId,
+      centerBefore: prevCenter,
+      centerAfter: center,
+      delta,
+      trigger,
+      willCancel: this._pendingRequests.length + this._inflightRequests.size,
+    });
+    this._schedulerStats.lastJumpDelta = delta;
+    this._schedulerStats.farJumps++;
+    this._publishStats();
+    this._cancelPendingPrefetch();
+    if (this._rewindowTimer) {
+      clearTimeout(this._rewindowTimer);
+      this._rewindowTimer = null;
     }
+    try {
+      this._loadDisplaySets();
+      this._sendNextRequests();
+    } catch (e) {
+      /* best-effort far-jump re-window */
+    }
+  }
 
+  private _scheduleSoftRewindow(): void {
     if (this._rewindowTimer) {
       return;
     }
@@ -958,6 +903,142 @@ class StudyPrefetcherService extends PubSubService {
         /* best-effort re-window */
       }
     }, 200);
+  }
+
+  // SKM 2026-10-09 (QA fix — root cause of cross-viewport "centerBefore" contamination):
+  // called SYNCHRONOUSLY, directly off ViewportGridService.ACTIVE_VIEWPORT_ID_CHANGED (see
+  // _addServicesListeners), NOT deferred to the next image-load event. The previous design
+  // detected focus changes lazily inside onActiveSliceChanged(), which only runs when SOME
+  // image finishes loading (any viewport, any series) — so (a) a focus change with no
+  // immediately-following image event went completely undetected (dormant-pane silent drop),
+  // and (b) when an unrelated pane's background image happened to complete first, its call
+  // could consume the "active changed" transition using the WRONG pane's stored centre.
+  // Running this directly off the grid event removes that race entirely: identity updates the
+  // instant focus changes, and the previous-centre lookup is keyed by THIS viewport's own id in
+  // _viewportCenters, never a shared/global value.
+  public onActiveViewportChanged(viewportId: string | null): void {
+    if (!viewportId || viewportId === this._lastActiveViewportId) {
+      if (viewportId) {
+        this._schedulerStats.activeViewportId = viewportId;
+      }
+      return;
+    }
+
+    const fromViewportId = this._lastActiveViewportId;
+    this._lastActiveViewportId = viewportId;
+    this._schedulerStats.activeViewportId = viewportId;
+    this._schedulerStats.activeViewportChanges++;
+
+    if (!this.config.windowedPrefetch || !this.config.priorityPrefetch || !this._isRunning) {
+      this._logSchedulerEvent('activeChange', { from: fromViewportId, to: viewportId });
+      return;
+    }
+
+    const center = this._getIndexForViewportId(viewportId);
+    if (center === null) {
+      // Viewport has no stack / isn't ready yet — identity still updated above; the window
+      // will be (re)built once a real index is available (next onActiveSliceChanged call).
+      this._logSchedulerEvent('activeChange', { from: fromViewportId, to: viewportId });
+      return;
+    }
+
+    // Per-viewport ownership: a pane we've never tracked returns null (no false jump on first
+    // sight of a dormant pane); a pane we HAVE tracked returns ITS OWN true last position,
+    // never another pane's — this is what makes centerBefore correct for Case C/D below.
+    const prevCenter = this._viewportCenters.has(viewportId)
+      ? (this._viewportCenters.get(viewportId) as number)
+      : null;
+    this._viewportCenters.set(viewportId, center);
+    this._lastCenter = center;
+
+    this._logSchedulerEvent('activeChange', {
+      from: fromViewportId,
+      to: viewportId,
+      centerBefore: prevCenter,
+      centerAfter: center,
+    });
+    this._publishStats();
+
+    const farJumpThreshold =
+      typeof this.config.farJumpThreshold === 'number' ? this.config.farJumpThreshold : 120;
+    const delta = prevCenter !== null ? center - prevCenter : 0;
+
+    if (prevCenter !== null && Math.abs(delta) > farJumpThreshold) {
+      // Focus landed on a pane whose OWN position also moved a long way since we last saw it
+      // (focus + immediate jump, or a dormant pane that moved while unfocused) — cancel stale
+      // work and re-window now, attributed to the correct viewport with its own true delta.
+      this._fireFarJump(viewportId, prevCenter, center, 'activeChange+farJump');
+      return;
+    }
+
+    // Pure focus change (no material movement in the newly-focused pane): soft rebase only,
+    // never a cancel storm — this preserves the original false-far-jump fix.
+    this._scheduleSoftRewindow();
+  }
+
+  // Scroll-driven re-window: Cornerstone fires STACK_NEW_IMAGE / IMAGE_LOADED as the
+  // doctor scrolls; the extension forwards it here (see initStudyPrefetcherService).
+  // We infer scroll direction, detect FAR JUMPS (cancel stale work immediately), and
+  // rebuild the window around the new centre. Cheap no-op unless windowedPrefetch is
+  // on and the service is running.
+  public onActiveSliceChanged(): void {
+    if (!this.config.windowedPrefetch || !this._isRunning) {
+      return;
+    }
+
+    // SKM 2026-10-09 (QA fix): focus-change IDENTITY + jump classification is now handled
+    // synchronously by onActiveViewportChanged() (wired directly to ACTIVE_VIEWPORT_ID_CHANGED
+    // — see _addServicesListeners). This function only tracks movement WITHIN whichever
+    // viewport is currently active (scroll / on-demand decode), using that viewport's OWN
+    // centre history — it no longer does its own activeChanged detection, which removed the
+    // race against image-load events that caused cross-viewport contamination. The catch-up
+    // below is a defensive fallback only (e.g. if the grid event was somehow missed) and simply
+    // delegates to the same, single, correctly-attributed code path.
+    let activeVpId: string | null = null;
+    try {
+      activeVpId =
+        this._servicesManager.services?.viewportGridService?.getState?.()?.activeViewportId ?? null;
+      this._schedulerStats.activeViewportId = activeVpId ?? '';
+      if (activeVpId && activeVpId !== this._lastActiveViewportId) {
+        this.onActiveViewportChanged(activeVpId);
+        return;
+      }
+    } catch (e) {
+      /* never break */
+    }
+
+    if (this.config.priorityPrefetch) {
+      const viewportId = activeVpId ?? this._lastActiveViewportId;
+      const center = viewportId ? this._getIndexForViewportId(viewportId) : this._getActiveCenter();
+      const resolvedCenter = center ?? this._getActiveCenter();
+
+      if (viewportId) {
+        const prevCenter = this._viewportCenters.has(viewportId)
+          ? (this._viewportCenters.get(viewportId) as number)
+          : null;
+        this._viewportCenters.set(viewportId, resolvedCenter);
+        this._lastCenter = resolvedCenter;
+
+        if (prevCenter !== null) {
+          const delta = resolvedCenter - prevCenter;
+          if (delta !== 0) {
+            this._direction = delta > 0 ? 1 : -1;
+          }
+          const farJumpThreshold =
+            typeof this.config.farJumpThreshold === 'number' ? this.config.farJumpThreshold : 120;
+          if (Math.abs(delta) > farJumpThreshold) {
+            // FAR JUMP in the already-active pane: cancel stale queued + in-flight prefetch so
+            // background work around the OLD position can't compete with the new target.
+            this._fireFarJump(viewportId, prevCenter, resolvedCenter, 'sameViewport');
+            return;
+          }
+        }
+      } else {
+        this._lastCenter = resolvedCenter;
+      }
+    }
+
+    this._scheduleSoftRewindow();
   }
 
   // SKM 2026-10-04 (Option B): drop queued prefetch and abort in-flight so a far jump
@@ -1471,6 +1552,10 @@ class StudyPrefetcherService extends PubSubService {
     // read the previous centre as a far jump.
     this._lastCenter = null;
     this._direction = 1;
+    // SKM 2026-10-09 (QA fix): clear per-viewport centre ownership too — a slice index is only
+    // meaningful within ITS series, so a stale index from the series that just unloaded must
+    // never be compared against a new series on the same viewportId (restart => fresh history).
+    this._viewportCenters.clear();
 
     // Mark all inflight requests as aborted before clearing the map.
     this._inflightRequests.forEach(inflightRequest => (inflightRequest.aborted = true));

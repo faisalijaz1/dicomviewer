@@ -190,6 +190,14 @@ function evictorSnapshot(): Record<string, number> {
 
 // SKM 2026-10-04 (Option B): read the read-only scheduler snapshot the
 // StudyPrefetcherService publishes (window.__skmScheduler). Returns {} if absent.
+// SKM 2026-10-09 (QA fix): this snapshot used to be republished ONLY from inside
+// _sendNextRequests() when it actually dispatched a request — so once the prefetch queue
+// drained or the in-flight cap was hit, it froze while the authoritative counters
+// (getSchedulerDiagnostics().stats, __skmSchedulerLog) kept advancing, producing a growing gap
+// between sched_farJumps here and the real farJump count. StudyPrefetcherService now also
+// republishes this snapshot on every farJump/activeChange event itself (_publishStats() calls
+// in _fireFarJump / onActiveViewportChanged), so this mirror and the authoritative counters
+// should stay in lock-step; a persistent gap would indicate a NEW bug, not this one.
 function schedulerSnapshot(): Record<string, number> {
   try {
     const s = (globalThis as any).__skmScheduler;
