@@ -207,8 +207,8 @@ class StudyPrefetcherService extends PubSubService {
     p3Directional: 0,
     // Phase 0 additions (read-only diagnostics):
     activeViewportChanges: 0,
-    dupRequests: 0, // imageIds enqueued more than once (re-request after cancel)
-    maxRequestsPerImage: 0,
+    reEnqueues: 0, // imageIds re-enqueued after a far-jump cancel (NOT duplicate network requests)
+    maxEnqueuesPerImage: 0, // highest enqueue count for any single imageId (same session)
     activeViewportId: '',
   };
   private _isRunning = false;
@@ -681,6 +681,12 @@ class StudyPrefetcherService extends PubSubService {
     }
   }
 
+  /** SKM 2026-10-09 (Phase 3): imageIds currently being fetched by the prefetcher.
+   *  The evictor uses this to protect in-flight images from eviction while they decode. */
+  public getInflightImageIds(): Set<string> {
+    return new Set(this._inflightRequests.keys());
+  }
+
   /** Read-only diagnostics for skmTelemetry / console (Phase 0). */
   public getSchedulerDiagnostics(): Record<string, unknown> {
     return {
@@ -857,7 +863,37 @@ class StudyPrefetcherService extends PubSubService {
       // around it WITHOUT a far-jump cancel storm (the other pane's work stays useful; prefetch
       // now prioritises the union of both panes via _orderedWindowImageIds).
       if (activeChanged) {
+        const prevCenter = this._lastCenter;
         this._lastCenter = center;
+        const farJumpThreshold =
+          typeof this.config.farJumpThreshold === 'number' ? this.config.farJumpThreshold : 120;
+        const delta = prevCenter !== null ? center - prevCenter : 0;
+        if (prevCenter !== null && Math.abs(delta) > farJumpThreshold) {
+          // Focus change accompanied by a genuine large movement: also cancel stale work and
+          // re-window immediately. The activeChange event is already logged above; add farJump.
+          this._logSchedulerEvent('farJump', {
+            centerBefore: prevCenter,
+            centerAfter: center,
+            delta,
+            trigger: 'activeChange+farJump',
+            willCancel: this._pendingRequests.length + this._inflightRequests.size,
+          });
+          this._schedulerStats.lastJumpDelta = delta;
+          this._schedulerStats.farJumps++;
+          this._cancelPendingPrefetch();
+          if (this._rewindowTimer) {
+            clearTimeout(this._rewindowTimer);
+            this._rewindowTimer = null;
+          }
+          try {
+            this._loadDisplaySets();
+            this._sendNextRequests();
+          } catch (e) {
+            /* best-effort far-jump re-window on focus change */
+          }
+          return;
+        }
+        // Pure focus change (small or no movement): soft rebase, no cancel.
         if (!this._rewindowTimer) {
           this._rewindowTimer = setTimeout(() => {
             this._rewindowTimer = null;
@@ -1388,16 +1424,15 @@ class StudyPrefetcherService extends PubSubService {
         aborted: false,
       });
       // SKM 2026-10-09 (Phase 0 diagnostics — READ-ONLY): count how often each imageId is
-      // (re-)enqueued. A count > 1 means the image was queued, cancelled (far jump), then
-      // queued again — the re-request storm. Attributes nothing to a viewport directly, but
-      // dupRequests/maxRequestsPerImage quantify the wasted work.
+      // re-enqueued after a far-jump cancel. Count > 1 = re-queued after cancel (not a
+      // duplicate network request — Cornerstone deduplicates at the pool level).
       const n = (this._requestCounts.get(imageId) || 0) + 1;
       this._requestCounts.set(imageId, n);
       if (n === 2) {
-        this._schedulerStats.dupRequests++;
+        this._schedulerStats.reEnqueues++;
       }
-      if (n > this._schedulerStats.maxRequestsPerImage) {
-        this._schedulerStats.maxRequestsPerImage = n;
+      if (n > this._schedulerStats.maxEnqueuesPerImage) {
+        this._schedulerStats.maxEnqueuesPerImage = n;
       }
     });
   }
@@ -1444,6 +1479,11 @@ class StudyPrefetcherService extends PubSubService {
     this._displaySetLoadingStates.clear();
     this._imageIdsToDisplaySetsMap.clear();
     this._inflightRequests.clear();
+    // SKM 2026-10-09 (Phase 0 fix): clear per-imageId enqueue counts so memory grows
+    // O(study_size) not O(session_lifetime); also reset per-session stats.
+    this._requestCounts.clear();
+    this._schedulerStats.reEnqueues = 0;
+    this._schedulerStats.maxEnqueuesPerImage = 0;
     this.imageLoadPoolManager.clearRequestStack(this.requestType);
 
     this._broadcastEvent(this.EVENTS.SERVICE_STOPPED, {});

@@ -500,6 +500,19 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
         }
       }
 
+      // SKM 2026-10-09 (Phase 3): protect images currently in the prefetcher's in-flight
+      // set — they are being decoded right now and evicting them mid-flight causes purge
+      // warnings (the decode completes but the cache no longer holds the object).
+      try {
+        const studyPrefetcherService = (servicesManager.services as any)?.studyPrefetcherService;
+        if (typeof studyPrefetcherService?.getInflightImageIds === 'function') {
+          const inflight: Set<string> = studyPrefetcherService.getInflightImageIds();
+          inflight.forEach(id => keep.add(id));
+        }
+      } catch (e) {
+        /* best-effort; never break scrolling */
+      }
+
       // ── Fix 3 (REACTIVE gate) — gates ONLY windowed eviction, NOT orphan eviction ─────────
       // Windowed eviction (trimming the CURRENT series' working set) is a RAM-vs-smoothness
       // tradeoff, so it runs only under real memory pressure (fill ≥ reactiveHighWater): a series
