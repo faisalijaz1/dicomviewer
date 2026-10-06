@@ -84,6 +84,30 @@ const warmedImageIds = new Set<string>();
 // Bumps whenever the active series changes; in-flight warmers compare against it
 // and abort when stale, so a series/study switch cancels the previous warm.
 let currentRunId = 0;
+// SKM 2026-10-09 (QA fix — Priority 2 diagnostics): a small, capped record of ACTUAL restart
+// decisions only (never on every scroll/recentre — this fires only when mwRecenter() decides
+// to bump currentRunId), so the series-change-vs-center-jump invalidation can be proven via
+// window.skmWarmerRestarts() without flooding the console during normal scrolling.
+type SkmWarmerRestartRecord = {
+  t: number;
+  reason: 'series-change' | 'center-jump' | 'initial';
+  prevDsUID: string | null;
+  newDsUID: string;
+  centerDelta: number | null;
+  prevRunId: number;
+  newRunId: number;
+  center: number;
+  listLength: number;
+};
+const warmerRestartLog: SkmWarmerRestartRecord[] = [];
+const WARMER_RESTART_LOG_MAX = 50;
+function recordWarmerRestart(rec: SkmWarmerRestartRecord): void {
+  warmerRestartLog.push(rec);
+  if (warmerRestartLog.length > WARMER_RESTART_LOG_MAX) {
+    warmerRestartLog.splice(0, warmerRestartLog.length - WARMER_RESTART_LOG_MAX);
+  }
+  (globalThis as any).__skmWarmerRestarts = warmerRestartLog;
+}
 
 function urlFromImageId(imageId: string): string | null {
   if (!imageId) {
@@ -300,6 +324,19 @@ export function initSkmWarmer(
   let mwLastCenter: number | null = null;
   let mwDirection = 1;
   let mwTimer: ReturnType<typeof setTimeout> | null = null;
+  // SKM 2026-10-09 (QA fix — Priority 2, confirmed root cause of the old-series warmer
+  // surviving a study/series switch): mwRecenter()'s restart decision used to be driven
+  // ONLY by |Δcenter| against the PREVIOUS run's centre, with no check of series identity at
+  // all. If a newly-opened series' starting index happened to land within
+  // MW_RESTART_THRESHOLD slices of wherever the OLD series was last centred, mwRecenter()
+  // returned early WITHOUT incrementing currentRunId — so the old series' warmSeries()
+  // workers (whose only stop condition is runId !== currentRunId) never saw a mismatch and
+  // kept pulling from their own, already-captured (old series') imageIds list, while the new
+  // series never got a warm run started at all. Tracking the displaySetInstanceUID the
+  // CURRENT run belongs to lets a genuine series change force a restart unconditionally,
+  // independent of the centre-delta optimisation (which still applies, unchanged, when the
+  // series is the SAME).
+  let mwLastDsUID: string | null = null;
 
   const mwGetActiveSeries = (): { dsUID: string; imageIds: string[]; viewportId: string } | null => {
     try {
@@ -420,25 +457,67 @@ export function initSkmWarmer(
     if (mwLastCenter !== null && center !== mwLastCenter) {
       mwDirection = center > mwLastCenter ? 1 : -1;
     }
-    // Phase B: only RESTART (re-prioritise) the sweep on a meaningful move. The sweep already
-    // warms the whole study near-first and dedups via warmedImageIds, so we don't need to tear
-    // it down and rebuild on every 1-slice scroll (that caused re-scan churn). Between restarts
-    // the running sweep keeps progressing. A far jump (> restart threshold) re-prioritises.
+
+    // SKM 2026-10-09 (QA fix — Priority 2, confirmed root cause): a genuine series change
+    // ALWAYS forces a restart, independent of the centre-delta optimisation below. Without
+    // this, a newly-opened series whose starting index happened to land within
+    // MW_RESTART_THRESHOLD slices of wherever the OLD series was last centred would never
+    // bump currentRunId — so the old series' warmSeries() workers (whose only stop condition
+    // is runId !== currentRunId) kept pulling from their own, already-captured OLD imageIds
+    // list indefinitely, while the new series got no warm run started at all. See
+    // mwLastDsUID's declaration comment above for the full trace.
+    const seriesChanged = mwLastDsUID !== null && mwLastDsUID !== s.dsUID;
+
+    // Phase B: only RESTART (re-prioritise) the sweep on a meaningful move WITHIN THE SAME
+    // series. The sweep already warms the whole study near-first and dedups via
+    // warmedImageIds, so we don't need to tear it down and rebuild on every 1-slice scroll
+    // (that caused re-scan churn). Between restarts the running sweep keeps progressing. A far
+    // jump (> restart threshold) re-prioritises. This optimisation never applies across a
+    // series change — seriesChanged bypasses it unconditionally, every time.
     const MW_RESTART_THRESHOLD = 50;
+    const centerDelta = mwLastCenter !== null ? center - mwLastCenter : null;
     if (
+      !seriesChanged &&
       mwLastCenter !== null &&
       currentRunId > 0 &&
-      Math.abs(center - mwLastCenter) < MW_RESTART_THRESHOLD
+      centerDelta !== null &&
+      Math.abs(centerDelta) < MW_RESTART_THRESHOLD
     ) {
       return;
     }
+
+    const prevDsUID = mwLastDsUID;
+    const prevRunId = currentRunId;
     mwLastCenter = center;
+    mwLastDsUID = s.dsUID;
     currentRunId++; // abandon the previous sweep's workers; dedup keeps completed work
     const myRun = currentRunId;
+    const restartReason: SkmWarmerRestartRecord['reason'] = seriesChanged
+      ? 'series-change'
+      : prevRunId === 0
+        ? 'initial'
+        : 'center-jump';
     const list = mwOrderedWindow(s.imageIds, center, mwDirection);
+
+    // SKM 2026-10-09 (QA fix — Priority 2 diagnostics): recorded only on an ACTUAL restart
+    // decision (never on every scroll/recentre tick), so this can't flood the console during
+    // normal scrolling — see window.skmWarmerRestarts().
+    recordWarmerRestart({
+      t: Date.now(),
+      reason: restartReason,
+      prevDsUID,
+      newDsUID: s.dsUID,
+      centerDelta,
+      prevRunId,
+      newRunId: myRun,
+      center,
+      listLength: list.length,
+    });
+
     // eslint-disable-next-line no-console
     console.log(
-      `[SKM-WARMER] moving window @${center} dir=${mwDirection} warming ${list.length} remaining slices`
+      `[SKM-WARMER] moving window @${center} dir=${mwDirection} warming ${list.length} ` +
+        `remaining slices (reason=${restartReason})`
     );
     warmSeries(list, myRun).catch(() => undefined);
   };
@@ -475,4 +554,18 @@ export function initSkmWarmer(
     // eslint-disable-next-line no-console
     console.warn('[SKM-WARMER] failed to subscribe', e);
   }
+
+  // SKM 2026-10-09 (QA fix — Priority 2 diagnostics): dump the capped restart-decision log
+  // (see recordWarmerRestart) — proves, per restart, whether it was a 'series-change'
+  // (always forced now, regardless of centre delta), a same-series 'center-jump', or the
+  // 'initial' warm, along with prevDsUID/newDsUID, prevRunId/newRunId and centerDelta.
+  (window as any).skmWarmerRestarts = () => {
+    // eslint-disable-next-line no-console
+    console.log('[SKM-WARMER] restart log:', warmerRestartLog);
+    if (console.table) {
+      // eslint-disable-next-line no-console
+      console.table(warmerRestartLog);
+    }
+    return warmerRestartLog;
+  };
 }
