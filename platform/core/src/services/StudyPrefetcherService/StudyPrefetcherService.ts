@@ -4,6 +4,24 @@ import ServicesManager from '../ServicesManager';
 import ViewportGridService from '../ViewportGridService';
 import { DisplaySet } from '../../types';
 
+// SKM 2026-10-09 (QA fix — Priority 2 instrumentation): read-only performance.mark() calls at
+// the key stages of a restart (study/series switch), so the actual time breakdown can be
+// measured instead of assumed. See skmStudySwitchTelemetry.ts (extensions/cornerstone) for the
+// companion module that turns these marks + first-WADO/decode/display events into a report.
+// Never throws; a no-op if the Performance API is unavailable (e.g. non-browser test context).
+function skmMark(name: string): void {
+  try {
+    if (typeof performance !== 'undefined' && typeof performance.mark === 'function') {
+      if (typeof performance.clearMarks === 'function') {
+        performance.clearMarks(name);
+      }
+      performance.mark(name);
+    }
+  } catch (e) {
+    /* never break */
+  }
+}
+
 enum RequestType {
   /** Highest priority for loading*/
   Interaction = 'interaction',
@@ -504,7 +522,13 @@ class StudyPrefetcherService extends PubSubService {
     }
 
     this._activeDisplaySetsInstanceUIDs = [...newActiveDisplaySetInstanceUIDs];
-    this._restartPrefetching();
+    // SKM 2026-10-09 (QA fix — Priority 2, study-switch double-restart): do NOT restart here.
+    // The ONLY caller, _syncWithActiveViewport(), already restarts when this method returns
+    // true (displaySetUpdated) — restarting here TOO meant every real series/study switch ran
+    // the full _stopPrefetching()+_startPrefetching()+_loadDisplaySets() sequence (which iterates
+    // EVERY active display set in the whole study, not just the one being shown) TWICE back to
+    // back, doubling that main-thread synchronous cost and discarding the first restart's
+    // just-dispatched prefetch batch immediately. Let the caller be the single restart authority.
 
     return true;
   }
@@ -1237,9 +1261,17 @@ class StudyPrefetcherService extends PubSubService {
   }
 
   private _loadDisplaySets() {
+    skmMark('skm-switch:loadDisplaySets-begin');
     const { displaySets, displaySetsToPrefetch } = this._getDisplaySets();
 
+    // SKM 2026-10-09 (QA fix — Priority 2 instrumentation): this loop runs over EVERY active
+    // display set in the WHOLE STUDY (displaySetService.getActiveDisplaySets()), not just the
+    // one(s) being shown — isolate its cost with its own mark so a study-switch breakdown can
+    // show whether this (suspected O(total_study_instances), unmemoized getImageIdsForDisplaySet
+    // + cache.isImageCached per instance) is the dominant synchronous cost, independent of the
+    // bounded-by-window prefetch-enqueue step below.
     displaySets.forEach(displaySet => this._addDisplaySetLoadingState(displaySet));
+    skmMark('skm-switch:addLoadingState-end');
 
     // ── SKM 2026-09-28: concurrent multi-viewport prefetch ──────────────────
     // With >1 open series, interleave their image requests (round-robin) so the
@@ -1260,6 +1292,7 @@ class StudyPrefetcherService extends PubSubService {
       displaySetsToPrefetch.forEach(displaySet => this._enqueueDisplaySetImagesRequests(displaySet));
     }
     // ── end SKM ─────────────────────────────────────────────────────────────
+    skmMark('skm-switch:enqueue-end');
   }
 
   // ── SKM 2026-09-28: round-robin enqueue across open series (see _loadDisplaySets).
@@ -1535,6 +1568,7 @@ class StudyPrefetcherService extends PubSubService {
 
     this._loadDisplaySets();
     this._sendNextRequests();
+    skmMark('skm-switch:sendNext-end');
     this._broadcastEvent(this.EVENTS.SERVICE_STARTED, {});
   }
 
@@ -1579,8 +1613,11 @@ class StudyPrefetcherService extends PubSubService {
    */
   private _restartPrefetching(): void {
     if (this._isRunning) {
+      skmMark('skm-switch:restart-begin');
       this._stopPrefetching();
+      skmMark('skm-switch:stop-end');
       this._startPrefetching();
+      skmMark('skm-switch:restart-end');
     }
   }
 }

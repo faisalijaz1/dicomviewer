@@ -58,6 +58,9 @@ import { initSkmTelemetry } from './skmTelemetry';
 // visible stalls can be measured directly instead of inferred from other metrics.
 // No-op unless appConfig.skmScrollFollow.enabled.
 import { initSkmScrollFollowTelemetry } from './skmScrollFollowTelemetry';
+// SKM 2026-10-09 (QA fix — Priority 2 instrumentation): study/series switch timing
+// breakdown (read-only). No-op unless appConfig.skmStudySwitchTelemetry.enabled.
+import { initSkmStudySwitchTelemetry } from './skmStudySwitchTelemetry';
 import interleaveCenterLoader from './utils/interleaveCenterLoader';
 import nthLoader from './utils/nthLoader';
 import interleaveTopToBottom from './utils/interleaveTopToBottom';
@@ -783,6 +786,12 @@ export default async function init({
   // (read-only). Enable during validation; call skmScrollFollowReport() in DevTools.
   if (appConfig?.skmScrollFollow?.enabled !== false) {
     initSkmScrollFollowTelemetry(servicesManager, appConfig.skmScrollFollow || {});
+  }
+
+  // SKM 2026-10-09 (QA fix — Priority 2): study/series switch timing breakdown
+  // (read-only). Enable during validation; call skmStudySwitchReport() in DevTools.
+  if (appConfig?.skmStudySwitchTelemetry?.enabled !== false) {
+    initSkmStudySwitchTelemetry(servicesManager, appConfig.skmStudySwitchTelemetry || {});
   }
 
   measurementService.subscribe(measurementService.EVENTS.JUMP_TO_MEASUREMENT, evt => {

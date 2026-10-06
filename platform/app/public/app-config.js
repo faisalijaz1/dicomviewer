@@ -741,6 +741,14 @@ window.config = {
     enabled: true,
   },
 
+  // SKM 2026-10-09 (QA fix — Priority 2): read-only study/series-switch timing
+  // breakdown (see skmStudySwitchTelemetry.ts). Surfaced via DevTools console:
+  //   skmStudySwitchReport()   after switching studies/series → stage breakdown
+  // Changes NO behaviour. Enable during validation; set false for production.
+  skmStudySwitchTelemetry: {
+    enabled: true,
+  },
+
   showStudyList: true,
   showLoadingIndicator: true,
   showWarningMessageForCrossOrigin: false,
