@@ -84,6 +84,51 @@ const warmedImageIds = new Set<string>();
 // Bumps whenever the active series changes; in-flight warmers compare against it
 // and abort when stale, so a series/study switch cancels the previous warm.
 let currentRunId = 0;
+// SKM 2026-10-09 (QA fix — Priority 2 round 3): the CURRENT generation's AbortController.
+// Root cause this closes: the runId cooperative check only stops a worker from starting its
+// NEXT iteration — it never touched an ALREADY-DISPATCHED fetch(), and nothing prevented
+// mwRecenter() from firing repeatedly during active background prefetching (every ~250ms,
+// each a legitimate same-series "center-jump" restart) and spawning a FRESH batch of workers
+// EVERY time without waiting for the previous batch to notice it's stale — so during a long
+// "actively prefetching" window, dozens of overlapping worker batches could accumulate, each
+// independently fetching, and only drained one browser-connection-slot at a time once the
+// REAL switch finally happened (measured: 719-1017 stale requests over 9-11s). Every
+// generation transition now goes through beginNewWarmerGeneration(), which ATOMICALLY aborts
+// the previous generation's controller (killing its in-flight fetch() immediately, not on its
+// next loop check) before creating the new one — so at most one generation's workers are ever
+// actually issuing network requests, regardless of how often mwRecenter() restarts.
+let currentGenerationController: AbortController | null = null;
+// Diagnostics (cheap counters only — see window.skmWarmerDiagnostics()).
+let warmerGenerationStartedCount = 0;
+let warmerGenerationCancelledCount = 0;
+let warmerFetchAbortedCount = 0;
+let warmerInFlightFetches = 0;
+let warmerOverlappingGenerationEvents = 0;
+// runIds with >=1 worker currently executing — proves "at most one active generation" (or
+// briefly two, during the single-microtask handoff right after a restart) directly, rather
+// than by inference.
+const activeGenerationRunIds = new Set<number>();
+
+// SKM 2026-10-09 (QA fix — Priority 2 round 3): the SINGLE point of generation transition for
+// BOTH warmer paths (mwRecenter's moving window and run()'s whole-series mode). Bumping
+// currentRunId and swapping the AbortController happen together, atomically, so there is
+// never a window where a new runId exists but the old generation's fetches are still
+// un-aborted (or vice versa).
+function beginNewWarmerGeneration(): { runId: number; signal: AbortSignal } {
+  if (currentGenerationController) {
+    try {
+      currentGenerationController.abort();
+    } catch (e) {
+      /* noop */
+    }
+    warmerGenerationCancelledCount++;
+  }
+  currentRunId++;
+  const controller = new AbortController();
+  currentGenerationController = controller;
+  warmerGenerationStartedCount++;
+  return { runId: currentRunId, signal: controller.signal };
+}
 // SKM 2026-10-09 (QA fix — Priority 2 diagnostics): a small, capped record of ACTUAL restart
 // decisions only (never on every scroll/recentre — this fires only when mwRecenter() decides
 // to bump currentRunId), so the series-change-vs-center-jump invalidation can be proven via
@@ -209,11 +254,21 @@ export function initSkmWarmer(
   const effectiveConcurrency = () =>
     Math.max(1, Math.min(perTab, Math.floor(globalCap / Math.max(1, liveTabs)) || 1));
 
-  const warmSeries = async (imageIds: string[], runId: number) => {
+  // SKM 2026-10-09 (QA fix — Priority 2 round 3): warmSeries() now REQUIRES the generation's
+  // AbortSignal (from beginNewWarmerGeneration()) and forwards it to fetch(), so a stale
+  // generation's in-flight request is actually interrupted — not merely left to finish on its
+  // own — the instant the NEXT generation begins. The runId check remains as a second,
+  // belt-and-braces guard for the (harmless) case where a worker is between fetches when the
+  // signal fires.
+  const warmSeries = async (imageIds: string[], runId: number, signal: AbortSignal) => {
     let next = 0;
+    activeGenerationRunIds.add(runId);
+    if (activeGenerationRunIds.size > 1) {
+      warmerOverlappingGenerationEvents++;
+    }
     const worker = async () => {
       while (next < imageIds.length) {
-        if (runId !== currentRunId) {
+        if (runId !== currentRunId || signal.aborted) {
           return; // a newer series took over → abort this warm
         }
         const imageId = imageIds[next++];
@@ -239,11 +294,14 @@ export function initSkmWarmer(
         if (!url) {
           continue;
         }
+        warmerInFlightFetches++;
         try {
           // GET with default (same-origin) credentials → identical to Cornerstone's
           // XHR, and the app-config interceptor appends storagePath to both, so this
-          // warms the SAME HTTP cache entry Cornerstone will later read.
-          const res = await fetch(url, { method: 'GET' });
+          // warms the SAME HTTP cache entry Cornerstone will later read. `signal` ties this
+          // fetch to its generation — abort()ing it on the next restart stops it immediately
+          // rather than waiting for a network round-trip.
+          const res = await fetch(url, { method: 'GET', signal });
           if (res.ok) {
             // Read the body to completion so the cache entry is fully stored, then
             // discard it (no persistent heap).
@@ -254,7 +312,15 @@ export function initSkmWarmer(
             await res.body.cancel().catch(() => undefined);
           }
         } catch (e) {
-          /* skip — the on-demand path will fetch this slice if the doctor scrolls to it */
+          // An AbortError here means this generation was invalidated (series/window changed
+          // mid-fetch) — EXPECTED, not an application error. Tallied separately so it is never
+          // confused with a genuine network failure; otherwise handled identically (skip — the
+          // on-demand path fetches this slice later if the doctor actually scrolls to it).
+          if ((e as any)?.name === 'AbortError') {
+            warmerFetchAbortedCount++;
+          }
+        } finally {
+          warmerInFlightFetches--;
         }
         // Yield so the warmer never starves the on-screen slice's request.
         await new Promise(r => setTimeout(r, 0));
@@ -266,7 +332,11 @@ export function initSkmWarmer(
     for (let i = 0; i < n; i++) {
       workers.push(worker());
     }
-    await Promise.all(workers);
+    try {
+      await Promise.all(workers);
+    } finally {
+      activeGenerationRunIds.delete(runId);
+    }
   };
 
   const run = () => {
@@ -294,12 +364,11 @@ export function initSkmWarmer(
         return;
       }
       warmedDisplaySets.add(dsUID);
-      currentRunId++;
-      const myRun = currentRunId;
+      const { runId: myRun, signal } = beginNewWarmerGeneration();
       // eslint-disable-next-line no-console
       console.log(`[SKM-WARMER] warming ${imageIds.length} slices for ${dsUID}`);
       window.setTimeout(() => {
-        warmSeries(imageIds, myRun).catch(() => undefined);
+        warmSeries(imageIds, myRun, signal).catch(() => undefined);
       }, startDelayMs);
     } catch (e) {
       // eslint-disable-next-line no-console
@@ -490,8 +559,12 @@ export function initSkmWarmer(
     const prevRunId = currentRunId;
     mwLastCenter = center;
     mwLastDsUID = s.dsUID;
-    currentRunId++; // abandon the previous sweep's workers; dedup keeps completed work
-    const myRun = currentRunId;
+    // SKM 2026-10-09 (QA fix — Priority 2 round 3): beginNewWarmerGeneration() atomically
+    // bumps currentRunId AND aborts the PREVIOUS generation's in-flight fetch(es) immediately
+    // — this is what actually stops stale network traffic, rather than only abandoning the
+    // previous sweep's workers cooperatively (which could take until their current fetch
+    // happened to resolve, or longer if many overlapping restarts had accumulated workers).
+    const { runId: myRun, signal } = beginNewWarmerGeneration();
     const restartReason: SkmWarmerRestartRecord['reason'] = seriesChanged
       ? 'series-change'
       : prevRunId === 0
@@ -519,7 +592,7 @@ export function initSkmWarmer(
       `[SKM-WARMER] moving window @${center} dir=${mwDirection} warming ${list.length} ` +
         `remaining slices (reason=${restartReason})`
     );
-    warmSeries(list, myRun).catch(() => undefined);
+    warmSeries(list, myRun, signal).catch(() => undefined);
   };
 
   const mwSchedule = () => {
@@ -567,5 +640,35 @@ export function initSkmWarmer(
       console.table(warmerRestartLog);
     }
     return warmerRestartLog;
+  };
+
+  // SKM 2026-10-09 (QA fix — Priority 2 round 3): single-flight / cancellation diagnostics.
+  //   warmerGenerationStarted      - total generations begun (every restart, any reason)
+  //   warmerGenerationCancelled   - how many of those ABORTED a still-active previous one
+  //                                  (i.e. the previous generation hadn't finished naturally)
+  //   warmerFetchAborted          - raw fetch() calls that ended in AbortError (expected,
+  //                                  not an application error) rather than completing/failing
+  //   warmerInFlightFetches       - raw fetch() calls awaiting a response RIGHT NOW, across
+  //                                  all generations — should drop to ~0 within one microtask
+  //                                  of a restart, not linger for seconds
+  //   warmerActiveGenerations     - distinct runIds with >=1 worker still executing RIGHT NOW
+  //                                  — proves "at most one" directly (0 or 1 in steady state;
+  //                                  briefly 2 only during the handoff instant of a restart)
+  //   warmerOverlappingGenerationEvents - cumulative count of times a NEW generation started
+  //                                  while a PREVIOUS one's workers had not yet all returned
+  //                                  (the exact condition that used to let traffic accumulate)
+  (window as any).skmWarmerDiagnostics = () => {
+    const result = {
+      warmerGenerationStarted: warmerGenerationStartedCount,
+      warmerGenerationCancelled: warmerGenerationCancelledCount,
+      warmerFetchAborted: warmerFetchAbortedCount,
+      warmerInFlightFetches,
+      warmerActiveGenerations: activeGenerationRunIds.size,
+      warmerOverlappingGenerationEvents,
+      currentRunId,
+    };
+    // eslint-disable-next-line no-console
+    console.log('[SKM-WARMER] diagnostics:', result);
+    return result;
   };
 }
