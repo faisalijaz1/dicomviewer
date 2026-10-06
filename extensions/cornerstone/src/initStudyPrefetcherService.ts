@@ -105,6 +105,29 @@ function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager) {
   } catch (e) {
     /* best-effort */
   }
+
+  // SKM 2026-10-09 (QA fix — Priority 2 round 4): console reporter for the
+  // imageLoader.cancelLoadImages() cancellation path added to StudyPrefetcherService's
+  // _stopPrefetching()/_cancelPendingPrefetch(). Proves the cancellation CALL happened
+  // and what it was given (stale pending/in-flight counts, imageIds handed to
+  // cancelLoadImages, old/new series identity) — it does NOT by itself prove old-series
+  // network traffic stopped; that still needs a network-level
+  // (performance.getEntriesByType) check correlated against this report's timestamps.
+  try {
+    (window as any).skmPrefetchCancelReport = () => {
+      const diag = (studyPrefetcherService as any).getPrefetchCancelDiagnostics?.();
+      if (!diag) {
+        // eslint-disable-next-line no-console
+        console.log('[SKM-PREFETCH-CANCEL] diagnostics unavailable');
+        return null;
+      }
+      // eslint-disable-next-line no-console
+      console.log('[SKM-PREFETCH-CANCEL]', diag);
+      return diag;
+    };
+  } catch (e) {
+    /* best-effort */
+  }
 }
 
 export default initStudyPrefetcherService;
