@@ -189,6 +189,34 @@ export function initSkmMemoryBudget(
     return AVG_FALLBACK;
   };
 
+  // SKM 2026-10-09 (QA fix — Priority 1 diagnostics): count open STACK viewports in THIS tab,
+  // read-only, for __skmBudget.viewportCount telemetry (helps correlate allocation behaviour
+  // with the two-tab × two-viewport scenario). Mirrors skmPrefetchConcurrency.ts's
+  // countStackViewports() but kept local/read-only here to avoid cross-module coupling.
+  const countStackViewportsForTelemetry = (): number => {
+    try {
+      const vgs = servicesManager?.services?.viewportGridService;
+      const csvs = servicesManager?.services?.cornerstoneViewportService;
+      if (!vgs || !csvs) {
+        return 0;
+      }
+      const viewports = vgs.getState?.()?.viewports;
+      if (!viewports || typeof viewports.forEach !== 'function') {
+        return 0;
+      }
+      let n = 0;
+      viewports.forEach((_vp: any, viewportId: string) => {
+        const csVp = csvs.getCornerstoneViewport?.(viewportId);
+        if (csVp && typeof csVp.getCurrentImageIdIndex === 'function') {
+          n++;
+        }
+      });
+      return n;
+    } catch (e) {
+      return 0;
+    }
+  };
+
   // ── adaptive state (this tab) ──────────────────────────────────────────────
   const myId = Math.random().toString(36).slice(2) + '-' + Date.now();
   let desiredMB = getBaseline();
@@ -208,6 +236,38 @@ export function initSkmMemoryBudget(
 
   const now = () =>
     typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+
+  // SKM 2026-10-09 (QA fix — Priority 1, two-tab × two-viewport allocation overshoot):
+  // readRegistry() can transiently under-count live tabs. A tab's periodic writeRegistry()
+  // (driven by setInterval(evalLoop, EVAL_MS)) is delayed by stacked main-thread long tasks —
+  // exactly what a COLD two-viewport load produces — and once that delay exceeds REG_STALE_MS
+  // (12s), OTHER tabs' readRegistry() silently excludes it from the count (the entry is not yet
+  // pruned from storage, just not counted — see readRegistry()'s 12–20s dead band). When that
+  // happens, a tab that is really 1-of-2 sees tabs.length===1, skips the overflow-correction
+  // branch entirely (its own ask already fits under the ceiling ALONE), and republishes its
+  // full, unclamped ask. If both tabs hit the same congestion near-simultaneously (the normal
+  // case for a simultaneous two-tab cold load), EACH does this independently and the published
+  // aggregate transiently exceeds the ceiling (e.g. 2816+2816=5632 > 4096) even though the
+  // fair-share math itself is correct whenever both tabs CAN see each other (verified by hand:
+  // with both mutually visible it correctly reduces 2816+2816 to ~2047+2047).
+  //
+  // Fix: remember the highest tab count seen within a short, DECAYING memory window and never
+  // let the EFFECTIVE count used for the fair-share floor drop below it during that window —
+  // so a brief "I appear to be alone" misread can't let either tab claim more than its
+  // recently-known fair share. The memory decays back to the current count once it has held
+  // for LIVE_TABS_MEMORY_MS with no re-confirmation of a higher count, so a tab that is
+  // genuinely alone for a while still regains full ceiling use (adaptive growth preserved).
+  let peakLiveTabs = 1;
+  let peakLiveTabsAt = 0; // set on first use, after now() is callable
+  // 20s: comfortably longer than the registry's own 12s staleness cutoff (REG_STALE_MS below)
+  // so a blip caused by a long-task stall is bridged, while a genuinely closed tab's share is
+  // released well within the same order of magnitude as the file's other dwell timers
+  // (IDLE_BEFORE_DEC 10s, DEC_DWELL 8s).
+  const LIVE_TABS_MEMORY_MS = 20000;
+  let allocVersion = 0; // monotonic recompute sequence, for QA/telemetry ordering
+  let lastAllocClamped = false;
+  let lastEffectiveTabCount = 1;
+  let lastTabsVisible = 1;
 
   // FIX 6.2 — seed lastScrollAt at init so a freshly opened viewer is treated as ACTIVE for the
   // first ACTIVE_TAB_MS. Previously lastScrollAt started at 0, so a brand-new tab was classified
@@ -318,40 +378,80 @@ export function initSkmMemoryBudget(
   const computeMyAllocationMB = (): number => {
     const ceiling = getCeiling();
     const tabs = readRegistry();
+    const t = now();
+
+    // SKM 2026-10-09 (QA fix — Priority 1): see the peakLiveTabs comment above. Track the
+    // highest tab count seen within LIVE_TABS_MEMORY_MS and never let the EFFECTIVE count used
+    // below drop beneath it during that window, so a registry-visibility blip can't make this
+    // tab believe it is alone when it (very recently, provably) was not.
+    if (tabs.length > peakLiveTabs) {
+      peakLiveTabs = tabs.length;
+      peakLiveTabsAt = t;
+    } else if (t - peakLiveTabsAt > LIVE_TABS_MEMORY_MS) {
+      // Held at/below the current count for the whole memory window with no higher sighting —
+      // trust it now (lets a genuinely-alone tab regain full ceiling use; adaptive growth
+      // preserved).
+      peakLiveTabs = tabs.length;
+      peakLiveTabsAt = t;
+    }
+    const effectiveTabCount = Math.max(tabs.length, peakLiveTabs);
+    lastEffectiveTabCount = effectiveTabCount;
+    lastTabsVisible = tabs.length;
+    allocVersion++;
+
     const fairShare = Math.max(1, Math.floor(ceiling / Math.max(1, tabs.length)));
     const alloc = new Map<string, number>();
-    tabs.forEach(t =>
+    tabs.forEach(t2 =>
       alloc.set(
-        t.id,
-        t.active
-          ? Math.min(ceiling, Math.max(ACTIVE_MIN, t.desiredMB))
-          : Math.min(t.desiredMB, Math.max(IDLE_FLOOR, fairShare))
+        t2.id,
+        t2.active
+          ? Math.min(ceiling, Math.max(ACTIVE_MIN, t2.desiredMB))
+          : Math.min(t2.desiredMB, Math.max(IDLE_FLOOR, fairShare))
       )
     );
+
+    // SKM 2026-10-09 (QA fix — Priority 1): if we've recently seen MORE tabs than are currently
+    // visible, a peer may be in the exact same "briefly invisible to others" situation right now
+    // (same code, same congestion) and about to publish its own full, unclamped ask too. Clamp
+    // OUR OWN share to the fair split across the REMEMBERED (not just currently-visible) tab
+    // count so two tabs that briefly can't see each other can never each claim a full share —
+    // this is the only lever a tab has over what IT publishes; it cannot act for a tab it can't
+    // see, but if that tab runs the same code it clamps itself symmetrically.
+    lastAllocClamped = false;
+    if (effectiveTabCount > tabs.length) {
+      const memoryFairShare = Math.max(1, Math.floor(ceiling / effectiveTabCount));
+      const cap = Math.max(IDLE_FLOOR, memoryFairShare);
+      const mine = alloc.get(myId);
+      if (typeof mine === 'number' && mine > cap) {
+        alloc.set(myId, cap);
+        lastAllocClamped = true;
+      }
+    }
+
     let total = 0;
     alloc.forEach(v => (total += v));
 
     if (total > ceiling) {
       // 1) shrink idle tabs toward IDLE_MIN first.
-      const idle = tabs.filter(t => !t.active);
+      const idle = tabs.filter(t2 => !t2.active);
       let overflow = total - ceiling;
-      const idleReducible = idle.reduce((s, t) => s + Math.max(0, (alloc.get(t.id) || 0) - IDLE_MIN), 0);
+      const idleReducible = idle.reduce((s, t2) => s + Math.max(0, (alloc.get(t2.id) || 0) - IDLE_MIN), 0);
       if (idleReducible > 0 && overflow > 0) {
         const cut = Math.min(overflow, idleReducible);
-        idle.forEach(t => {
-          const cur = alloc.get(t.id) || 0;
+        idle.forEach(t2 => {
+          const cur = alloc.get(t2.id) || 0;
           const reducible = Math.max(0, cur - IDLE_MIN);
-          alloc.set(t.id, cur - Math.floor((reducible / idleReducible) * cut));
+          alloc.set(t2.id, cur - Math.floor((reducible / idleReducible) * cut));
         });
         overflow -= cut;
       }
       // 2) scale active tabs proportionally (floored at ACTIVE_MIN; final equal-split if still over).
       if (overflow > 0) {
-        const active = tabs.filter(t => t.active);
-        const activeTotal = active.reduce((s, t) => s + (alloc.get(t.id) || 0), 0);
+        const active = tabs.filter(t2 => t2.active);
+        const activeTotal = active.reduce((s, t2) => s + (alloc.get(t2.id) || 0), 0);
         const target = Math.max(active.length * 1, activeTotal - overflow);
         const scale = activeTotal > 0 ? target / activeTotal : 0;
-        active.forEach(t => alloc.set(t.id, Math.max(1, Math.floor((alloc.get(t.id) || 0) * scale))));
+        active.forEach(t2 => alloc.set(t2.id, Math.max(1, Math.floor((alloc.get(t2.id) || 0) * scale))));
         let after = 0;
         alloc.forEach(v => (after += v));
         if (after > ceiling) {
@@ -379,7 +479,9 @@ export function initSkmMemoryBudget(
       const windowAhead = Math.max(1, Math.round(windowSlices * AHEAD_BIAS));
       const windowBehind = Math.max(1, windowSlices - windowAhead);
 
-      const liveTabs = readRegistry().length;
+      // SKM 2026-10-09 (QA fix): reuse the registry snapshot computeMyAllocationMB() already
+      // took (lastTabsVisible) instead of re-reading localStorage a second time here.
+      const liveTabs = lastTabsVisible;
 
       (globalThis as any).__skmBudget = {
         machineBaselineMB: getBaseline(),
@@ -402,6 +504,18 @@ export function initSkmMemoryBudget(
         decreaseCount,
         lastChangeReason,
         lastChangeTimestamp: lastChangeTs,
+        // SKM 2026-10-09 (QA fix — Priority 1 diagnostics): see peakLiveTabs/computeMyAllocationMB
+        // comments. tabsVisible is the raw registry count THIS computation saw; effectiveTabCount
+        // is the memory-held floor actually used for the fair-share divisor; allocClamped is true
+        // when that memory caused this tab to publish LESS than its registry-only math would have
+        // (i.e. the defensive clamp against a visibility blip fired this cycle); allocVersion is a
+        // monotonic per-tab recompute sequence so QA can order/correlate samples across tabs.
+        tabId: myId,
+        tabsVisible: liveTabs,
+        effectiveTabCount: lastEffectiveTabCount,
+        allocClamped: lastAllocClamped,
+        allocVersion,
+        viewportCount: countStackViewportsForTelemetry(),
       };
 
       try {
