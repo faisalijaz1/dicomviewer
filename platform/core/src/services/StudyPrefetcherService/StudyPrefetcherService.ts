@@ -247,18 +247,27 @@ class StudyPrefetcherService extends PubSubService {
     maxEnqueuesPerImage: 0, // highest enqueue count for any single imageId (same session)
     activeViewportId: '',
   };
-  // SKM 2026-10-09 (QA fix — Priority 2 round 4): read-only diagnostics for the
+  // SKM 2026-10-09 (QA fix — Priority 2 round 5): read-only diagnostics for the
   // imageLoader.cancelLoadImages() cancellation path (see _cancelStaleImageLoads).
-  // Proves the cancellation CALL happened and what it was given — it does NOT by
-  // itself prove old-series network traffic stopped; that requires the runtime/
-  // network-level check (see getPrefetchCancelDiagnostics() / skmPrefetchCancelReport()).
+  // Round 4 QA proved cancelLoadImagesCount stayed 0 across every switch because the
+  // call was given _pendingRequests imageIds that were NEVER actually submitted to
+  // Cornerstone (only this service's own local, pre-dispatch queue) mixed in with the
+  // handful of genuinely in-flight ones — most likely throwing on the first untracked
+  // id. Round 5 restricts the call to staleInflightImageIds only (see call sites) and
+  // splits "attempted" from "succeeded" from "threw" so that distinction is provable
+  // instead of assumed. None of this proves old-series network traffic stopped; that
+  // still requires the runtime/network-level check (see getPrefetchCancelDiagnostics()
+  // / skmPrefetchCancelReport()).
   private _cancelDiagnostics = {
     stalePendingCount: 0,
     staleInflightCount: 0,
-    cancelLoadImagesCount: 0,
-    cancelLoadImagesImageCount: 0,
+    cancelLoadImagesAttemptCount: 0, // times cancelLoadImages() was actually invoked
+    cancelLoadImagesCount: 0, // times it completed without throwing
+    cancelLoadImagesImageCount: 0, // total imageIds passed across successful calls
+    cancelLoadImagesErrorCount: 0, // times it threw
     cancelledOldSeriesCount: 0,
     lastCancelAt: 0,
+    lastCancelError: null as string | null,
     lastPrevDsUID: null as string | null,
     lastNewDsUID: null as string | null,
     lastReason: '',
@@ -770,30 +779,44 @@ class StudyPrefetcherService extends PubSubService {
   }
 
   /**
-   * SKM 2026-10-09 (QA fix — Priority 2 round 4): the single place that actually asks
+   * SKM 2026-10-09 (QA fix — Priority 2 round 5): the single place that actually asks
    * Cornerstone to cancel stale prefetch work at the network level, instead of only
-   * dropping it from this service's own bookkeeping. `imageIds` is always a subset of
-   * what THIS service itself previously handed to imageLoadPoolManager for the window
-   * being discarded (see call sites in _stopPrefetching/_cancelPendingPrefetch) — it
-   * can never reach the viewport's own current/interaction-priority load or another
-   * service's requests. Mirrors the imageLoader.cancelLoadImages() call already used
-   * by CornerstoneViewportService for the viewport's native stack prefetch — reuses
-   * the existing Cornerstone3D cancellation primitive, no new AbortController wiring.
+   * dropping it from this service's own bookkeeping. `imageIds` must ONLY be ids this
+   * service has actually handed to imageLoadPoolManager/imageLoader already (i.e.
+   * staleInflightImageIds at the call sites) — NEVER _pendingRequests ids, which this
+   * service has never submitted to Cornerstone at all. Round 4 QA proved
+   * cancelLoadImagesCount stayed 0 on every switch; passing hundreds/thousands of
+   * untracked (never-submitted) ids alongside the handful of genuinely in-flight ones
+   * is the most likely reason the call never visibly succeeded — this restricts the
+   * input to what Cornerstone can actually be expected to recognise, mirroring the
+   * imageLoader.cancelLoadImages() call already used by CornerstoneViewportService
+   * (whose input, viewport.getImageIds(), is likewise always Cornerstone-tracked).
+   * "Attempted" (the call was made) is now recorded separately from "succeeded" (no
+   * throw) and "errored" (threw, with the message captured) so that distinction is
+   * provable from diagnostics instead of assumed.
    */
   private _cancelStaleImageLoads(imageIds: string[], reason: string): void {
     if (!imageIds.length) {
       return;
     }
+    if (typeof this.imageLoader?.cancelLoadImages !== 'function') {
+      return;
+    }
+    this._cancelDiagnostics.cancelLoadImagesAttemptCount++;
+    this._cancelDiagnostics.lastCancelAt = Date.now();
+    this._cancelDiagnostics.lastReason = reason;
     try {
-      if (typeof this.imageLoader?.cancelLoadImages === 'function') {
-        this.imageLoader.cancelLoadImages(imageIds);
-        this._cancelDiagnostics.cancelLoadImagesCount++;
-        this._cancelDiagnostics.cancelLoadImagesImageCount += imageIds.length;
-        this._cancelDiagnostics.lastCancelAt = Date.now();
-        this._cancelDiagnostics.lastReason = reason;
-      }
+      this.imageLoader.cancelLoadImages(imageIds);
+      this._cancelDiagnostics.cancelLoadImagesCount++;
+      this._cancelDiagnostics.cancelLoadImagesImageCount += imageIds.length;
+      this._cancelDiagnostics.lastCancelError = null;
     } catch (e) {
-      /* best-effort — never let cancellation break stop/restart */
+      // SKM 2026-10-09 (QA fix — Priority 2 round 5): record the error instead of
+      // silently swallowing it — Round 4's catch block gave no way to tell "never
+      // attempted" apart from "attempted and threw". Cancellation failing must never
+      // break stop/restart, so this is still caught, just no longer silent.
+      this._cancelDiagnostics.cancelLoadImagesErrorCount++;
+      this._cancelDiagnostics.lastCancelError = (e as any)?.message ?? String(e);
     }
   }
 
@@ -1137,25 +1160,31 @@ class StudyPrefetcherService extends PubSubService {
   // isn't held behind stale work. In-flight requests are marked aborted (their
   // completion handlers no-op); the pool's queued (not-yet-dispatched) prefetch stack
   // is cleared too. Pending-request state is rebuilt by the caller.
-  // SKM 2026-10-09 (QA fix — Priority 2 round 4): additionally hand the stale
-  // pending+in-flight imageIds to imageLoader.cancelLoadImages() BEFORE this
-  // bookkeeping is thrown away, so the underlying network requests are actually
-  // cancelled, not just dropped from this service's own tracking. This is the SAME
-  // set this method already discarded unconditionally before this change (a far
-  // jump within the same series already re-enqueues/re-requests anything still
-  // valid for the new centre fresh via _loadDisplaySets()+_sendNextRequests() right
-  // after — see reEnqueues/maxEnqueuesPerImage — so no new "still valid" image is
-  // being newly cancelled here that wasn't already being thrown away before.
+  // SKM 2026-10-09 (QA fix — Priority 2 round 4): additionally hand the genuinely
+  // in-flight imageIds to imageLoader.cancelLoadImages() BEFORE this bookkeeping is
+  // thrown away, so the underlying network requests are actually cancelled, not just
+  // dropped from this service's own tracking. A far jump within the same series
+  // already re-enqueues/re-requests anything still valid for the new centre fresh via
+  // _loadDisplaySets()+_sendNextRequests() right after — see reEnqueues/
+  // maxEnqueuesPerImage — so no "still valid" image is being newly cancelled here.
+  // SKM 2026-10-09 (QA fix — Priority 2 round 5): ONLY staleInflightImageIds are
+  // passed to cancelLoadImages(), never _pendingRequests ids — Round 4 QA proved
+  // cancelLoadImagesCount stayed 0 on every switch, most likely because the call was
+  // given hundreds-to-thousands of ids this service had never actually submitted to
+  // Cornerstone (the local _pendingRequests queue) mixed in with the few genuinely
+  // in-flight ones. _pendingRequests is still cleared below exactly as before —
+  // clearRequestStack() (further below) remains the mechanism for queued-not-yet-
+  // dispatched pool entries; cancelLoadImages() now only ever targets ids Cornerstone
+  // itself is actually tracking.
   private _cancelPendingPrefetch(): void {
     this._schedulerStats.cancelledRequests +=
       this._pendingRequests.length + this._inflightRequests.size;
 
     const stalePendingImageIds = this._pendingRequests.map(r => r.imageId);
     const staleInflightImageIds = Array.from(this._inflightRequests.keys());
-    const staleImageIds = Array.from(new Set([...stalePendingImageIds, ...staleInflightImageIds]));
     this._cancelDiagnostics.stalePendingCount = stalePendingImageIds.length;
     this._cancelDiagnostics.staleInflightCount = staleInflightImageIds.length;
-    this._cancelStaleImageLoads(staleImageIds, 'farJump');
+    this._cancelStaleImageLoads(staleInflightImageIds, 'farJump');
 
     this._pendingRequests = [];
     this._inflightRequests.forEach(req => (req.aborted = true));
@@ -1607,6 +1636,14 @@ class StudyPrefetcherService extends PubSubService {
       displaySet,
       this._getImageIdsForDisplaySet(displaySet)
     );
+    // SKM 2026-10-09 (QA fix — Priority 2 round 5): this displaySet's own failedImageIds
+    // (already populated by _moveImageIdToFailedSet on a genuine load failure, e.g. a
+    // 404 from the PACS). Read once per call so a failed SOP isn't silently re-pushed
+    // into _pendingRequests every time this runs (every restart/far-jump/soft-rewindow)
+    // — Round 4 QA observed exactly that gap produce an unbounded 404→re-enqueue→404
+    // retry storm (40,651 requests over 9+ minutes) with no cache entry and no inflight
+    // entry ever stopping the id from qualifying for re-enqueue again.
+    const failedImageIds = this._displaySetLoadingStates.get(displaySetInstanceUID)?.failedImageIds;
 
     imageIds.forEach(imageId => {
       if (this.cache.isImageCached(imageId)) {
@@ -1615,6 +1652,14 @@ class StudyPrefetcherService extends PubSubService {
       }
       // Skip already in-flight so scroll-driven re-windowing can't double-dispatch.
       if (this._inflightRequests.has(imageId)) {
+        return;
+      }
+      // SKM 2026-10-09 (QA fix — Priority 2 round 5): skip an imageId already recorded
+      // as failed instead of re-enqueueing it — closes the 404→re-enqueue→404 loop.
+      // Not a retry/backoff framework: a failed id simply never qualifies again for
+      // THIS displaySet's loading state (which is itself cleared/recreated on the next
+      // genuine series switch via _stopPrefetching/_addDisplaySetLoadingState).
+      if (failedImageIds?.has(imageId)) {
         return;
       }
       this._pendingRequests.push({
@@ -1668,28 +1713,35 @@ class StudyPrefetcherService extends PubSubService {
     this._isRunning = false;
 
     // SKM 2026-10-09 (QA fix — Priority 2 round 4): snapshot the stale pending/
-    // in-flight imageIds BEFORE any bookkeeping below is cleared, and hand them to
-    // imageLoader.cancelLoadImages() — the same Cornerstone3D cancellation primitive
-    // CornerstoneViewportService already uses for the viewport's native stack
-    // prefetch. clearRequestStack() further below is unchanged and still removes
-    // NOT-YET-DISPATCHED pool entries (see the class-level TODO on IImageLoadPoolManager
-    // usage); it never touched a request whose requestFn had already been invoked and
-    // was awaiting the network response — this closes that gap for THIS service's own
-    // windowed-prefetch queue. _stopPrefetching() only ever runs for an actual series/
-    // displaySet switch or onModeExit, so staleImageIds here belongs exclusively to the
-    // OLD window this service itself enqueued — it can never include the new series'
-    // imageIds (different SeriesInstanceUID/SOPInstanceUID, by construction) or the
-    // viewport's own current/interaction-priority load.
+    // in-flight imageIds BEFORE any bookkeeping below is cleared, and hand the
+    // genuinely in-flight ones to imageLoader.cancelLoadImages() — the same
+    // Cornerstone3D cancellation primitive CornerstoneViewportService already uses
+    // for the viewport's native stack prefetch. clearRequestStack() further below is
+    // unchanged and still removes NOT-YET-DISPATCHED pool entries (see the
+    // class-level TODO on IImageLoadPoolManager usage); it never touched a request
+    // whose requestFn had already been invoked and was awaiting the network response —
+    // this closes that gap for THIS service's own windowed-prefetch queue.
+    // _stopPrefetching() only ever runs for an actual series/displaySet switch or
+    // onModeExit, so this belongs exclusively to the OLD window this service itself
+    // enqueued — it can never include the new series' imageIds (different
+    // SeriesInstanceUID/SOPInstanceUID, by construction) or the viewport's own
+    // current/interaction-priority load.
+    // SKM 2026-10-09 (QA fix — Priority 2 round 5): cancelLoadImages() now receives
+    // ONLY staleInflightImageIds, never stalePendingImageIds — Round 4 QA proved
+    // cancelLoadImagesCount stayed 0 on every switch, most likely because the call
+    // was given hundreds-to-thousands of ids this service had only ever queued
+    // locally and NEVER actually submitted to Cornerstone (_pendingRequests), mixed
+    // in with the handful of genuinely in-flight ones. _pendingRequests is still
+    // cleared below exactly as before (queue-drop behaviour unchanged).
     const stalePendingImageIds = this._pendingRequests.map(r => r.imageId);
     const staleInflightImageIds = Array.from(this._inflightRequests.keys());
-    const staleImageIds = Array.from(new Set([...stalePendingImageIds, ...staleInflightImageIds]));
     const staleDisplaySetUIDs = Array.from(this._displaySetLoadingStates.keys());
     this._cancelDiagnostics.stalePendingCount = stalePendingImageIds.length;
     this._cancelDiagnostics.staleInflightCount = staleInflightImageIds.length;
     this._cancelDiagnostics.cancelledOldSeriesCount = staleDisplaySetUIDs.length;
     this._cancelDiagnostics.lastPrevDsUID = staleDisplaySetUIDs[0] ?? null;
     this._cancelDiagnostics.lastNewDsUID = this._activeDisplaySetsInstanceUIDs[0] ?? null;
-    this._cancelStaleImageLoads(staleImageIds, 'stopPrefetching');
+    this._cancelStaleImageLoads(staleInflightImageIds, 'stopPrefetching');
 
     // SKM 2026-10-04 (Option B): reset direction tracking so the next series doesn't
     // read the previous centre as a far jump.
