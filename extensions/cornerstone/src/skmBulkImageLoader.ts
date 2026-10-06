@@ -171,6 +171,21 @@ const sopsByDisplaySet = new Map<string, Set<string>>();
 const pendingInteractionCallbacks = new Map<string, (b: ArrayBuffer) => void>();
 let wadoUriFallbackCount = 0;
 
+// SKM 2026-10-09 (QA fix — Priority 2, old-series network contention): displaySetInstanceUIDs
+// currently open in ANY viewport, refreshed at the top of every run() call. driveDisplaySet()'s
+// workers check this cooperatively (mirrors skmBackgroundWarmer.ts's proven
+// `runId !== currentRunId` pattern) so a worker stops pulling NEW chunks for a study the
+// instant it is no longer open — previously there was NO such check anywhere in this file, so
+// a worker just kept pulling chunks (up to maxConcurrentChunks at a time) until the ENTIRE
+// series was downloaded, regardless of the doctor having switched away, continuing to hold the
+// shared global semaphore slots (globalChunkSemaphore) that the NEW series' own workers needed.
+let openDisplaySetUIDs = new Set<string>();
+// AbortControllers for chunk fetches currently in flight, grouped by displaySetInstanceUID
+// (mirrors the existing sopsByDisplaySet bookkeeping) so the moment a study closes, its
+// specific outstanding network requests can be cancelled directly — a faster path than waiting
+// for the cooperative check above, which only takes effect on that worker's NEXT loop iteration.
+const abortControllersByDisplaySet = new Map<string, Set<AbortController>>();
+
 
 let loaderRegistered = false;
 let driverInitialized = false;
@@ -381,6 +396,9 @@ async function fetchChunk(
   seriesUID: string,
   storagePath: string,
   // onProgress tracking removed, chunk-level tracking is more accurate
+  // SKM 2026-10-09 (QA fix): optional cancellation signal — see driveDisplaySet()/
+  // abortControllersByDisplaySet. Undefined signal = fetch() behaves exactly as before.
+  signal?: AbortSignal
 ): Promise<Map<string, ArrayBuffer | null>> {
   // GET (same-origin) so no Origin header is sent → no Spring Security CORS
   // rejection, and it's covered by the existing `GET /wado/** permitAll` rule.
@@ -403,7 +421,7 @@ async function fetchChunk(
   const url =
     `${window.location.origin}/wado/bulk?seriesUID=${encodeURIComponent(seriesUID)}` +
     `&sopUIDs=${sops.map(encodeURIComponent).join(',')}`;
-    const res = await fetch(url, { method: 'GET' });
+    const res = await fetch(url, { method: 'GET', signal });
     if (!res.ok) {
       if (res.body) await res.body.cancel().catch(() => {});
       throw new Error('bulk http ' + res.status);
@@ -494,7 +512,11 @@ async function driveDisplaySet(
   chunkSize: number,
   maxConcurrentChunks: number,
   viewportId?: string,
-  boundedDecode = false
+  boundedDecode = false,
+  // SKM 2026-10-09 (QA fix — Priority 2): the displaySetInstanceUID this call is driving, so
+  // its workers can check openDisplaySetUIDs cooperatively and its chunk fetches can be
+  // grouped for targeted cancellation in abortControllersByDisplaySet.
+  dsUID?: string
 ): Promise<void> {
   wadoUriFallbackCount = 0; // FIX: Reset fast-track fallback for each new study/series
   // SKM ARCHITECTURE PIVOT: If multiple viewports are open, the Bulk API is too aggressive 
@@ -573,20 +595,50 @@ async function driveDisplaySet(
     // Instead, chunks decode gently in the background as they arrive, yielding to the UI thread!
     const worker = async () => {
       while (true) {
+        // SKM 2026-10-09 (QA fix — Priority 2, old-series network contention): cooperative
+        // cancellation, mirroring skmBackgroundWarmer.ts's proven `runId !== currentRunId`
+        // check. The instant this study is no longer open in any viewport, stop pulling NEW
+        // chunks — previously this loop had no such check and kept going until the ENTIRE
+        // series downloaded, holding the shared global semaphore slots a just-switched-to
+        // series' own workers needed (QA measured ~126 old-series requests continuing after
+        // the switch, with the new series getting no real throughput until they finished).
+        if (dsUID && !openDisplaySetUIDs.has(dsUID)) {
+          return;
+        }
         const chunkIndex = nextChunk++;
         if (chunkIndex >= chunks.length) break;
         const my = chunks[chunkIndex];
         const mySops = my.map(extractSop).filter((s): s is string => !!s);
         if (!mySops.length) continue;
+        // SKM 2026-10-09 (QA fix): a fresh AbortController per chunk fetch, tracked by this
+        // study's displaySetInstanceUID so pruneClosedStudies' abort step (run(), below) can
+        // cancel it directly the moment the study closes — faster than waiting for this
+        // worker's next loop iteration to see the openDisplaySetUIDs check above.
+        const controller = new AbortController();
+        let abortSet: Set<AbortController> | undefined;
+        if (dsUID) {
+          abortSet = abortControllersByDisplaySet.get(dsUID);
+          if (!abortSet) {
+            abortSet = new Set();
+            abortControllersByDisplaySet.set(dsUID, abortSet);
+          }
+          abortSet.add(controller);
+        }
         try {
           let bytesMap;
           let retries = 3;
           while (retries > 0) {
             await globalChunkSemaphore.acquire();
             try {
-              bytesMap = await fetchChunk(mySops, seriesUID, storagePath);
+              bytesMap = await fetchChunk(mySops, seriesUID, storagePath, controller.signal);
               break;
             } catch (e) {
+              // An intentional cancellation (study closed) must propagate immediately, never
+              // retry — retrying a chunk nobody wants anymore just re-competes for the
+              // semaphore and delays the series that DOES want it.
+              if ((e as any)?.name === 'AbortError') {
+                throw e;
+              }
               retries--;
               if (retries === 0) throw e;
               await new Promise(r => setTimeout(r, 1000));
@@ -655,8 +707,12 @@ async function driveDisplaySet(
             })();
           }
         } catch (e) {
+          // An AbortError here just means the study closed mid-chunk — expected, not a real
+          // failure; still logged at the same level as other chunk failures (harmless noise).
           // eslint-disable-next-line no-console
           console.warn('[SKM-BULK] chunk failed, continuing', e);
+        } finally {
+          abortSet?.delete(controller);
         }
       }
     };
@@ -747,6 +803,31 @@ export function initSkmBulkDriver(
       } catch (e) {
         /* ignore — prune is best-effort */
       }
+      // SKM 2026-10-09 (QA fix — Priority 2): publish the current open set so
+      // driveDisplaySet() workers' cooperative check (above) sees it, then abort the specific
+      // in-flight chunk fetches for any study that just closed — the fast path, rather than
+      // waiting for each worker's own next loop iteration. SAME SAFETY GUARD as
+      // pruneClosedStudies below: a transient EMPTY grid-state snapshot (viewport-grid events
+      // can emit one mid-layout-change) must never be trusted — it would wrongly look like
+      // every study closed and kill the ACTIVE study's own in-flight/cooperative-check-passing
+      // workers. Only act when some study is genuinely open.
+      if (openDsUids.size > 0) {
+        openDisplaySetUIDs = openDsUids;
+        for (const closedDsUID of Array.from(abortControllersByDisplaySet.keys())) {
+          if (openDsUids.has(closedDsUID)) {
+            continue;
+          }
+          const controllers = abortControllersByDisplaySet.get(closedDsUID);
+          controllers?.forEach(c => {
+            try {
+              c.abort();
+            } catch (e) {
+              /* best-effort */
+            }
+          });
+          abortControllersByDisplaySet.delete(closedDsUID);
+        }
+      }
       pruneClosedStudies(openDsUids);
 
       // SKM 2026-10-03 (P2.3): cap the WORK, not just memory. When more than
@@ -800,7 +881,7 @@ export function initSkmBulkDriver(
         setTimeout(() => {
         // eslint-disable-next-line no-console
         console.log(`[SKM-BULK] bulk-loading ${imageIds.length} slices for ${dsUID}`);
-        driveDisplaySet(imageIds, storagePath, chunkSize, maxConcurrentChunks, activeViewportId, boundedDecode).catch(e => {
+        driveDisplaySet(imageIds, storagePath, chunkSize, maxConcurrentChunks, activeViewportId, boundedDecode, dsUID).catch(e => {
           // eslint-disable-next-line no-console
           console.warn('[SKM-BULK] driver error', e);
         });
@@ -899,6 +980,20 @@ export function flushBulkMemory() {
   pendingInteractionCallbacks.clear();
   sopsByDisplaySet.clear();
   processedDisplaySets.clear();
+  // SKM 2026-10-09 (QA fix — Priority 2): abort any still-outstanding chunk fetches too, and
+  // reset the open-set so a worker from before this teardown can never pass its cooperative
+  // check afterward.
+  abortControllersByDisplaySet.forEach(set => {
+    set.forEach(c => {
+      try {
+        c.abort();
+      } catch (e) {
+        /* best-effort */
+      }
+    });
+  });
+  abortControllersByDisplaySet.clear();
+  openDisplaySetUIDs = new Set<string>();
   // eslint-disable-next-line no-console
   console.log('[SKM-BULK] Memory flushed (full teardown).');
 }
