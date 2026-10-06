@@ -25,6 +25,23 @@ function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager) {
         return 0;
       }
     },
+    // SKM 2026-10-09 (QA fix — Priority 2 round 6): whether Cornerstone's own tracked
+    // load object for this imageId has a real cancelFn. Traced against the actual
+    // @cornerstonejs/dicom-image-loader@4.22.10 source: the wadouri/wadors loaders
+    // construct their imageLoadObject with `cancelFn: undefined` and never assign it,
+    // so imageLoader.cancelLoadImages() unconditionally throws "cancelFn is not a
+    // function" for a WADO image still in cache (@cornerstonejs/core's own
+    // cancelLoadImage() calls `.cancelFn()` with no guard). Mirrors the SAME guard
+    // Cornerstone's own internal cache eviction uses (cache.js removeImageLoadObject:
+    // `imageLoadObject?.cancelFn`) before this service ever calls the public API.
+    isCancellable(imageId: string): boolean {
+      try {
+        const loadObject = (cache as any).getImageLoadObject?.(imageId);
+        return typeof loadObject?.cancelFn === 'function';
+      } catch (e) {
+        return false;
+      }
+    },
   }
 
   studyPrefetcherService.imageLoadEventsManager = {

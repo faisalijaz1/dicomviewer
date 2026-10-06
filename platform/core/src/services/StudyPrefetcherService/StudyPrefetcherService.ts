@@ -163,6 +163,17 @@ interface ICache {
   isImageCached(imageId: string): boolean;
   /** SKM 2026-10-03 (W2): decoded-cache fill fraction (0..1); optional/best-effort. */
   getFillFraction?(): number;
+  /**
+   * SKM 2026-10-09 (QA fix — Priority 2 round 6): whether Cornerstone's own tracked
+   * load object for this imageId actually implements cancelFn. Proven from the real
+   * @cornerstonejs/dicom-image-loader@4.22.10 source (wadouri/wadors loadImage.js):
+   * every imageLoadObject they return is constructed with `cancelFn: undefined` and
+   * it is never assigned — so this is a hard capability gap in that external loader,
+   * not something either this service or the Cornerstone3D core can be missing a
+   * setting for. Optional because older/narrower ICache test doubles may not provide
+   * it — callers must feature-check before calling.
+   */
+  isCancellable?(imageId: string): boolean;
 }
 
 interface IImageLoadPoolManager {
@@ -247,20 +258,27 @@ class StudyPrefetcherService extends PubSubService {
     maxEnqueuesPerImage: 0, // highest enqueue count for any single imageId (same session)
     activeViewportId: '',
   };
-  // SKM 2026-10-09 (QA fix — Priority 2 round 5): read-only diagnostics for the
+  // SKM 2026-10-09 (QA fix — Priority 2 round 6): read-only diagnostics for the
   // imageLoader.cancelLoadImages() cancellation path (see _cancelStaleImageLoads).
-  // Round 4 QA proved cancelLoadImagesCount stayed 0 across every switch because the
-  // call was given _pendingRequests imageIds that were NEVER actually submitted to
-  // Cornerstone (only this service's own local, pre-dispatch queue) mixed in with the
-  // handful of genuinely in-flight ones — most likely throwing on the first untracked
-  // id. Round 5 restricts the call to staleInflightImageIds only (see call sites) and
-  // splits "attempted" from "succeeded" from "threw" so that distinction is provable
-  // instead of assumed. None of this proves old-series network traffic stopped; that
-  // still requires the runtime/network-level check (see getPrefetchCancelDiagnostics()
-  // / skmPrefetchCancelReport()).
+  // Round 5 QA proved cancelLoadImages() throws "t.cancelFn is not a function" on
+  // 100% of attempts even when given ONLY genuinely in-flight ids. Traced against the
+  // actual @cornerstonejs/core@4.22.10 + @cornerstonejs/dicom-image-loader@4.22.10
+  // source (see commit message): the wadouri/wadors loaders construct their
+  // imageLoadObject with `cancelFn: undefined` and never assign it — a hard capability
+  // gap in that external loader, not a request-shape mistake on our side.
+  // @cornerstonejs/core's own public cancelLoadImage() calls `imageLoadObject.cancelFn()`
+  // unconditionally (no guard), unlike its OWN internal cache eviction code
+  // (cache.js removeImageLoadObject), which checks `imageLoadObject?.cancelFn` first.
+  // Round 6 mirrors that same guard via cache.isCancellable() before ever calling
+  // cancelLoadImages(), and separates "how many were even cancellable" from "attempted"
+  // from "succeeded" from "threw" so the true, honest state is visible instead of
+  // assumed. Given the proven capability gap, cancelLoadImagesCancellableCount is
+  // expected to be 0 for wadouri/wadors imageIds in this exact dependency version —
+  // that is the correct, truthful outcome, not a bug in this diagnostic.
   private _cancelDiagnostics = {
     stalePendingCount: 0,
     staleInflightCount: 0,
+    cancelLoadImagesCancellableCount: 0, // of staleInflight, how many had a real cancelFn
     cancelLoadImagesAttemptCount: 0, // times cancelLoadImages() was actually invoked
     cancelLoadImagesCount: 0, // times it completed without throwing
     cancelLoadImagesImageCount: 0, // total imageIds passed across successful calls
@@ -779,21 +797,27 @@ class StudyPrefetcherService extends PubSubService {
   }
 
   /**
-   * SKM 2026-10-09 (QA fix — Priority 2 round 5): the single place that actually asks
+   * SKM 2026-10-09 (QA fix — Priority 2 round 6): the single place that actually asks
    * Cornerstone to cancel stale prefetch work at the network level, instead of only
    * dropping it from this service's own bookkeeping. `imageIds` must ONLY be ids this
    * service has actually handed to imageLoadPoolManager/imageLoader already (i.e.
-   * staleInflightImageIds at the call sites) — NEVER _pendingRequests ids, which this
-   * service has never submitted to Cornerstone at all. Round 4 QA proved
-   * cancelLoadImagesCount stayed 0 on every switch; passing hundreds/thousands of
-   * untracked (never-submitted) ids alongside the handful of genuinely in-flight ones
-   * is the most likely reason the call never visibly succeeded — this restricts the
-   * input to what Cornerstone can actually be expected to recognise, mirroring the
-   * imageLoader.cancelLoadImages() call already used by CornerstoneViewportService
-   * (whose input, viewport.getImageIds(), is likewise always Cornerstone-tracked).
-   * "Attempted" (the call was made) is now recorded separately from "succeeded" (no
-   * throw) and "errored" (threw, with the message captured) so that distinction is
-   * provable from diagnostics instead of assumed.
+   * staleInflightImageIds at the call sites) — NEVER _pendingRequests ids.
+   *
+   * Round 5 QA proved cancelLoadImages() threw "t.cancelFn is not a function" on
+   * every single attempt even with that restriction in place. Traced against the
+   * real @cornerstonejs/core@4.22.10 + @cornerstonejs/dicom-image-loader@4.22.10
+   * source (see commit message for the exact files/lines): the wadouri/wadors loaders
+   * construct their imageLoadObject with `cancelFn: undefined` and never assign it —
+   * cancelFn is simply never implemented for WADO image loads in this exact
+   * dependency version, a capability gap in that external loader. Cornerstone3D's own
+   * public cancelLoadImage() calls `imageLoadObject.cancelFn()` with no guard; its own
+   * INTERNAL cache eviction code (cache.js removeImageLoadObject) guards the identical
+   * call with `imageLoadObject?.cancelFn` first. This mirrors that same guard — via
+   * cache.isCancellable(imageId), which checks the real tracked load object — before
+   * ever calling the public API, instead of calling it blindly and catching the
+   * inevitable throw. Given the proven capability gap, cancelLoadImagesCancellableCount
+   * will legitimately be 0 for wadouri/wadors ids in this dependency version; that is
+   * the correct, honest outcome of this guard, not evidence it isn't working.
    */
   private _cancelStaleImageLoads(imageIds: string[], reason: string): void {
     if (!imageIds.length) {
@@ -802,19 +826,30 @@ class StudyPrefetcherService extends PubSubService {
     if (typeof this.imageLoader?.cancelLoadImages !== 'function') {
       return;
     }
-    this._cancelDiagnostics.cancelLoadImagesAttemptCount++;
+    // Optional chaining per-call (rather than a typeof pre-check) so a missing
+    // isCancellable() falls back to treating every id as cancellable (the original,
+    // unfiltered behaviour) — same fallback semantics, without relying on narrowing
+    // that doesn't survive into this closure.
+    const cancellableImageIds = imageIds.filter(
+      imageId => this.cache?.isCancellable?.(imageId) ?? true
+    );
+    this._cancelDiagnostics.cancelLoadImagesCancellableCount = cancellableImageIds.length;
     this._cancelDiagnostics.lastCancelAt = Date.now();
     this._cancelDiagnostics.lastReason = reason;
+    if (!cancellableImageIds.length) {
+      // Nothing Cornerstone itself reports as cancellable (real cancelFn) — correctly
+      // a no-op, not a failure, so no attempt/error is recorded for this call.
+      return;
+    }
+    this._cancelDiagnostics.cancelLoadImagesAttemptCount++;
     try {
-      this.imageLoader.cancelLoadImages(imageIds);
+      this.imageLoader.cancelLoadImages(cancellableImageIds);
       this._cancelDiagnostics.cancelLoadImagesCount++;
-      this._cancelDiagnostics.cancelLoadImagesImageCount += imageIds.length;
+      this._cancelDiagnostics.cancelLoadImagesImageCount += cancellableImageIds.length;
       this._cancelDiagnostics.lastCancelError = null;
     } catch (e) {
-      // SKM 2026-10-09 (QA fix — Priority 2 round 5): record the error instead of
-      // silently swallowing it — Round 4's catch block gave no way to tell "never
-      // attempted" apart from "attempted and threw". Cancellation failing must never
-      // break stop/restart, so this is still caught, just no longer silent.
+      // Still caught — cancellation failing must never break stop/restart — but no
+      // longer silent.
       this._cancelDiagnostics.cancelLoadImagesErrorCount++;
       this._cancelDiagnostics.lastCancelError = (e as any)?.message ?? String(e);
     }
