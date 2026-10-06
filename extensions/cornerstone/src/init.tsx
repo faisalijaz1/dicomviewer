@@ -53,6 +53,11 @@ import { initSkmMemoryBudget } from './skmMemoryBudget';
 import { initSkmPrefetchConcurrency } from './skmPrefetchConcurrency';
 // for validating the caching/RAM architecture. No-op unless appConfig.skmTelemetry.enabled.
 import { initSkmTelemetry } from './skmTelemetry';
+// SKM 2026-10-09 (QA fix — scroll-position → displayed-image follow instrumentation):
+// read-only; measures user-requested index vs actual displayed index per viewport so
+// visible stalls can be measured directly instead of inferred from other metrics.
+// No-op unless appConfig.skmScrollFollow.enabled.
+import { initSkmScrollFollowTelemetry } from './skmScrollFollowTelemetry';
 import interleaveCenterLoader from './utils/interleaveCenterLoader';
 import nthLoader from './utils/nthLoader';
 import interleaveTopToBottom from './utils/interleaveTopToBottom';
@@ -772,6 +777,12 @@ export default async function init({
   // phase; call skmTelemetry.report() in the DevTools console. No host scripting.
   if (appConfig?.skmTelemetry?.enabled) {
     initSkmTelemetry();
+  }
+
+  // SKM 2026-10-09 (QA fix): scroll-position → displayed-image follow instrumentation
+  // (read-only). Enable during validation; call skmScrollFollowReport() in DevTools.
+  if (appConfig?.skmScrollFollow?.enabled !== false) {
+    initSkmScrollFollowTelemetry(servicesManager, appConfig.skmScrollFollow || {});
   }
 
   measurementService.subscribe(measurementService.EVENTS.JUMP_TO_MEASUREMENT, evt => {

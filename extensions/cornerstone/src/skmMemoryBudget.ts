@@ -231,6 +231,16 @@ export function initSkmMemoryBudget(
   let prevTotalEvicted = 0;
   let decodeCount = 0;
   let prevDecodeCount = 0;
+  // SKM 2026-10-09 (QA fix — Priority 1 round 2, see growth-bounding comment below): this tab's
+  // own LAST COMPUTED/published allocation (computeMyAllocationMB()'s result), written into the
+  // shared registry so OTHER tabs can bound their own growth against it.
+  let lastPublishedAllocationMB = getBaseline();
+  // Growth-bounding diagnostics (see evalLoop's pressure-increase branch).
+  let lastOthersAllocationMB = 0;
+  let lastAvailableForMe = 0;
+  let lastGrowthRequestedMB = 0;
+  let lastGrowthGrantedMB = 0;
+  let lastGrowthCapped = false;
 
   let channel: any = null; // BroadcastChannel is only an instant "nudge"; counting is via localStorage
 
@@ -301,14 +311,25 @@ export function initSkmMemoryBudget(
     try {
       localStorage.setItem(
         REG_PREFIX + myId,
-        JSON.stringify({ active: amActive(), desiredMB, ts: Date.now() })
+        // SKM 2026-10-09 (QA fix — Priority 1 round 2): publish allocationMB — this tab's own
+        // LAST COMPUTED allocation (not just its raw desiredMB ask) — so other tabs can bound
+        // their own growth against what this tab ACTUALLY has, not reconstruct an estimate from
+        // desiredMB + a point-in-time active flag (that reconstruction is what let the growth
+        // step treat a momentarily-idle-looking peer as if it only needed IDLE_MIN, see below).
+        JSON.stringify({
+          active: amActive(),
+          desiredMB,
+          allocationMB: lastPublishedAllocationMB,
+          ts: Date.now(),
+        })
       );
     } catch (e) {
       /* localStorage blocked → single-tab behaviour */
     }
   };
-  const readRegistry = (): { id: string; active: boolean; desiredMB: number }[] => {
-    const out: { id: string; active: boolean; desiredMB: number }[] = [];
+  type RegistryTab = { id: string; active: boolean; desiredMB: number; allocationMB: number };
+  const readRegistry = (): RegistryTab[] => {
+    const out: RegistryTab[] = [];
     try {
       const nowTs = Date.now();
       const stale: string[] = [];
@@ -325,10 +346,15 @@ export function initSkmMemoryBudget(
             continue;
           }
           if (age <= REG_STALE_MS) {
+            const desiredMBVal = typeof v.desiredMB === 'number' ? v.desiredMB : getBaseline();
             out.push({
               id: key.slice(REG_PREFIX.length),
               active: !!v.active,
-              desiredMB: typeof v.desiredMB === 'number' ? v.desiredMB : getBaseline(),
+              desiredMB: desiredMBVal,
+              // Back-compat: an older/partial write without allocationMB falls back to the
+              // raw ask, which is the same conservative estimate the pre-fix code implicitly
+              // used everywhere.
+              allocationMB: typeof v.allocationMB === 'number' ? v.allocationMB : desiredMBVal,
             });
           }
         } catch (e) {
@@ -347,12 +373,13 @@ export function initSkmMemoryBudget(
     }
     // Always include self (registry write may lag or be blocked).
     if (!out.some(t => t.id === myId)) {
-      out.push({ id: myId, active: amActive(), desiredMB });
+      out.push({ id: myId, active: amActive(), desiredMB, allocationMB: lastPublishedAllocationMB });
     } else {
       // refresh self's live values
       const me = out.find(t => t.id === myId)!;
       me.active = amActive();
       me.desiredMB = desiredMB;
+      me.allocationMB = lastPublishedAllocationMB;
     }
     return out;
   };
@@ -467,6 +494,10 @@ export function initSkmMemoryBudget(
   const applyAllocation = () => {
     try {
       const perTabCapMB = computeMyAllocationMB();
+      // SKM 2026-10-09 (QA fix — Priority 1 round 2): publish what I actually got so OTHER
+      // tabs' growth-bounding (evalLoop) and peakLiveTabs-style defences can read ground truth
+      // instead of reconstructing an estimate from my raw ask + a point-in-time active flag.
+      lastPublishedAllocationMB = perTabCapMB;
       try {
         (cache as any).setMaxCacheSize(perTabCapMB * 1048576);
       } catch (e) {
@@ -516,6 +547,24 @@ export function initSkmMemoryBudget(
         allocClamped: lastAllocClamped,
         allocVersion,
         viewportCount: countStackViewportsForTelemetry(),
+        // SKM 2026-10-09 (QA fix — Priority 1 round 2 diagnostics): lets QA PROVE the
+        // growth-bounding invariant directly from telemetry alone, sample by sample.
+        // othersAllocationMB: sum of all OTHER known tabs' last-PUBLISHED allocation (ground
+        //   truth, from the registry's allocationMB field) at the moment of the LAST growth
+        //   check in evalLoop.
+        // availableForMe: ceiling - othersAllocationMB (floored at ACTIVE_MIN) — the most this
+        //   tab was allowed to grow toward on that check.
+        // aggregateKnownAllocationMB: othersAllocationMB + perTabCapMB — this tab's own live
+        //   view of Σ(all known tab allocations) RIGHT NOW; must be <= machineHardCeilingMB.
+        // pressureIncreaseRequestedMB / GrantedMB: what evalLoop's growth step asked for vs
+        //   actually granted on its last run; growthCapped is true when granted < requested
+        //   (room was limited by another tab, not just the normal +STEP/ceiling clamp).
+        othersAllocationMB: lastOthersAllocationMB,
+        availableForMe: lastAvailableForMe,
+        aggregateKnownAllocationMB: lastOthersAllocationMB + perTabCapMB,
+        pressureIncreaseRequestedMB: lastGrowthRequestedMB,
+        pressureIncreaseGrantedMB: lastGrowthGrantedMB,
+        growthCapped: lastGrowthCapped,
       };
 
       try {
@@ -562,23 +611,92 @@ export function initSkmMemoryBudget(
 
       const ceiling = getCeiling();
       const baseline = getBaseline();
-      if (desiredMB < baseline) {
-        desiredMB = baseline;
+
+      // SKM 2026-10-09 (QA fix — Priority 1 round 2, root cause of the 03510a7 FAIL):
+      // the growth check below used to compare desiredMB only against the FULL machine
+      // ceiling, with ZERO knowledge of other tabs — desiredMB could climb toward 4096 driven
+      // purely by THIS tab's own local pressure. The only thing standing between that and the
+      // published allocation was computeMyAllocationMB()'s overflow-correction, which has a
+      // loophole: whenever a peer's REGISTRY read happens to show it momentarily idle, step 1
+      // (shrink idle tabs toward IDLE_MIN) can absorb the ENTIRE overflow by itself, so step 2
+      // (the only place that would actually cap the growing tab) never runs — letting it publish
+      // its full, unclamped desiredMB (observed: 2 tabs × 2 viewports, Tab A climbed to
+      // 3776/3584 while Tab B stayed at 2048, aggregate 5824/5632 > ceiling 4096, with
+      // effectiveTabCount correctly 2 the whole time — the bug was never about tab-counting).
+      //
+      // Fix: bound the GROWTH step itself against the OTHER known tabs' last PUBLISHED
+      // allocations (ground truth — each tab now writes its own computeMyAllocationMB() result
+      // into the registry as allocationMB, not just its raw desiredMB ask), regardless of their
+      // instantaneous active/idle flag. This makes "Tab A=2048, Tab B=2048, ceiling=4096 ⇒ Tab A
+      // cannot grow unless Tab B's allocation drops first" hold by construction: growth is
+      // gated on a peer's ALREADY-published (already fairly-computed) allocation shrinking,
+      // never on an independent, racy snapshot of its ask + active flag.
+      const tabsForGrowth = readRegistry();
+      const othersAllocationMB = tabsForGrowth
+        .filter(tb => tb.id !== myId)
+        .reduce((s, tb) => s + (typeof tb.allocationMB === 'number' ? tb.allocationMB : tb.desiredMB), 0);
+      const availableForMe = Math.max(ACTIVE_MIN, ceiling - othersAllocationMB);
+      const growthCeilingForMe = Math.min(ceiling, availableForMe);
+      lastOthersAllocationMB = othersAllocationMB;
+      lastAvailableForMe = availableForMe;
+
+      // Baseline floor — but never above what's currently available, so steady two-tab
+      // contention can't bounce desiredMB up to baseline and immediately back down to the
+      // growth ceiling every single tick (that would spam lastChangeReason with meaningless
+      // churn even though nothing is actually changing).
+      const effectiveBaselineFloor = Math.min(baseline, growthCeilingForMe);
+      if (desiredMB < effectiveBaselineFloor) {
+        desiredMB = effectiveBaselineFloor;
       }
 
-      // INCREASE: sustained pressure, below ceiling, dwell elapsed.
+      // SKM 2026-10-09 (QA fix — Priority 1 round 2): IMMEDIATE reactive shrink-to-fit,
+      // unconditional and NOT gated by the idle-decrease dwell. Growth can still legitimately
+      // happen, STEP by STEP, during a window where a peer is genuinely idle (that's the
+      // existing, intended "idle tab cedes space" feature) — but the moment that peer becomes
+      // active again and reclaims its fair share (its PUBLISHED allocationMB rises), THIS tab's
+      // ask must give it back immediately, not wait out the 8-10s idle-decrease dwell (that
+      // dwell exists for MY OWN sustained idleness, not for respecting a peer's revived claim).
+      // Without this, desiredMB could ratchet up during a brief peer-idle window and then stay
+      // inflated indefinitely once the peer is active again, re-growing every time the peer next
+      // blinks idle even momentarily — this is what let the published allocation stay at
+      // 3776/3584 instead of settling back toward the fair ~2048 split.
+      if (desiredMB > growthCeilingForMe) {
+        const prevDesiredMB = desiredMB;
+        desiredMB = growthCeilingForMe;
+        if (desiredMB !== prevDesiredMB) {
+          lastChangeReason = 'peer-reclaim-shrink';
+          lastChangeTs = Date.now();
+        }
+      }
+
+      // INCREASE: sustained pressure, below ceiling, dwell elapsed — but never granted beyond
+      // what's actually available once other known tabs' current allocations are subtracted.
       if (
         pressure >= PRESSURE_THRESHOLD &&
         desiredMB < ceiling &&
         t - lastIncreaseAt >= INC_DWELL
       ) {
-        desiredMB = Math.min(ceiling, desiredMB + STEP);
-        lastIncreaseAt = t;
-        lastDecreaseAt = t; // also delay any decrease right after an increase
-        increaseCount++;
-        lastChangeReason = 'pressure-increase';
-        lastChangeTs = Date.now();
-        pressure = Math.min(pressure, 0.5); // let the new budget take effect before stacking
+        const requestedMB = Math.min(ceiling, desiredMB + STEP);
+        const grantedMB = Math.min(requestedMB, growthCeilingForMe);
+        lastGrowthRequestedMB = requestedMB;
+        lastGrowthGrantedMB = grantedMB;
+        lastGrowthCapped = grantedMB < requestedMB;
+        if (grantedMB > desiredMB) {
+          desiredMB = grantedMB;
+          lastIncreaseAt = t;
+          lastDecreaseAt = t; // also delay any decrease right after an increase
+          increaseCount++;
+          lastChangeReason = lastGrowthCapped ? 'pressure-increase-capped' : 'pressure-increase';
+          lastChangeTs = Date.now();
+          pressure = Math.min(pressure, 0.5); // let the new budget take effect before stacking
+        } else {
+          // No room to grow into right now — another known tab is using it. Don't touch
+          // desiredMB or the increase dwell timer, so we retry on the NEXT eval tick (not a
+          // full dwell later) and grow promptly once that tab cedes space; just record the
+          // blocked attempt for telemetry.
+          lastChangeReason = 'pressure-increase-blocked';
+          lastChangeTs = Date.now();
+        }
       } else if (
         now() - lastScrollAt >= IDLE_BEFORE_DEC &&
         desiredMB > baseline &&
@@ -673,6 +791,18 @@ export function initSkmMemoryBudget(
     // eslint-disable-next-line no-console
     console.log('[SKM-BUDGET]', (globalThis as any).__skmBudget);
     return (globalThis as any).__skmBudget;
+  };
+  // SKM 2026-10-09 (QA fix — Priority 1 round 2): dump every tab currently known to the
+  // registry (id, active, desiredMB ask, last-published allocationMB) plus the SUM of their
+  // allocationMB — so QA can directly verify Σ(known allocations) <= hardCeiling from this
+  // tab's point of view in one call, without reaching into localStorage by hand.
+  (window as any).skmGetAllTabAllocations = () => {
+    const tabs = readRegistry();
+    const sumAllocationMB = tabs.reduce((s, t) => s + (t.allocationMB ?? t.desiredMB ?? 0), 0);
+    const result = { tabs, sumAllocationMB, hardCeilingMB: getCeiling(), myId };
+    // eslint-disable-next-line no-console
+    console.log('[SKM-BUDGET] all known tab allocations:', result);
+    return result;
   };
 
   // ── UI-facing helpers (Preferences panel) ──────────────────────────────────

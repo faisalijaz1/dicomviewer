@@ -730,6 +730,17 @@ window.config = {
     enabled: true,
   },
 
+  // SKM 2026-10-09 (QA fix): read-only scroll-position → displayed-image follow
+  // instrumentation (see skmScrollFollowTelemetry.ts). Surfaced via DevTools console:
+  //   skmScrollFollowReset()                         before a scroll test
+  //   skmScrollFollowReport()                         after → per-viewport summary
+  //   skmScrollFollowReport(viewportId, {stallThresholdMs}) for a specific viewport/threshold
+  //   skmScrollFollowRawLog(viewportId)                raw requested/displayed timeline
+  // Changes NO behaviour. Enable during validation; set false for production.
+  skmScrollFollow: {
+    enabled: true,
+  },
+
   showStudyList: true,
   showLoadingIndicator: true,
   showWarningMessageForCrossOrigin: false,
