@@ -83,6 +83,68 @@ function getWadoUriUIDs(imageId: string): {
   return { studyUID, seriesUID, objectUID, frameNumber };
 }
 
+interface WadoUriUidTuple {
+  StudyInstanceUID?: string;
+  SeriesInstanceUID?: string;
+  SOPInstanceUID?: string;
+  frameNumber?: string;
+}
+
+// SKM 2026-10-07 (QA fix — Priority 2 round 18): Round 17's source
+// investigation proved getUIDsFromImageID() is invoked ~862-904x more
+// often than there are dispatched WADO requests per cold switch (~509K
+// calls for ~580 requests), because MetadataProvider.get() unconditionally
+// re-derives the UID tuple for EVERY metadata-module query
+// (imagePlaneModule, voiLutModule, sopCommonModule, etc.) on the SAME
+// imageId, with no reuse across those independent call sites. Since
+// getUIDsFromImageID's output is a pure function of its string input
+// (same imageId -> same 4 UIDs, always), it's a safe memoization target.
+//
+// Scoped ONLY to the '?requestType=WADO' branch, deliberately excluding
+// wadors: (already a cheap string-split, not the proven hotspot) and the
+// non-standard-imageId fallback branch - that branch reads from
+// this.imageURIToUIDs, a Map that addImageIdToUIDs() can populate AFTER
+// a given imageId was first queried, so memoizing an early `undefined`
+// result there would wrongly stick once addImageIdToUIDs() registers the
+// mapping later. No such hazard exists for the WADO-URI branch: it reads
+// nothing but the imageId string itself.
+//
+// Bounded (not unbounded) FIFO cache: imageIds accumulate across however
+// many studies/series get opened in one session, not just the current
+// 3674-slice series, so an unbounded Map would grow for the life of the
+// tab. MAX_WADO_URI_UID_CACHE_SIZE caps it well above any single cold
+// switch's distinct-imageId count (ample headroom over this workload's
+// ~3674 slices, so nothing gets evicted mid-switch) while still bounding
+// total memory over a long multi-study session. Eviction is oldest-first
+// (Map preserves insertion order) - a cache miss on an evicted entry just
+// re-parses exactly as before the cache existed, so eviction can never
+// produce an incorrect result, only an uncached (but still correct) one.
+const MAX_WADO_URI_UID_CACHE_SIZE = 50_000;
+const wadoUriUidCache = new Map<string, Readonly<WadoUriUidTuple>>();
+
+function getCachedWadoUriUIDs(imageId: string): Readonly<WadoUriUidTuple> {
+  const cached = wadoUriUidCache.get(imageId);
+  if (cached) {
+    return cached;
+  }
+
+  const { studyUID, seriesUID, objectUID, frameNumber } = getWadoUriUIDs(imageId);
+  const uids = Object.freeze({
+    StudyInstanceUID: studyUID,
+    SeriesInstanceUID: seriesUID,
+    SOPInstanceUID: objectUID,
+    frameNumber,
+  });
+
+  if (wadoUriUidCache.size >= MAX_WADO_URI_UID_CACHE_SIZE) {
+    const oldestKey = wadoUriUidCache.keys().next().value;
+    wadoUriUidCache.delete(oldestKey);
+  }
+  wadoUriUidCache.set(imageId, uids);
+
+  return uids;
+}
+
 class MetadataProvider {
   private readonly imageURIToUIDs: Map<string, any> = new Map();
   // Can be used to store custom metadata for a specific type.
@@ -537,14 +599,7 @@ class MetadataProvider {
         frameNumber: splitImageId[6],
       };
     } else if (imageId.includes('?requestType=WADO')) {
-      const { studyUID, seriesUID, objectUID, frameNumber } = getWadoUriUIDs(imageId);
-
-      return {
-        StudyInstanceUID: studyUID,
-        SeriesInstanceUID: seriesUID,
-        SOPInstanceUID: objectUID,
-        frameNumber,
-      };
+      return getCachedWadoUriUIDs(imageId);
     }
 
     // Maybe its a non-standard imageId
