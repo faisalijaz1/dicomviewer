@@ -302,27 +302,41 @@ class StudyPrefetcherService extends PubSubService {
   // only via a React useEffect reacting to a re-rendered prop — i.e. still gated
   // behind React's own effect-scheduling macrotask, which is just as starvable by
   // the same old-series completion loop as the setTimeout(0) it was meant to route
-  // around. Round 8 adds a SECOND call to the same onViewportDisplaySetWillChange(),
-  // from commandsModule.ts's setDisplaySetsForViewports command handler — the
-  // actually-synchronous location, same call stack as the user's click, no React/
-  // async boundary crossed yet. commandPathXxx/viewportServiceXxx split the
-  // aggregate by caller so Playwright can directly see: commandPathSignalCount
-  // increments and causes commandPathRestartCount to increment (the real fix);
-  // viewportServiceSignalCount ALSO increments moments later (Round 7's call,
-  // retained, unchanged) but viewportServiceRestartCount stays flat — proving
-  // _setActiveDisplaySetsUIDs's existing same-UID dedup check (the mechanism behind
-  // af2cb0c) turned that second call into a no-op, not a duplicate restart.
+  // around. Round 8 added a SECOND call, from commandsModule.ts's
+  // setDisplaySetsForViewports command handler — synchronous with the user's click
+  // in theory, but Round 8 QA proved the actual production thumbnail-selection
+  // handler in this deployment never goes through that command at all.
+  // SKM 2026-10-09 (QA fix — Priority 2 round 9): round 9 investigation found the
+  // REAL active handler: extensions/measurement-tracking's $set override of the
+  // 'studyBrowser.thumbnailDoubleClickCallback' customization (measurement-tracking
+  // is a dependency of the longitudinal mode) calls
+  // viewportGridService.setDisplaySetsForViewports() DIRECTLY, bypassing
+  // commandsManager.run() entirely — so the round 8 commandPath call was never
+  // reached by the real UI. Round 9 adds a THIRD call, from that actual handler.
+  // commandPathXxx/viewportServiceXxx/measurementTrackingXxx split the aggregate by
+  // caller so Playwright can directly see: measurementTrackingSignalCount
+  // increments and causes measurementTrackingRestartCount to increment (the real
+  // fix, this time on the actually-exercised path); viewportServiceSignalCount
+  // ALSO increments moments later (round 7's call, retained, unchanged) but
+  // viewportServiceRestartCount stays flat — proving _setActiveDisplaySetsUIDs's
+  // existing same-UID dedup check (the mechanism behind af2cb0c) turned that second
+  // call into a no-op, not a duplicate restart. commandPathSignalCount is expected
+  // to stay at 0 in this real flow, confirming round 8's finding that nothing in
+  // this deployment's actual UI calls that command (kept in place regardless, per
+  // instructions, since another production flow may still use it).
   private _syncDiagnostics = {
     synchronousSignalCount: 0, // AGGREGATE: every onViewportDisplaySetWillChange() call
     synchronousRestartCount: 0, // AGGREGATE: every restart it triggered
-    commandPathSignalCount: 0, // round 8: calls from commandsModule.ts (the real fix)
+    commandPathSignalCount: 0, // round 8: calls from commandsModule.ts (unused by this UI)
     commandPathRestartCount: 0,
     viewportServiceSignalCount: 0, // round 7: calls from CornerstoneViewportService
     viewportServiceRestartCount: 0, // expected to stay flat relative to its own signal
-    // count once round 8's command-path call already applied the transition
+    // count once an earlier call already applied the transition
+    measurementTrackingSignalCount: 0, // round 9: calls from the ACTUAL thumbnail handler
+    measurementTrackingRestartCount: 0,
     deferredSignalCount: 0, // times the EXISTING _syncWithActiveViewport() ran
     deferredRestartCount: 0, // times the EXISTING path ALSO triggered a restart
-    lastSyncSource: '' as 'commandPath' | 'viewportService' | 'deferred' | '',
+    lastSyncSource: '' as 'commandPath' | 'viewportService' | 'measurementTracking' | 'deferred' | '',
     lastSyncAt: 0,
     lastSyncViewportId: '',
     lastStopPrefetchingAt: 0,
@@ -648,17 +662,19 @@ class StudyPrefetcherService extends PubSubService {
    * prevented the double-restart bug fixed in af2cb0c. No new flag or lock was added;
    * the existing idempotent check is reused as-is.
    *
-   * SKM 2026-10-09 (QA fix — Priority 2 round 8): `source` is diagnostics-only (never
-   * changes behaviour) — it lets window.skmSyncReport() distinguish the round 8
-   * commandsModule.ts call (the one actually synchronous with the user's click) from
-   * the round 7 CornerstoneViewportService._setStackViewport call (retained as-is;
-   * proven by round 8's investigation to itself be gated behind React's effect
-   * scheduling, so no longer the fix, but harmless and still correctly deduplicated).
+   * SKM 2026-10-09 (QA fix — Priority 2 round 8/9): `source` is diagnostics-only
+   * (never changes behaviour) — it lets window.skmSyncReport() distinguish each
+   * caller: round 9's measurement-tracking call (the actual production thumbnail
+   * handler in this deployment), round 8's commandsModule.ts call (proven unused by
+   * this deployment's real UI, kept in place in case another flow uses that
+   * command), and round 7's CornerstoneViewportService._setStackViewport call
+   * (retained as-is; gated behind React's effect scheduling, so not the fix, but
+   * harmless and still correctly deduplicated).
    */
   public onViewportDisplaySetWillChange(
     viewportId: string,
     newDisplaySetInstanceUIDs: string[],
-    source: 'commandPath' | 'viewportService' = 'viewportService'
+    source: 'commandPath' | 'viewportService' | 'measurementTracking' = 'viewportService'
   ): void {
     if (!viewportId || !newDisplaySetInstanceUIDs?.length) {
       return;
@@ -667,6 +683,8 @@ class StudyPrefetcherService extends PubSubService {
     this._syncDiagnostics.synchronousSignalCount++;
     if (source === 'commandPath') {
       this._syncDiagnostics.commandPathSignalCount++;
+    } else if (source === 'measurementTracking') {
+      this._syncDiagnostics.measurementTrackingSignalCount++;
     } else {
       this._syncDiagnostics.viewportServiceSignalCount++;
     }
@@ -707,6 +725,8 @@ class StudyPrefetcherService extends PubSubService {
       this._syncDiagnostics.synchronousRestartCount++;
       if (source === 'commandPath') {
         this._syncDiagnostics.commandPathRestartCount++;
+      } else if (source === 'measurementTracking') {
+        this._syncDiagnostics.measurementTrackingRestartCount++;
       } else {
         this._syncDiagnostics.viewportServiceRestartCount++;
       }
