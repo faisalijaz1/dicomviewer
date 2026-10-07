@@ -2706,7 +2706,8 @@ function commandsModule({
       viewportGridService.closeViewport(targetViewportId);
     },
     setDisplaySetsForViewports: ({ viewportsToUpdate }) => {
-      const { cineService, viewportGridService } = servicesManager.services;
+      const { cineService, viewportGridService, studyPrefetcherService } =
+        servicesManager.services;
       // Stopping the cine of modified viewports before changing the viewports to
       // avoid inconsistent state and lost references
       viewportsToUpdate.forEach(viewport => {
@@ -2717,6 +2718,31 @@ function commandsModule({
           frameRate: currentCineState?.frameRate ?? state.default?.frameRate ?? 24,
           isPlaying: false,
         });
+      });
+
+      // SKM 2026-10-09 (QA fix — Priority 2 round 8): synchronous switch signal, in
+      // the SAME call stack as the user's display-set/series selection command —
+      // before viewportGridService.setDisplaySetsForViewports() below, which only
+      // triggers CornerstoneViewportService._setStackViewport() later via a React
+      // useEffect reacting to the re-rendered displaySets prop. Round 7 investigation
+      // proved that React effect-scheduling boundary is itself just another macrotask
+      // consumer, starved for seconds by the same old-series completion loop this
+      // signal exists to stop — so the Round 7 call (left in place inside
+      // _setStackViewport, unchanged) was never actually synchronous with the click.
+      // This command handler, reached directly from the thumbnail double-click
+      // callback with no React/async boundary in between, is the genuinely
+      // synchronous location. Reuses the exact existing Round 7 API — no new restart
+      // mechanism. Best-effort/non-blocking: must never prevent the actual switch.
+      viewportsToUpdate.forEach((viewport: any) => {
+        try {
+          studyPrefetcherService?.onViewportDisplaySetWillChange?.(
+            viewport.viewportId,
+            viewport.displaySetInstanceUIDs,
+            'commandPath'
+          );
+        } catch (e) {
+          /* never let this block the actual viewport/display-set switch */
+        }
       });
 
       viewportGridService.setDisplaySetsForViewports(viewportsToUpdate);

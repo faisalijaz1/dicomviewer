@@ -293,22 +293,36 @@ class StudyPrefetcherService extends PubSubService {
   // SKM 2026-10-09 (QA fix — Priority 2 round 7): read-only diagnostics proving the
   // ~6.9s delay root cause (the deferred GRID_STATE_CHANGED setTimeout(0) getting
   // starved by the old series' own self-feeding _onImagePrefetchSuccess/
-  // _sendNextRequests completion loop) and the fix for it — a new SYNCHRONOUS signal
-  // (onViewportDisplaySetWillChange, called directly from CornerstoneViewportService
-  // at the exact point it already knows a display-set swap is happening, before
-  // viewport.setStack() and well before the deferred grid event). synchronousXxx
-  // fields track the new path; deferredXxx fields track the EXISTING
-  // _syncWithActiveViewport path unchanged — if the synchronous signal already
-  // updated _activeDisplaySetsInstanceUIDs, _setActiveDisplaySetsUIDs's own existing
-  // dedup check makes the later deferred call a no-op restart-wise (same mechanism
-  // that already prevented the double-restart bug fixed in af2cb0c), which
-  // deferredRestartCount staying flat after a synchronous restart proves.
+  // _sendNextRequests completion loop) and the fix for it — a SYNCHRONOUS signal
+  // (onViewportDisplaySetWillChange). synchronousSignalCount/synchronousRestartCount
+  // are the AGGREGATE across every caller of that method; deferredXxx fields track
+  // the EXISTING _syncWithActiveViewport path unchanged.
+  // SKM 2026-10-09 (QA fix — Priority 2 round 8): round 7's call site
+  // (CornerstoneViewportService._setStackViewport) turned out to itself be reached
+  // only via a React useEffect reacting to a re-rendered prop — i.e. still gated
+  // behind React's own effect-scheduling macrotask, which is just as starvable by
+  // the same old-series completion loop as the setTimeout(0) it was meant to route
+  // around. Round 8 adds a SECOND call to the same onViewportDisplaySetWillChange(),
+  // from commandsModule.ts's setDisplaySetsForViewports command handler — the
+  // actually-synchronous location, same call stack as the user's click, no React/
+  // async boundary crossed yet. commandPathXxx/viewportServiceXxx split the
+  // aggregate by caller so Playwright can directly see: commandPathSignalCount
+  // increments and causes commandPathRestartCount to increment (the real fix);
+  // viewportServiceSignalCount ALSO increments moments later (Round 7's call,
+  // retained, unchanged) but viewportServiceRestartCount stays flat — proving
+  // _setActiveDisplaySetsUIDs's existing same-UID dedup check (the mechanism behind
+  // af2cb0c) turned that second call into a no-op, not a duplicate restart.
   private _syncDiagnostics = {
-    synchronousSignalCount: 0, // times onViewportDisplaySetWillChange() was called
-    synchronousRestartCount: 0, // times it actually triggered _restartPrefetching
+    synchronousSignalCount: 0, // AGGREGATE: every onViewportDisplaySetWillChange() call
+    synchronousRestartCount: 0, // AGGREGATE: every restart it triggered
+    commandPathSignalCount: 0, // round 8: calls from commandsModule.ts (the real fix)
+    commandPathRestartCount: 0,
+    viewportServiceSignalCount: 0, // round 7: calls from CornerstoneViewportService
+    viewportServiceRestartCount: 0, // expected to stay flat relative to its own signal
+    // count once round 8's command-path call already applied the transition
     deferredSignalCount: 0, // times the EXISTING _syncWithActiveViewport() ran
     deferredRestartCount: 0, // times the EXISTING path ALSO triggered a restart
-    lastSyncSource: '' as 'synchronous' | 'deferred' | '',
+    lastSyncSource: '' as 'commandPath' | 'viewportService' | 'deferred' | '',
     lastSyncAt: 0,
     lastSyncViewportId: '',
     lastStopPrefetchingAt: 0,
@@ -627,21 +641,35 @@ class StudyPrefetcherService extends PubSubService {
    * grid-state value.
    *
    * Idempotency (no duplicate restart when the deferred GRID_STATE_CHANGED later
-   * fires for this SAME transition): this routes through the EXISTING
+   * fires for this SAME transition, or when a second caller invokes this same
+   * method for the same transition): this routes through the EXISTING
    * _setActiveDisplaySetsUIDs(), whose dedup check already treats a matching ordered
    * UID list as a no-op (displaySetUpdated=false) — the same mechanism that already
    * prevented the double-restart bug fixed in af2cb0c. No new flag or lock was added;
    * the existing idempotent check is reused as-is.
+   *
+   * SKM 2026-10-09 (QA fix — Priority 2 round 8): `source` is diagnostics-only (never
+   * changes behaviour) — it lets window.skmSyncReport() distinguish the round 8
+   * commandsModule.ts call (the one actually synchronous with the user's click) from
+   * the round 7 CornerstoneViewportService._setStackViewport call (retained as-is;
+   * proven by round 8's investigation to itself be gated behind React's effect
+   * scheduling, so no longer the fix, but harmless and still correctly deduplicated).
    */
   public onViewportDisplaySetWillChange(
     viewportId: string,
-    newDisplaySetInstanceUIDs: string[]
+    newDisplaySetInstanceUIDs: string[],
+    source: 'commandPath' | 'viewportService' = 'viewportService'
   ): void {
     if (!viewportId || !newDisplaySetInstanceUIDs?.length) {
       return;
     }
 
     this._syncDiagnostics.synchronousSignalCount++;
+    if (source === 'commandPath') {
+      this._syncDiagnostics.commandPathSignalCount++;
+    } else {
+      this._syncDiagnostics.viewportServiceSignalCount++;
+    }
 
     const { viewportGridService } = this._servicesManager.services;
     const viewports = (viewportGridService as any)?.getState?.()?.viewports;
@@ -671,12 +699,17 @@ class StudyPrefetcherService extends PubSubService {
 
     const displaySetUpdated = this._setActiveDisplaySetsUIDs(orderedDisplaySetUIDs);
 
-    this._syncDiagnostics.lastSyncSource = 'synchronous';
+    this._syncDiagnostics.lastSyncSource = source;
     this._syncDiagnostics.lastSyncAt = Date.now();
     this._syncDiagnostics.lastSyncViewportId = viewportId;
 
     if (displaySetUpdated) {
       this._syncDiagnostics.synchronousRestartCount++;
+      if (source === 'commandPath') {
+        this._syncDiagnostics.commandPathRestartCount++;
+      } else {
+        this._syncDiagnostics.viewportServiceRestartCount++;
+      }
       this._restartPrefetching();
     }
   }
