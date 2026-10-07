@@ -40,8 +40,34 @@ let sessionLoaded = 0;
 let patched = false;
 const listeners = new Set<() => void>();
 
+// SKM 2026-10-09 (QA fix — Priority 2 round 10): notify() used to call every
+// listener synchronously on EVERY single addRequest()/IMAGE_LOADED/
+// IMAGE_LOAD_FAILED event - during an old-series prefetch storm (hundreds of
+// dispatches/completions in a few seconds) that forced a React re-render of
+// every useStudyImageLoadProgress() consumer (StudyLoadingStatusBar, mounted
+// app-wide in ViewerLayout) once per raw event. Investigation proved this
+// self-inflicted re-render volume was what delayed React's processing of the
+// user's own thumbnail click (and everything downstream of it, including the
+// prefetcher's switch signal) during that same storm - not a deliberate
+// scheduling boundary, but React's own commit capacity being continuously
+// consumed by this hook's unthrottled notifications. Coalescing to at most one
+// listener fan-out per animation frame fixes that without touching the
+// tracked counters themselves (queuedImageIds/sessionTotal/sessionLoaded are
+// still updated synchronously and immediately on every event, exactly as
+// before - only the RENDER trigger is batched).
+let rafHandle: number | null = null;
+
 function notify() {
-  listeners.forEach(listener => listener());
+  if (rafHandle !== null) {
+    // A frame is already scheduled - this event's effect on the tracked
+    // counters already happened synchronously before notify() was called, so
+    // the upcoming frame's single render will already reflect it.
+    return;
+  }
+  rafHandle = requestAnimationFrame(() => {
+    rafHandle = null;
+    listeners.forEach(listener => listener());
+  });
 }
 
 function ensurePatched() {
@@ -151,6 +177,16 @@ export function useStudyImageLoadProgress(): StudyImageLoadProgress {
 
     return () => {
       listeners.delete(listener);
+      // SKM 2026-10-09 (QA fix — Priority 2 round 10): if this was the last
+      // consumer, cancel any still-pending animation-frame fan-out instead of
+      // leaving it scheduled against an now-empty listener set - avoids a
+      // stale rAF callback surviving between hook instances (e.g. a viewport
+      // unmount followed shortly by a fresh mount), and guarantees no
+      // forceRender can ever fire after this instance has unmounted.
+      if (listeners.size === 0 && rafHandle !== null) {
+        cancelAnimationFrame(rafHandle);
+        rafHandle = null;
+      }
     };
   }, []);
 
