@@ -1,4 +1,3 @@
-import queryString from 'query-string';
 import dicomParser from 'dicom-parser';
 import { utilities } from '@cornerstonejs/core';
 import { imageIdToURI } from '../utils';
@@ -8,6 +7,32 @@ import toNumber from '../utils/toNumber';
 import combineFrameInstance from '../utils/combineFrameInstance';
 
 const { calibratedPixelSpacingMetadataProvider, getPixelSpacingInformation } = utilities;
+
+// SKM 2026-10-07 (QA fix — Priority 2 round 14): getUIDsFromImageID's
+// '?requestType=WADO' branch used to call the general-purpose
+// queryString.parse(imageId) and then only read 4 of its fields
+// (studyUID/seriesUID/objectUID/frameNumber). Independent CPU profiling
+// (CDP Profiler) proved query-string.parse() - specifically its
+// decode-uri-component dependency - as the dominant main-thread cost
+// during a cold series switch (~2977ms subtree per profiled switch),
+// because it decodes and allocates an object for EVERY key/value pair in
+// the imageId (including irrelevant ones like requestType/contentType),
+// not just the 4 actually consumed. These two helpers extract exactly
+// those 4 params directly via regex, preserving the same decode-with-
+// fallback and order-independent semantics queryString.parse() provided,
+// without parsing or allocating for the rest of the query string.
+function decodeQueryValue(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch (error) {
+    return value;
+  }
+}
+
+function getWadoUriParam(imageId: string, key: string): string | undefined {
+  const match = imageId.match(new RegExp(`[?&]${key}=([^&]*)`));
+  return match ? decodeQueryValue(match[1]) : undefined;
+}
 
 class MetadataProvider {
   private readonly imageURIToUIDs: Map<string, any> = new Map();
@@ -463,13 +488,11 @@ class MetadataProvider {
         frameNumber: splitImageId[6],
       };
     } else if (imageId.includes('?requestType=WADO')) {
-      const qs = queryString.parse(imageId);
-
       return {
-        StudyInstanceUID: qs.studyUID,
-        SeriesInstanceUID: qs.seriesUID,
-        SOPInstanceUID: qs.objectUID,
-        frameNumber: qs.frameNumber,
+        StudyInstanceUID: getWadoUriParam(imageId, 'studyUID'),
+        SeriesInstanceUID: getWadoUriParam(imageId, 'seriesUID'),
+        SOPInstanceUID: getWadoUriParam(imageId, 'objectUID'),
+        frameNumber: getWadoUriParam(imageId, 'frameNumber'),
       };
     }
 
