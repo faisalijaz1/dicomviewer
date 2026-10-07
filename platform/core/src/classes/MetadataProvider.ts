@@ -17,10 +17,7 @@ const { calibratedPixelSpacingMetadataProvider, getPixelSpacingInformation } = u
 // during a cold series switch (~2977ms subtree per profiled switch),
 // because it decodes and allocates an object for EVERY key/value pair in
 // the imageId (including irrelevant ones like requestType/contentType),
-// not just the 4 actually consumed. These two helpers extract exactly
-// those 4 params directly via regex, preserving the same decode-with-
-// fallback and order-independent semantics queryString.parse() provided,
-// without parsing or allocating for the rest of the query string.
+// not just the 4 actually consumed.
 function decodeQueryValue(value: string): string {
   try {
     return decodeURIComponent(value);
@@ -29,9 +26,61 @@ function decodeQueryValue(value: string): string {
   }
 }
 
-function getWadoUriParam(imageId: string, key: string): string | undefined {
-  const match = imageId.match(new RegExp(`[?&]${key}=([^&]*)`));
-  return match ? decodeQueryValue(match[1]) : undefined;
+// SKM 2026-10-07 (QA fix — Priority 2 round 15): round 14 replaced
+// query-string.parse() with 4 independent getWadoUriParam() calls, each
+// constructing its own RegExp and re-scanning the full imageId. That's
+// gone, but profiling now shows this replacement itself costing ~893ms
+// (regex construction x4 + 4 scans + their decode calls). This single
+// pass splits the query portion once and reads each '&'-delimited pair
+// exactly once, decoding only the (at most 4) pairs whose key is one we
+// care about - no RegExp is constructed at all, and the imageId is
+// scanned once instead of 4 times. Order-independence is preserved (the
+// loop doesn't assume any param position); if a key legitimately
+// repeats, the last occurrence wins, same as it would have with round
+// 14's .match() semantics for any realistically constructed WADO-URI
+// imageId (the app never emits a param twice).
+function getWadoUriUIDs(imageId: string): {
+  studyUID?: string;
+  seriesUID?: string;
+  objectUID?: string;
+  frameNumber?: string;
+} {
+  let studyUID: string | undefined;
+  let seriesUID: string | undefined;
+  let objectUID: string | undefined;
+  let frameNumber: string | undefined;
+
+  const queryStart = imageId.indexOf('?');
+  if (queryStart === -1) {
+    return { studyUID, seriesUID, objectUID, frameNumber };
+  }
+
+  const pairs = imageId.substring(queryStart + 1).split('&');
+  for (let i = 0; i < pairs.length; i++) {
+    const pair = pairs[i];
+    const eqIndex = pair.indexOf('=');
+    if (eqIndex === -1) {
+      continue;
+    }
+
+    const key = pair.substring(0, eqIndex);
+    switch (key) {
+      case 'studyUID':
+        studyUID = decodeQueryValue(pair.substring(eqIndex + 1));
+        break;
+      case 'seriesUID':
+        seriesUID = decodeQueryValue(pair.substring(eqIndex + 1));
+        break;
+      case 'objectUID':
+        objectUID = decodeQueryValue(pair.substring(eqIndex + 1));
+        break;
+      case 'frameNumber':
+        frameNumber = decodeQueryValue(pair.substring(eqIndex + 1));
+        break;
+    }
+  }
+
+  return { studyUID, seriesUID, objectUID, frameNumber };
 }
 
 class MetadataProvider {
@@ -488,11 +537,13 @@ class MetadataProvider {
         frameNumber: splitImageId[6],
       };
     } else if (imageId.includes('?requestType=WADO')) {
+      const { studyUID, seriesUID, objectUID, frameNumber } = getWadoUriUIDs(imageId);
+
       return {
-        StudyInstanceUID: getWadoUriParam(imageId, 'studyUID'),
-        SeriesInstanceUID: getWadoUriParam(imageId, 'seriesUID'),
-        SOPInstanceUID: getWadoUriParam(imageId, 'objectUID'),
-        frameNumber: getWadoUriParam(imageId, 'frameNumber'),
+        StudyInstanceUID: studyUID,
+        SeriesInstanceUID: seriesUID,
+        SOPInstanceUID: objectUID,
+        frameNumber,
       };
     }
 
