@@ -926,6 +926,29 @@ class CornerstoneViewportService extends PubSubService implements IViewportServi
       initialImageIndexToUse = this._getInitialImageIndexForViewport(viewportInfo, imageIds) || 0;
     }
 
+    // SKM 2026-10-09 (QA fix — Priority 2 round 7): synchronously tell
+    // StudyPrefetcherService a display-set swap is happening, RIGHT HERE, before
+    // viewport.setStack() and well before ViewportGridService's own GRID_STATE_CHANGED
+    // broadcast — which is deferred via a zero-delay setTimeout and was proven (round 7
+    // investigation) to get starved for several seconds by the old series' own
+    // _onImagePrefetchSuccess -> _sendNextRequests completion loop, the exact loop this
+    // restart needs to stop. This is the narrowest point in the existing synchronous
+    // call path that already knows the NEW displaySetInstanceUIDs (computed above,
+    // before any async work) — no new parallel state-tracking mechanism, just an
+    // earlier, synchronous nudge to the same service the deferred GRID_STATE_CHANGED
+    // path already drives; that deferred path is untouched and still runs afterward as
+    // a reconciliation pass (idempotent no-op if this already applied the change).
+    // Best-effort: StudyPrefetcherService may not be registered in every mode.
+    try {
+      const { studyPrefetcherService } = this.servicesManager.services as any;
+      studyPrefetcherService?.onViewportDisplaySetWillChange?.(
+        viewport.id,
+        displaySetInstanceUIDs
+      );
+    } catch (e) {
+      /* never let this block the actual viewport switch */
+    }
+
     // If this viewport was already showing a different series whose images
     // are still mid-download, cancel whatever's left of that stale load
     // before starting the new one - otherwise the old series keeps

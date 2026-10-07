@@ -145,6 +145,30 @@ function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager) {
   } catch (e) {
     /* best-effort */
   }
+
+  // SKM 2026-10-09 (QA fix — Priority 2 round 7): console reporter for the new
+  // synchronous switch-signal path (onViewportDisplaySetWillChange), added to close
+  // the ~6.9s gap proven in round 7's investigation between a series switch and
+  // _stopPrefetching() actually running (the deferred GRID_STATE_CHANGED
+  // setTimeout(0) getting starved by the old series' own completion-callback loop).
+  // lastStopPrefetchingAt - lastSyncAt (when lastSyncSource is 'synchronous') is the
+  // key number to compare against the old ~6.9s figure. deferredRestartCount staying
+  // flat immediately after a synchronous restart is the proof there is no duplicate.
+  try {
+    (window as any).skmSyncReport = () => {
+      const diag = (studyPrefetcherService as any).getSyncDiagnostics?.();
+      if (!diag) {
+        // eslint-disable-next-line no-console
+        console.log('[SKM-SYNC] diagnostics unavailable');
+        return null;
+      }
+      // eslint-disable-next-line no-console
+      console.log('[SKM-SYNC]', diag);
+      return diag;
+    };
+  } catch (e) {
+    /* best-effort */
+  }
 }
 
 export default initStudyPrefetcherService;

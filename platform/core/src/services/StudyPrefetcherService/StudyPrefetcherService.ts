@@ -290,6 +290,30 @@ class StudyPrefetcherService extends PubSubService {
     lastNewDsUID: null as string | null,
     lastReason: '',
   };
+  // SKM 2026-10-09 (QA fix — Priority 2 round 7): read-only diagnostics proving the
+  // ~6.9s delay root cause (the deferred GRID_STATE_CHANGED setTimeout(0) getting
+  // starved by the old series' own self-feeding _onImagePrefetchSuccess/
+  // _sendNextRequests completion loop) and the fix for it — a new SYNCHRONOUS signal
+  // (onViewportDisplaySetWillChange, called directly from CornerstoneViewportService
+  // at the exact point it already knows a display-set swap is happening, before
+  // viewport.setStack() and well before the deferred grid event). synchronousXxx
+  // fields track the new path; deferredXxx fields track the EXISTING
+  // _syncWithActiveViewport path unchanged — if the synchronous signal already
+  // updated _activeDisplaySetsInstanceUIDs, _setActiveDisplaySetsUIDs's own existing
+  // dedup check makes the later deferred call a no-op restart-wise (same mechanism
+  // that already prevented the double-restart bug fixed in af2cb0c), which
+  // deferredRestartCount staying flat after a synchronous restart proves.
+  private _syncDiagnostics = {
+    synchronousSignalCount: 0, // times onViewportDisplaySetWillChange() was called
+    synchronousRestartCount: 0, // times it actually triggered _restartPrefetching
+    deferredSignalCount: 0, // times the EXISTING _syncWithActiveViewport() ran
+    deferredRestartCount: 0, // times the EXISTING path ALSO triggered a restart
+    lastSyncSource: '' as 'synchronous' | 'deferred' | '',
+    lastSyncAt: 0,
+    lastSyncViewportId: '',
+    lastStopPrefetchingAt: 0,
+    lastClearRequestStackAt: 0,
+  };
   private _isRunning = false;
   private _startDelayTimer: ReturnType<typeof setTimeout> | null = null;
   private _displaySetLoadingStates = new Map<string, DisplaySetLoadingState>();
@@ -515,6 +539,13 @@ class StudyPrefetcherService extends PubSubService {
 
     activeViewportId = activeViewportId ?? viewportGridServiceState.activeViewportId;
 
+    // SKM 2026-10-09 (QA fix — Priority 2 round 7): this is the EXISTING, unchanged
+    // deferred reconciliation path (still the one driven by GRID_STATE_CHANGED/
+    // ACTIVE_VIEWPORT_ID_CHANGED/DISPLAY_SETS_CHANGED). Counted unconditionally here,
+    // before any early return, so deferredSignalCount proves this path keeps running
+    // exactly as before — the new synchronous signal is additive, not a replacement.
+    this._syncDiagnostics.deferredSignalCount++;
+
     // If may be null when the viewer is loaded
     if (!activeViewportId) {
       return;
@@ -560,8 +591,99 @@ class StudyPrefetcherService extends PubSubService {
     const displaySetUpdated = this._setActiveDisplaySetsUIDs(orderedDisplaySetUIDs);
 
     if (forceRestart || displaySetUpdated) {
+      // SKM 2026-10-09 (QA fix — Priority 2 round 7): if a prior synchronous call
+      // (onViewportDisplaySetWillChange, below) already applied this same transition,
+      // _setActiveDisplaySetsUIDs's own existing dedup check (sameDisplaySets) makes
+      // displaySetUpdated false here — so this increments only on a GENUINE deferred
+      // restart, never a duplicate of one the synchronous path already performed.
+      this._syncDiagnostics.deferredRestartCount++;
+      this._syncDiagnostics.lastSyncSource = 'deferred';
+      this._syncDiagnostics.lastSyncAt = Date.now();
+      this._syncDiagnostics.lastSyncViewportId = activeViewportId;
       this._restartPrefetching();
     }
+  }
+
+  /**
+   * SKM 2026-10-09 (QA fix — Priority 2 round 7): synchronous counterpart to
+   * _syncWithActiveViewport(), called DIRECTLY from CornerstoneViewportService at the
+   * exact point it already knows a stack viewport's display set is being replaced
+   * (before viewport.setStack(), see _setStackViewport) — well before
+   * ViewportGridService's own GRID_STATE_CHANGED broadcast, which is deferred via a
+   * zero-delay setTimeout(0) (see ViewportGridService.setDisplaySetsForViewports/.set/
+   * .setLayout). Round 7 investigation proved that deferred timeout can be starved for
+   * several seconds by the very old-series _onImagePrefetchSuccess → _sendNextRequests
+   * completion loop this restart is meant to stop — a feedback loop where the fix
+   * can't run because the problem is occupying the queue the fix needs. This gives the
+   * prefetcher a path to react BEFORE that starvation window, using the caller's own
+   * already-known new displaySetInstanceUIDs rather than reading viewportGridService's
+   * state (which, at this exact call site, has deliberately not been updated yet).
+   *
+   * Takes `newDisplaySetInstanceUIDs` as a parameter (not read from grid state) for
+   * exactly that reason. Every other visible viewport's CURRENT state is still read
+   * normally, so a side-by-side second pane's own series is never affected — this
+   * mirrors _syncWithActiveViewport's own focused-first, deduped ordering exactly,
+   * just substituting the one viewport's known-new value for its (not yet updated)
+   * grid-state value.
+   *
+   * Idempotency (no duplicate restart when the deferred GRID_STATE_CHANGED later
+   * fires for this SAME transition): this routes through the EXISTING
+   * _setActiveDisplaySetsUIDs(), whose dedup check already treats a matching ordered
+   * UID list as a no-op (displaySetUpdated=false) — the same mechanism that already
+   * prevented the double-restart bug fixed in af2cb0c. No new flag or lock was added;
+   * the existing idempotent check is reused as-is.
+   */
+  public onViewportDisplaySetWillChange(
+    viewportId: string,
+    newDisplaySetInstanceUIDs: string[]
+  ): void {
+    if (!viewportId || !newDisplaySetInstanceUIDs?.length) {
+      return;
+    }
+
+    this._syncDiagnostics.synchronousSignalCount++;
+
+    const { viewportGridService } = this._servicesManager.services;
+    const viewports = (viewportGridService as any)?.getState?.()?.viewports;
+
+    const orderedDisplaySetUIDs: string[] = [];
+    const seenDisplaySetUIDs = new Set<string>();
+    const addDisplaySetUIDs = (uids?: string[]) => {
+      (uids ?? []).forEach(uid => {
+        if (uid && !seenDisplaySetUIDs.has(uid)) {
+          seenDisplaySetUIDs.add(uid);
+          orderedDisplaySetUIDs.push(uid);
+        }
+      });
+    };
+
+    // The viewport whose display set is CHANGING comes first (focused-pane-first,
+    // same priority order _syncWithActiveViewport uses), using the caller's known-new
+    // value instead of (not yet updated) grid state.
+    addDisplaySetUIDs(newDisplaySetInstanceUIDs);
+    if (viewports && typeof viewports.forEach === 'function') {
+      viewports.forEach((viewport: any, id: string) => {
+        if (id !== viewportId) {
+          addDisplaySetUIDs(viewport?.displaySetInstanceUIDs);
+        }
+      });
+    }
+
+    const displaySetUpdated = this._setActiveDisplaySetsUIDs(orderedDisplaySetUIDs);
+
+    this._syncDiagnostics.lastSyncSource = 'synchronous';
+    this._syncDiagnostics.lastSyncAt = Date.now();
+    this._syncDiagnostics.lastSyncViewportId = viewportId;
+
+    if (displaySetUpdated) {
+      this._syncDiagnostics.synchronousRestartCount++;
+      this._restartPrefetching();
+    }
+  }
+
+  /** Read-only diagnostics for the Priority 2 round 7 synchronous-switch-signal path. */
+  public getSyncDiagnostics(): Record<string, unknown> {
+    return { ...this._syncDiagnostics };
   }
 
   private _setActiveDisplaySetsUIDs(newActiveDisplaySetInstanceUIDs: string[]): boolean {
@@ -1746,6 +1868,12 @@ class StudyPrefetcherService extends PubSubService {
       return;
     }
     this._isRunning = false;
+    // SKM 2026-10-09 (QA fix — Priority 2 round 7): exact entry timestamp, so
+    // Playwright can measure the gap between the synchronous switch signal
+    // (_syncDiagnostics.lastSyncAt, source='synchronous') and _stopPrefetching()
+    // actually running — this should now be ~0ms instead of the ~6.9s the deferred
+    // GRID_STATE_CHANGED path alone used to take.
+    this._syncDiagnostics.lastStopPrefetchingAt = Date.now();
 
     // SKM 2026-10-09 (QA fix — Priority 2 round 4): snapshot the stale pending/
     // in-flight imageIds BEFORE any bookkeeping below is cleared, and hand the
@@ -1800,6 +1928,9 @@ class StudyPrefetcherService extends PubSubService {
     this._schedulerStats.reEnqueues = 0;
     this._schedulerStats.maxEnqueuesPerImage = 0;
     this.imageLoadPoolManager.clearRequestStack(this.requestType);
+    // SKM 2026-10-09 (QA fix — Priority 2 round 7): exact timestamp of the clear,
+    // immediately after it runs.
+    this._syncDiagnostics.lastClearRequestStackAt = Date.now();
 
     this._broadcastEvent(this.EVENTS.SERVICE_STOPPED, {});
   }
