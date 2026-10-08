@@ -1,12 +1,25 @@
 import { cache, imageLoadPoolManager, imageLoader, Enums, eventTarget, EVENTS as csEvents } from '@cornerstonejs/core';
 import { subscribeStackNewImage } from './utils/skmStackNewImage';
 
-function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager) {
+function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager, appConfig?: AppTypes.Config) {
   const { studyPrefetcherService } = servicesManager.services;
 
   studyPrefetcherService.requestType = Enums.RequestType.Prefetch;
   studyPrefetcherService.imageLoadPoolManager = imageLoadPoolManager;
   studyPrefetcherService.imageLoader = imageLoader;
+
+  // SKM 2026-10-08 (Priority 3 round 1): reserve at least one decode worker for
+  // the interactively-displayed image. maxNumberOfWebWorkers is the SAME config
+  // value initWADOImageLoader uses to size Cornerstone's actual decode worker
+  // pool, so this derives the reserve from the real worker count rather than a
+  // guessed constant. See maxConcurrentDecodeAheadRequests' doc comment in
+  // StudyPrefetcherService for why this is needed and what it does and does not
+  // affect. If maxNumberOfWebWorkers isn't a valid positive number for any
+  // reason, this is skipped and prefetch concurrency behaves exactly as before.
+  const maxWebWorkers = appConfig?.maxNumberOfWebWorkers;
+  if (typeof maxWebWorkers === 'number' && maxWebWorkers > 0) {
+    studyPrefetcherService.maxConcurrentDecodeAheadRequests = Math.max(1, maxWebWorkers - 1);
+  }
 
   studyPrefetcherService.cache = {
     isImageCached(imageId: string): boolean {

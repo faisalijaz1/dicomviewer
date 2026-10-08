@@ -732,7 +732,7 @@ export default async function init({
   });
 
   initCineService(servicesManager);
-  initStudyPrefetcherService(servicesManager);
+  initStudyPrefetcherService(servicesManager, appConfig);
 
   // SKM 2026-10-09: adaptive background prefetch concurrency. Consumes the governor's live
   // state (window.__skmBudget) + decoded-cache fill to throttle the prefetcher's inflight cap

@@ -378,6 +378,31 @@ class StudyPrefetcherService extends PubSubService {
   public imageLoader: IImageLoader;
   public imageLoadEventsManager: IImageLoadEventsManager;
 
+  /**
+   * SKM 2026-10-08 (Priority 3 round 1): optional hard ceiling on concurrent
+   * in-flight prefetch requests (loadAndCacheImage calls), set by
+   * initStudyPrefetcherService from appConfig.maxNumberOfWebWorkers - 1.
+   *
+   * WHY: each in-flight prefetch request runs the complete load pipeline,
+   * including decodeImageFrame(), which dispatches to the SAME fixed-size
+   * Cornerstone decode worker pool used by the interactively-displayed
+   * image. Worker tasks already dispatched cannot be preempted, so if
+   * prefetch concurrency is allowed to reach or exceed the worker count,
+   * it can occupy every worker and make the user's own image wait behind
+   * background work. Reserving one worker (cap = workers - 1) leaves at
+   * least one worker free for the interactive decode in the common case.
+   *
+   * Left undefined (default) this is a complete no-op - existing
+   * behaviour (including the skmConcurrentPanes pane-scaled cap and the
+   * skmPrefetchConcurrency adaptive controller, both untouched) is
+   * unchanged. When set, it only TIGHTENS the existing
+   * maxNumPrefetchRequests-derived cap via _effectiveMaxPrefetchRequests();
+   * it never raises it, never touches the decode worker pool size, and
+   * never disables prefetch - background loading continues, just with a
+   * lower concurrent ceiling.
+   */
+  public maxConcurrentDecodeAheadRequests?: number;
+
   public static REGISTRATION = {
     name: 'studyPrefetcherService',
     altName: 'StudyPrefetcherService',
@@ -1660,12 +1685,21 @@ class StudyPrefetcherService extends PubSubService {
   // this.config.maxNumPrefetchRequests) to remove the feature.
   private _effectiveMaxPrefetchRequests(): number {
     const base = this.config.maxNumPrefetchRequests;
+    let effective: number;
     if (!this.config.skmConcurrentPanes) {
-      return base;
+      effective = base;
+    } else {
+      const panes = Math.max(1, this._activeDisplaySetsInstanceUIDs?.length || 1);
+      const ceiling = this.config.skmConcurrentPanesMaxRequests || base * 2;
+      effective = Math.min(base * panes, ceiling);
     }
-    const panes = Math.max(1, this._activeDisplaySetsInstanceUIDs?.length || 1);
-    const ceiling = this.config.skmConcurrentPanesMaxRequests || base * 2;
-    return Math.min(base * panes, ceiling);
+    // SKM 2026-10-08 (Priority 3 round 1): see maxConcurrentDecodeAheadRequests'
+    // own doc comment. A no-op unless initStudyPrefetcherService set it; only
+    // ever tightens the cap computed above, never raises it.
+    if (typeof this.maxConcurrentDecodeAheadRequests === 'number') {
+      effective = Math.min(effective, this.maxConcurrentDecodeAheadRequests);
+    }
+    return effective;
   }
 
   private _moveImageIdToLoadedSet(imageId: string): boolean {
