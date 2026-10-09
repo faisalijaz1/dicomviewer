@@ -212,6 +212,110 @@ interface IImageLoadEventsManager {
   ): EventSubscription[];
 }
 
+// SKM 2026-10-09 (WADO-URI Priority 1 — read-only enqueue diagnostics).
+// Cap for the diagnostic top list only. Not a scheduler, cache, or queue limit.
+const TOP_ENQUEUE_COUNT_LIMIT = 20;
+const DICOM_UID_RE = /^[0-9]+(?:\.[0-9]+)+$/;
+
+type EnqueueImageScheme = 'wadouri' | 'wadors' | 'dicomweb' | 'other';
+
+type EnqueueCountDiagnosticEntry = {
+  seriesInstanceUID: string | null;
+  sopInstanceUID: string | null;
+  frame: string | null;
+  scheme: EnqueueImageScheme;
+  count: number;
+  opaqueKey?: string;
+};
+
+function dicomUidOrNull(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > 64 || !DICOM_UID_RE.test(trimmed)) {
+    return null;
+  }
+  return trimmed;
+}
+
+function enqueueImageScheme(imageId: string): EnqueueImageScheme {
+  const colon = imageId.indexOf(':');
+  if (colon <= 0 || colon > 16) {
+    return 'other';
+  }
+  const scheme = imageId.slice(0, colon).toLowerCase();
+  if (scheme === 'wadouri' || scheme === 'wadors' || scheme === 'dicomweb') {
+    return scheme;
+  }
+  return 'other';
+}
+
+/** Session-stable distinguisher used only when series/SOP cannot be parsed. Not reversible to a path. */
+function opaqueEnqueueKey(imageId: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < imageId.length; i++) {
+    hash ^= imageId.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
+ * Series UID + SOP UID (+ frame, scheme) from a Cornerstone imageId.
+ * Drops study UID, patient identifiers, hosts, and filesystem/storage paths.
+ */
+function safeEnqueueImageRef(imageId: string): Omit<EnqueueCountDiagnosticEntry, 'count'> {
+  let seriesInstanceUID: string | null = null;
+  let sopInstanceUID: string | null = null;
+  let frame: string | null = null;
+
+  const queryAt = imageId.indexOf('?');
+  if (queryAt >= 0) {
+    try {
+      const params = new URLSearchParams(imageId.slice(queryAt + 1));
+      seriesInstanceUID =
+        dicomUidOrNull(params.get('seriesUID')) || dicomUidOrNull(params.get('SeriesInstanceUID'));
+      sopInstanceUID =
+        dicomUidOrNull(params.get('objectUID')) ||
+        dicomUidOrNull(params.get('SOPInstanceUID')) ||
+        dicomUidOrNull(params.get('sopInstanceUID'));
+      const frameParam = params.get('frame');
+      if (frameParam && /^[0-9]+$/.test(frameParam)) {
+        frame = frameParam;
+      }
+    } catch {
+      /* query parse is best-effort; path form is tried next */
+    }
+  }
+
+  if (!seriesInstanceUID || !sopInstanceUID || frame === null) {
+    const seriesMatch = /\/series\/([0-9.]+)(?=\/|[?#]|$)/i.exec(imageId);
+    const instanceMatch = /\/instances\/([0-9.]+)(?=\/|[?#]|$)/i.exec(imageId);
+    const frameMatch = /\/frames\/([0-9]+)(?=\/|[?#]|$)/i.exec(imageId);
+    if (!seriesInstanceUID && seriesMatch) {
+      seriesInstanceUID = dicomUidOrNull(seriesMatch[1]);
+    }
+    if (!sopInstanceUID && instanceMatch) {
+      sopInstanceUID = dicomUidOrNull(instanceMatch[1]);
+    }
+    if (frame === null && frameMatch) {
+      frame = frameMatch[1];
+    }
+  }
+
+  const ref: Omit<EnqueueCountDiagnosticEntry, 'count'> = {
+    seriesInstanceUID,
+    sopInstanceUID,
+    frame,
+    scheme: enqueueImageScheme(imageId),
+  };
+  if (!seriesInstanceUID || !sopInstanceUID) {
+    ref.opaqueKey = opaqueEnqueueKey(imageId);
+  }
+  return ref;
+}
+
 class StudyPrefetcherService extends PubSubService {
   private _extensionManager: ExtensionManager;
   private _servicesManager: ServicesManager;
@@ -1055,8 +1159,52 @@ class StudyPrefetcherService extends PubSubService {
     }
   }
 
+  /**
+   * Read-only view of `_requestCounts`. Does not sort or otherwise mutate the map,
+   * the queue, the cache, or the counters. Built only when diagnostics are requested.
+   */
+  private _readEnqueueCountDiagnostics(): {
+    distinctImageIdsTracked: number;
+    totalEnqueueIncrements: number;
+    topEnqueueCounts: EnqueueCountDiagnosticEntry[];
+  } {
+    const top: Array<{ imageId: string; count: number }> = [];
+    let totalEnqueueIncrements = 0;
+
+    this._requestCounts.forEach((count, imageId) => {
+      if (typeof count !== 'number' || !Number.isFinite(count)) {
+        return;
+      }
+      totalEnqueueIncrements += count;
+      let insertAt = 0;
+      while (insertAt < top.length && top[insertAt].count >= count) {
+        insertAt++;
+      }
+      if (insertAt >= TOP_ENQUEUE_COUNT_LIMIT) {
+        return;
+      }
+      top.splice(insertAt, 0, { imageId, count });
+      if (top.length > TOP_ENQUEUE_COUNT_LIMIT) {
+        top.pop();
+      }
+    });
+
+    const topEnqueueCounts = top.map(({ imageId, count }) => ({
+      ...safeEnqueueImageRef(imageId),
+      count,
+    }));
+    topEnqueueCounts.sort((a, b) => b.count - a.count);
+
+    return {
+      distinctImageIdsTracked: this._requestCounts.size,
+      totalEnqueueIncrements,
+      topEnqueueCounts,
+    };
+  }
+
   /** Read-only diagnostics for skmTelemetry / console (Phase 0). */
   public getSchedulerDiagnostics(): Record<string, unknown> {
+    const enqueueCounts = this._readEnqueueCountDiagnostics();
     return {
       stats: { ...this._schedulerStats },
       perViewport: this._perViewportSnapshot(),
@@ -1065,6 +1213,12 @@ class StudyPrefetcherService extends PubSubService {
       pending: this._pendingRequests.length,
       inflight: this._inflightRequests.size,
       recentEvents: this._schedulerEventLog.slice(-40),
+      distinctImageIdsTracked: enqueueCounts.distinctImageIdsTracked,
+      totalEnqueueIncrements: enqueueCounts.totalEnqueueIncrements,
+      topEnqueueCountLimit: TOP_ENQUEUE_COUNT_LIMIT,
+      topEnqueueCounts: enqueueCounts.topEnqueueCounts,
+      enqueueCountSemantics:
+        'count is the number of times that imageId was pushed onto _pendingRequests in _enqueueDisplaySetImagesRequests since the last _stopPrefetching, which clears _requestCounts. It is not a network-request count. stats.reEnqueues counts imageIds whose count first reached 2. stats.maxEnqueuesPerImage is the highest of these counts in the current prefetch session and is reset when the map is cleared. scheme dicomweb is this viewer\'s prefix for WADO-URI imageIds; scheme wadors is WADO-RS. Identifiers are series UID and SOP UID only.',
     };
   }
 
