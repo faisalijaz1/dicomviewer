@@ -45,6 +45,7 @@ import { initSkmWorkingSetEvictor } from './skmWorkingSetEvictor';
 // native LRU bound decoded RAM and eliminates CACHE_SIZE_EXCEEDED. No-op unless
 // appConfig.skmPurgeableStackImages.enabled. See skmPurgeableStackImages.ts.
 import { initSkmPurgeableStackImages } from './skmPurgeableStackImages';
+import { initSkmWadoRsTranscodedLoader } from './skmWadoRsTranscodedLoader';
 // SKM 2026-10: read-only in-app telemetry (cache hit ratio, eviction, RAM, jank,
 // CACHE_SIZE_EXCEEDED) surfaced via the DevTools console — the measurement harness
 // SKM 2026-10-07 (Fix 5): adaptive, multi-tab-aware decoded-RAM governor — owns the
@@ -712,6 +713,15 @@ export default async function init({
   // the native LRU bounds decoded RAM and CACHE_SIZE_EXCEEDED stops. Default OFF.
   if (appConfig?.skmPurgeableStackImages?.enabled) {
     initSkmPurgeableStackImages();
+  }
+
+  // SKM 2026-10-09 (Priority 3E): MUST also run AFTER initWADOImageLoader, same reason -
+  // it wraps the stock wadouri/dicomweb loader to fetch the WADO-RS instance resource
+  // (transcoded to an uncompressed transfer syntax) instead of the original WADO-URI
+  // JPEG-Lossless bytes, falling back to stock behaviour on any error. Default OFF, not
+  // yet runtime-validated. See skmWadoRsTranscodedLoader.ts for the full design.
+  if (appConfig?.skmWadoRsTranscoding?.enabled) {
+    initSkmWadoRsTranscodedLoader(userAuthenticationService, appConfig, extensionManager);
   }
 
   // Add OHIF metadata providers after dicomImageLoader.init().

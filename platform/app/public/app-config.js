@@ -588,6 +588,26 @@ window.config = {
     enabled: true,
   },
 
+  // SKM 2026-10-09 (Priority 3E — skmWadoRsTranscoding): JPEG Lossless SV1
+  // (1.2.840.10008.1.2.4.70) client-side decode was proven (source + independent
+  // Playwright/CDP) to dominate fresh first-touch latency, with no faster compatible
+  // client-side decoder available. Independent QA separately proved this PACS's WADO-RS
+  // INSTANCE endpoint genuinely transcodes the same SOP to uncompressed Explicit VR LE
+  // (1.2.840.10008.1.2.1), pixel-identical — WADO-URI (imageRendering above) ignores the
+  // transferSyntax query parameter and always returns the original compressed bytes.
+  // When enabled, extensions/cornerstone/src/skmWadoRsTranscodedLoader.ts wraps the stock
+  // wadouri/dicomweb image loader to fetch that WADO-RS instance resource instead, with
+  // automatic per-image fallback to stock WADO-URI on any error. imageId format, metadata
+  // providers, UID extraction, cache keys, and prefetch bookkeeping are all unchanged.
+  // DEFAULT OFF — not yet runtime-validated. Enable ONLY on the validation workstation
+  // once independent Playwright QA is ready to verify it; do not enable in a deployed
+  // configuration before that validation passes.
+  // TO REVERT: enabled:false (or remove this block) — instant return to stock WADO-URI.
+  skmWadoRsTranscoding: {
+    enabled: false,
+    // transferSyntaxUID: '1.2.840.10008.1.2.1', // default; override only if QA validates another
+  },
+
   // SKM 2026-10-04 (Option B correction — skmActiveEviction): the REAL RAM bound.
   // CS3D 4.22.10 does NOT LRU-evict decoded images that belong to the active stack — it
   // THROWS CACHE_SIZE_EXCEEDED at the cap (observed: decode pinned at 768 MB, 0 evictions,
