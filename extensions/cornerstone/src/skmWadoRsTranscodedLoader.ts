@@ -182,6 +182,23 @@ export function initSkmWadoRsTranscodedLoader(
   }
   initialized = true;
 
+  if (appConfig?.skmPurgeableStackImages?.enabled) {
+    // Not a problem after the sharedCacheKey fix below (this module now clears it
+    // itself, on every image it resolves), but worth surfacing clearly: this
+    // module's registration for 'dicomweb'/'wadouri' runs AFTER
+    // skmPurgeableStackImages' and replaces it (registerImageLoader is
+    // last-registration-wins), so skmPurgeableStackImages' own wrapper becomes
+    // unreachable for those two schemes while this feature is on. Its effect is
+    // preserved (see makePurgeable below), just no longer via skmPurgeableStackImages
+    // itself.
+    // eslint-disable-next-line no-console
+    console.log(
+      '[SKM-WADO-RS-TRANSCODE] skmPurgeableStackImages is also enabled; this module ' +
+        "replaces its registration for 'dicomweb'/'wadouri' and independently applies " +
+        'the same sharedCacheKey fix to the images it resolves, so purgeability is preserved.'
+    );
+  }
+
   const targetTransferSyntaxUID: string =
     config.transferSyntaxUID || DEFAULT_TARGET_TRANSFER_SYNTAX_UID;
   const acceptHeader = `multipart/related; type="application/dicom"; transfer-syntax=${targetTransferSyntaxUID}`;
@@ -191,6 +208,13 @@ export function initSkmWadoRsTranscodedLoader(
     calls: 0,
     transcoded: 0,
     fallbacks: 0,
+    // Breakdown by WHEN the fallback happened - see taggedError's doc comment below.
+    // A fallbacksByStage.preNetwork count that tracks closely with observed
+    // still-on-WADO-URI traffic would confirm those requests never reach the RS
+    // endpoint at all (explaining why no failed-RS-request is visible for them);
+    // a high fallbacksByStage.network count would instead point to the RS endpoint
+    // itself rejecting/erroring on a subset of requests.
+    fallbacksByStage: { preNetwork: 0, network: 0, parse: 0, unknown: 0 },
     lastError: null as any,
   };
   (globalThis as any).__skmWadoRsTranscodeStats = stats;
@@ -222,16 +246,40 @@ export function initSkmWadoRsTranscodedLoader(
       }
     };
 
+    // `stage` on a thrown error distinguishes WHEN this failed, so
+    // window.__skmWadoRsTranscodeStats can tell apart:
+    //  - 'pre-network' : UID extraction or wadoRoot lookup failed BEFORE any request
+    //    to the RS endpoint was ever issued - from the network's point of view this
+    //    looks like a plain WADO-URI request with no preceding RS attempt at all, which
+    //    is consistent with independent QA's own observation of "no clear one-to-one
+    //    failed-RS-then-URI pattern" for the ~25-30% of requests still seen on WADO-URI.
+    //  - 'network'     : the RS fetch itself was issued and failed (bad status, network
+    //    error) - this WOULD show as a visible failed RS request followed by a URI one.
+    //  - 'parse'       : the RS fetch succeeded but the multipart response could not be
+    //    unwrapped (unexpected boundary/format).
+    // This is diagnostic instrumentation only; it does not change behavior.
+    const taggedError = (stage: 'pre-network' | 'network' | 'parse', message: string) => {
+      const error: any = new Error(message);
+      error.skmStage = stage;
+      return error;
+    };
+
     const fetchTranscodedInstance = async (imageId: string): Promise<ArrayBuffer> => {
       const uids = metadataProvider?.getUIDsFromImageID?.(imageId);
       const { StudyInstanceUID, SeriesInstanceUID, SOPInstanceUID } = uids || {};
       if (!StudyInstanceUID || !SeriesInstanceUID || !SOPInstanceUID) {
-        throw new Error('WADO-RS transcoding: could not resolve Study/Series/SOPInstanceUID from imageId');
+        throw taggedError(
+          'pre-network',
+          'WADO-RS transcoding: could not resolve Study/Series/SOPInstanceUID from imageId'
+        );
       }
 
       const wadoRoot = getWadoRoot();
       if (!wadoRoot) {
-        throw new Error('WADO-RS transcoding: active data source has no wadoRoot configured');
+        throw taggedError(
+          'pre-network',
+          'WADO-RS transcoding: active data source has no wadoRoot configured'
+        );
       }
 
       const instanceUrl =
@@ -248,13 +296,22 @@ export function initSkmWadoRsTranscodedLoader(
         /* best-effort auth header reuse; proceed unauthenticated if unavailable */
       }
 
-      const response = await fetch(instanceUrl, { headers });
+      let response: Response;
+      try {
+        response = await fetch(instanceUrl, { headers });
+      } catch (networkError: any) {
+        throw taggedError('network', `WADO-RS transcoding fetch threw: ${networkError?.message}`);
+      }
       if (!response.ok) {
-        throw new Error(`WADO-RS transcoding fetch failed: HTTP ${response.status}`);
+        throw taggedError('network', `WADO-RS transcoding fetch failed: HTTP ${response.status}`);
       }
       const contentType = response.headers.get('Content-Type') || '';
       const buffer = await response.arrayBuffer();
-      return extractFirstMultipartBody(contentType, buffer);
+      try {
+        return extractFirstMultipartBody(contentType, buffer);
+      } catch (parseError: any) {
+        throw taggedError('parse', `WADO-RS transcoding multipart parse failed: ${parseError?.message}`);
+      }
     };
 
     // dataSetCacheManager.load(uri, loadRequest, imageId) treats `uri` purely as an
@@ -273,15 +330,69 @@ export function initSkmWadoRsTranscodedLoader(
         })
         .catch(error => {
           stats.fallbacks++;
-          stats.lastError = { imageId, message: error?.message };
+          const stage = error?.skmStage;
+          if (stage === 'pre-network') {
+            stats.fallbacksByStage.preNetwork++;
+          } else if (stage === 'network') {
+            stats.fallbacksByStage.network++;
+          } else if (stage === 'parse') {
+            stats.fallbacksByStage.parse++;
+          } else {
+            stats.fallbacksByStage.unknown++;
+          }
+          stats.lastError = { imageId, stage, message: error?.message };
           // eslint-disable-next-line no-console
           console.warn(
             '[SKM-WADO-RS-TRANSCODE] falling back to stock WADO-URI fetch for',
             imageId,
+            `(stage: ${stage || 'unknown'})`,
             error
           );
           return (dicomImageLoader as any).internal.xhrRequest(uri, imageId);
         });
+    };
+
+    // SKM 2026-10-09 (Priority 3E fix-up, post-QA): the stock
+    // wadouri/loadImage.js's loadImageFromPromise/loadImageFromDataSet ALWAYS stamp
+    // image.sharedCacheKey = <dataset URL> on the resolved image. In this pinned
+    // @cornerstonejs/core@4.22.10, ANY cached image carrying a sharedCacheKey is
+    // treated as non-purgeable (isCacheable() excludes it, the native LRU skips it,
+    // _decacheImage() throws on it) - this is the exact, already-documented mechanism
+    // skmPurgeableStackImages.ts exists to work around. registerImageLoader is
+    // last-registration-wins, and this module registers for the SAME
+    // 'dicomweb'/'wadouri' schemes AFTER skmPurgeableStackImages (both run after
+    // initWADOImageLoader, in that order, in init.tsx) - so whenever this feature is
+    // enabled, it silently replaces skmPurgeableStackImages' registration, undoing its
+    // fix for every image this loader resolves, regardless of which internal branch
+    // produced it (the transcoded path, the already-cached fast path, or the
+    // parseImageId-failure fallback). Independent QA's measurement (2,728 cache
+    // additions vs 5 removals, cacheSizeExceeded climbing from 230 to 4,181 over ~130
+    // wheel ticks, JS heap still climbing past 3.3 GB) is exactly the symptom
+    // skmPurgeableStackImages' own header comment predicts for a cache full of
+    // non-purgeable shared-key images.
+    //
+    // Fix: make this module self-sufficient rather than dependent on registration
+    // order with skmPurgeableStackImages - clear sharedCacheKey on every image this
+    // loader resolves, on EVERY exit path, unconditionally. This restores purgeability
+    // regardless of whether skmPurgeableStackImages is independently enabled.
+    const makePurgeable = (imageLoadObject: any) => {
+      if (
+        imageLoadObject &&
+        imageLoadObject.promise &&
+        typeof imageLoadObject.promise.then === 'function'
+      ) {
+        imageLoadObject.promise = imageLoadObject.promise.then((image: any) => {
+          if (image) {
+            try {
+              image.sharedCacheKey = undefined;
+            } catch (e) {
+              /* non-fatal */
+            }
+          }
+          return image;
+        });
+      }
+      return imageLoadObject;
     };
 
     const wrappedLoadImage = (imageId: string, options: any) => {
@@ -289,13 +400,13 @@ export function initSkmWadoRsTranscodedLoader(
       try {
         parsedImageId = parseImageId(imageId);
       } catch (e) {
-        return originalLoadImage(imageId, options);
+        return makePurgeable(originalLoadImage(imageId, options));
       }
 
       if (dataSetCacheManager.isLoaded(parsedImageId.url)) {
         // Already cached under the existing key (by either path) - reuse unchanged,
         // exactly as the stock loader's own fast path does.
-        return originalLoadImage(imageId, options);
+        return makePurgeable(originalLoadImage(imageId, options));
       }
 
       const dataSetPromise = dataSetCacheManager.load(
@@ -303,18 +414,30 @@ export function initSkmWadoRsTranscodedLoader(
         transcodingLoadRequest,
         imageId
       );
-      return loadImageFromPromise(
-        dataSetPromise,
-        imageId,
-        parsedImageId.pixelDataFrame,
-        parsedImageId.url,
-        options
+      return makePurgeable(
+        loadImageFromPromise(
+          dataSetPromise,
+          imageId,
+          parsedImageId.pixelDataFrame,
+          parsedImageId.url,
+          options
+        )
       );
     };
 
     // Only the two schemes this app's DicomWebDataSource actually produces. 'dicomfile'
     // (local blob files, no study/series/instance UIDs) is deliberately excluded.
     ['dicomweb', 'wadouri'].forEach(scheme => registerImageLoader(scheme, wrappedLoadImage));
+
+    try {
+      (globalThis as any).skmGetWadoRsTranscodeStats = () => {
+        // eslint-disable-next-line no-console
+        console.log('[SKM-WADO-RS-TRANSCODE]', stats);
+        return stats;
+      };
+    } catch (e) {
+      /* best-effort */
+    }
 
     // eslint-disable-next-line no-console
     console.log(
