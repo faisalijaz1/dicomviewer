@@ -666,9 +666,28 @@ export function initSkmWarmer(
       warmerActiveGenerations: activeGenerationRunIds.size,
       warmerOverlappingGenerationEvents,
       currentRunId,
+      // SKM 2026-10-09 (Priority 3E routing investigation): count only (cheap), so
+      // external measurement (e.g. independent QA) can tell whether the warmer is
+      // active/sizeable without dumping the full set on every call. This warmer issues
+      // raw fetch() calls straight to the WADO-URI URL embedded in each imageId
+      // (urlFromImageId, above) - entirely outside cornerstone.imageLoader/
+      // registerImageLoader - specifically to prime the browser's plain HTTP cache
+      // ahead of need; it never decodes pixels and is not itself a "pixel-instance
+      // load". Those requests are indistinguishable from genuine pixel-instance
+      // WADO-URI requests at the network level, which is why a network-level count of
+      // "WADO-URI requests" does not equal the number of images actually decoded via
+      // the stock/WADO-URI path. See skmWarmerHasWarmed(imageId) to check a specific
+      // imageId.
+      warmedImageIdCount: warmedImageIds.size,
     };
     // eslint-disable-next-line no-console
     console.log('[SKM-WARMER] diagnostics:', result);
     return result;
   };
+
+  // SKM 2026-10-09 (Priority 3E routing investigation): O(1) lookup, added so a
+  // specific imageId/network request can be checked against the warmer's own
+  // byte-warmed set without serializing the whole (possibly thousands-of-entries) Set
+  // on every diagnostics call. Read-only; does not affect warmer behaviour.
+  (window as any).skmWarmerHasWarmed = (imageId: string): boolean => warmedImageIds.has(imageId);
 }
