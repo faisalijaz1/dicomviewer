@@ -531,7 +531,7 @@ window.config = {
     idleMinMB: 320,         // hard floor an idle tab can be squeezed to under ceiling pressure
     idleMaxCeilingFraction: 0.3, // idle tabs collectively ≤ 30% of the ceiling
     activeMinMB: 1024,      // minimum allocation for an active (scrolling) tab
-    workingSetFraction: 0.82, // decode window fills 82% of the per-tab cap (< 0.85 evict high-water)
+    workingSetFraction: 0.82, // decode window fills 82% of the per-tab cap (< 0.85 evict high-water). TEST-ONLY runtime override (does NOT change this default or the cache cap): window.skmSetWorkingSetFraction(0.45) / skmResetWorkingSetFraction() / skmGetWorkingSetFraction()
     aheadBias: 0.65,
     minWindowSlices: 300,
     maxWindowSlices: 8000,

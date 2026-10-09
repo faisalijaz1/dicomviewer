@@ -251,6 +251,12 @@ function budgetSnapshot(): Record<string, number | string> {
       budget_windowBehind: b.windowBehind ?? 0,
       budget_nearSkip: b.nearSkip ?? 0,
       budget_avgSliceKB: b.avgSliceBytes ? Math.round(b.avgSliceBytes / 1024) : 0,
+      // SKM 2026-10-09 (test-only): working-set fraction override (window A/B vs cache cap).
+      budget_workingSetFraction: b.workingSetFraction ?? 0,
+      budget_workingSetFractionDefault: b.workingSetFractionDefault ?? 0,
+      budget_workingSetFractionOverride:
+        b.workingSetFractionOverride == null ? 'none' : b.workingSetFractionOverride,
+      budget_workingSetFractionOverrideActive: b.workingSetFractionOverrideActive ? 1 : 0,
     };
   } catch (e) {
     return {};
