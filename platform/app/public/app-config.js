@@ -47,8 +47,8 @@ const dataSourceConfiguration = {
   // To retry wadors, swap the two 'wadors' lines back in below.
   // imageRendering: 'wadors',
   // thumbnailRendering: 'wadors',
-  imageRendering: 'wadouri',
-  thumbnailRendering: 'wadouri',
+  imageRendering: 'wadors',
+  thumbnailRendering: 'wadors',
   // Lazy series metadata: first series opens fast, rest load in background.
   // Pixel data (WADO-URI) is always loaded on-demand via Cornerstone prefetch.
   enableStudyLazyLoad: true,
