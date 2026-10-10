@@ -799,7 +799,8 @@ window.config = {
   // TO REVERT: set enabled:false (default), or delete the init call in init.tsx and
   // extensions/cornerstone/src/skmEvictionDiagnostics.ts.
   skmEvictionDiagnostics: {
-    enabled: false,
+    // TEMP (non-prod Playwright validation): enabled true; restore false after testing.
+    enabled: true,
     allowTestEviction: false,
     maxSnapshotAgeMs: 5000,
     maxRemovalHistory: 200,
