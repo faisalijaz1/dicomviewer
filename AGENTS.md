@@ -5,6 +5,14 @@ This file provides guidance to AI coding agents (Claude, Codex, and other LLM to
 ## Project Overview
 
 This is **OHIF** v3  (Open Health Imaging Foundation) - a medical imaging viewer. It's an extensible web imaging platform.
+
+### SKM hospital fork (memory / prefetch / WADO)
+
+- **Handover (read first for performance work):** `docs/CLAUDE_CLOUD_DICOM_VIEWER_WORK_HISTORY.md` — Executive Summary + Section 11 (stopping point).
+- **Agent skill:** `.cursor/skills/skm-dicom-viewer-handover/SKILL.md` (paths, rules, diagnostics).
+- **Deployed PACS/viewer:** `https://192.192.8.173` (self-signed TLS). **Backend WADO:** `D:\SKMPACS\pacs-services\pacs-dicom-service` (`WadoController.java`). Dev copies from `D:\SKMPACS`; rebuild `platform/app` before treating `app-config.js` as live.
+- **Versions:** OHIF 3.13.0-beta.82, `@cornerstonejs/*` 4.22.10. SKM logic stays in **`extensions/cornerstone`** + **`app-config.js`** (not Cornerstone core).
+
 ## Development Commands
 
 ### Main Development
