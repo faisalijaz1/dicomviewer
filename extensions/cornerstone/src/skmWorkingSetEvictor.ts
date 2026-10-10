@@ -474,8 +474,11 @@ export function initSkmWorkingSetEvictor(
       // from a pass merely running (see onPass above). No decision is made here.
       if (diagnosticHooks?.onEvict) {
         try {
+          // SKM 2026-10-10: same clock as age math in skmEvictionDiagnostics (nowMs /
+          // performance.now) — never Date.now(), which mixed clocks and produced
+          // huge negative ages while valid stayed true.
           diagnosticHooks.onEvict({
-            ts: Date.now(),
+            ts: nowMs(),
             center: currentActiveCenter(),
             removedThisBatch,
             totalEvicted: evictionCount,
@@ -656,8 +659,11 @@ export function initSkmWorkingSetEvictor(
       // is changed by this call; diagnosticHooks is undefined unless explicitly wired.
       if (diagnosticHooks?.onPass) {
         try {
+          // SKM 2026-10-10: same clock as age math in skmEvictionDiagnostics (nowMs /
+          // performance.now) — never Date.now(), which mixed clocks and produced
+          // huge negative ages while valid stayed true.
           diagnosticHooks.onPass({
-            ts: Date.now(),
+            ts: nowMs(),
             center: activeIdx,
             direction,
             keepLo: keepLo === Infinity ? 0 : keepLo,

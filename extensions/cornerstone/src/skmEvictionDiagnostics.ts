@@ -29,6 +29,11 @@
  *       the EXACT event + payload shape already verified in THIS pinned Cornerstone
  *       build by two other production files (see getImageIdFromCacheEvent below).
  *
+ *  CLOCK (2026-10-10 fix)
+ *  Snapshot timestamps and age math MUST share one clock (skmDiagNowMs / performance.now).
+ *  Mixing Date.now() stamps with performance.now() ages produced huge negative ages while
+ *  `valid` stayed true — never interpret a negative age as freshness.
+ *
  *  WHAT THIS DOES NOT DO
  *  Does not implement OPFS or any persistent decoded-pixel storage. Does not prove
  *  JS heap / process RAM / GPU reclamation — cache.getCacheSize() is an ACCOUNTING
@@ -48,7 +53,16 @@
 
 // eslint-disable-next-line
 import { cache, eventTarget, Enums } from '@cornerstonejs/core';
-import type { SkmEvictorDiagnosticHooks, SkmEvictorPassRecord, SkmEvictorEvictRecord } from './skmWorkingSetEvictor';
+import type {
+  SkmEvictorDiagnosticHooks,
+  SkmEvictorPassRecord,
+  SkmEvictorEvictRecord,
+} from './skmWorkingSetEvictor';
+import {
+  evaluateSnapshotAge,
+  evaluateTestEvictSafety,
+  skmDiagNowMs,
+} from './skmEvictionDiagnosticsClock';
 
 export type SkmEvictionDiagnosticsConfig = {
   /** Master gate. Default false — fully inert (no listeners, no globals, zero overhead). */
@@ -71,20 +85,23 @@ const HARD_MAX_LIST_COUNT = 500;
 
 let initialized = false;
 
-function nowMs(): number {
+function readCacheSizeBytes(): number {
   try {
-    return typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+    return (cache as any).getCacheSize?.() || 0;
   } catch (e) {
-    return Date.now();
+    return 0;
   }
 }
 
 function readCacheSizeMB(): number {
-  try {
-    return Math.round(((cache as any).getCacheSize?.() || 0) / 1048576);
-  } catch (e) {
-    return 0;
+  return Math.round(readCacheSizeBytes() / 1048576);
+}
+
+function roundAge(ageMs: number): number | null {
+  if (!Number.isFinite(ageMs)) {
+    return null;
   }
+  return Math.round(ageMs);
 }
 
 export function initSkmEvictionDiagnostics(
@@ -103,7 +120,10 @@ export function initSkmEvictionDiagnostics(
 
   const MAX_SNAPSHOT_AGE_MS = Math.max(500, config.maxSnapshotAgeMs ?? 5000);
   const MAX_REMOVAL_HISTORY = Math.min(2000, Math.max(10, config.maxRemovalHistory ?? 200));
-  const DEFAULT_LIST_COUNT = Math.min(HARD_MAX_LIST_COUNT, Math.max(1, config.maxProbeListCount ?? 50));
+  const DEFAULT_LIST_COUNT = Math.min(
+    HARD_MAX_LIST_COUNT,
+    Math.max(1, config.maxProbeListCount ?? 50)
+  );
   const allowTestEviction = config.allowTestEviction === true;
 
   // ── snapshot state (identifiers + numbers + a Set<string> of imageIds only — never a
@@ -112,16 +132,21 @@ export function initSkmEvictionDiagnostics(
   let lastEviction: SkmEvictorEvictRecord | null = null;
   let lastKeepSet: Set<string> = new Set();
 
-  const snapshotAgeMs = (): number => (currentPass ? nowMs() - currentPass.ts : Infinity);
-  const snapshotValid = (): boolean => currentPass != null && snapshotAgeMs() <= MAX_SNAPSHOT_AGE_MS;
+  const currentSnapshotAge = () =>
+    evaluateSnapshotAge(currentPass?.ts, skmDiagNowMs(), MAX_SNAPSHOT_AGE_MS);
 
   const publish = () => {
+    const currentAge = currentSnapshotAge();
+    const lastEvictAge = lastEviction
+      ? evaluateSnapshotAge(lastEviction.ts, skmDiagNowMs(), Number.POSITIVE_INFINITY)
+      : null;
     (globalThis as any).__skmEvictionDiagnostics = {
       current: currentPass
         ? {
             ts: currentPass.ts,
-            ageMs: Math.round(snapshotAgeMs()),
-            valid: snapshotValid(),
+            ageMs: roundAge(currentAge.ageMs),
+            valid: currentAge.valid,
+            validityReason: currentAge.reason,
             center: currentPass.center,
             direction: currentPass.direction,
             keepLo: currentPass.keepLo,
@@ -141,7 +166,7 @@ export function initSkmEvictionDiagnostics(
       lastEviction: lastEviction
         ? {
             ts: lastEviction.ts,
-            ageMs: Math.round(nowMs() - lastEviction.ts),
+            ageMs: roundAge(lastEvictAge!.ageMs),
             center: lastEviction.center,
             removedThisBatch: lastEviction.removedThisBatch,
             totalEvicted: lastEviction.totalEvicted,
@@ -149,6 +174,7 @@ export function initSkmEvictionDiagnostics(
           }
         : null,
       maxSnapshotAgeMs: MAX_SNAPSHOT_AGE_MS,
+      clock: 'performance.now',
     };
   };
   publish();
@@ -164,12 +190,15 @@ export function initSkmEvictionDiagnostics(
   };
 
   // ── read-only helpers — REUSE real production state, never a competing approximation ──
-  const getInflightSet = (): Set<string> => {
+  const getInflightSet = (): { known: boolean; set: Set<string> } => {
     try {
       const sp = servicesManager?.services?.studyPrefetcherService;
-      return typeof sp?.getInflightImageIds === 'function' ? sp.getInflightImageIds() : new Set<string>();
+      if (typeof sp?.getInflightImageIds !== 'function') {
+        return { known: false, set: new Set() };
+      }
+      return { known: true, set: sp.getInflightImageIds() };
     } catch (e) {
-      return new Set<string>();
+      return { known: false, set: new Set() };
     }
   };
 
@@ -178,21 +207,31 @@ export function initSkmEvictionDiagnostics(
     imageIds: string[];
     currentImageId: string | null;
   }> => {
-    const out: Array<{ viewportId: string; imageIds: string[]; currentImageId: string | null }> = [];
+    const out: Array<{ viewportId: string; imageIds: string[]; currentImageId: string | null }> =
+      [];
     try {
-      const { viewportGridService, cornerstoneViewportService: csvs } = servicesManager?.services || {};
+      const { viewportGridService, cornerstoneViewportService: csvs } =
+        servicesManager?.services || {};
       const viewports: Map<string, any> = viewportGridService?.getState?.()?.viewports;
       if (!viewports || typeof viewports.forEach !== 'function') {
         return out;
       }
       viewports.forEach((_vpState: any, viewportId: string) => {
         const vp = csvs?.getCornerstoneViewport?.(viewportId);
-        if (!vp || typeof vp.getCurrentImageIdIndex !== 'function' || typeof vp.getImageIds !== 'function') {
+        if (
+          !vp ||
+          typeof vp.getCurrentImageIdIndex !== 'function' ||
+          typeof vp.getImageIds !== 'function'
+        ) {
           return; // not a stack viewport (same check the evictor itself uses)
         }
         const imageIds: string[] = vp.getImageIds() || [];
         const idx = vp.getCurrentImageIdIndex?.() ?? -1;
-        out.push({ viewportId, imageIds, currentImageId: idx >= 0 ? imageIds[idx] ?? null : null });
+        out.push({
+          viewportId,
+          imageIds,
+          currentImageId: idx >= 0 ? imageIds[idx] ?? null : null,
+        });
       });
     } catch (e) {
       /* best-effort; diagnostics never breaks the viewer */
@@ -200,25 +239,30 @@ export function initSkmEvictionDiagnostics(
     return out;
   };
 
-  // Mirrors the evictor's own skipWhenVolumePresent check (same viewport-type read, not a
-  // different policy) so the test-only helper never evicts during an MPR/3D session either.
-  const anyVolumePresent = (): boolean => {
+  // Mirrors the evictor's own skipWhenVolumePresent check. Returns null when the check
+  // cannot be established reliably (test helper must refuse — never assume "safe").
+  const anyVolumePresent = (): boolean | null => {
     try {
-      const { viewportGridService, cornerstoneViewportService: csvs } = servicesManager?.services || {};
+      const { viewportGridService, cornerstoneViewportService: csvs } =
+        servicesManager?.services || {};
       const viewports: Map<string, any> = viewportGridService?.getState?.()?.viewports;
       if (!viewports || typeof viewports.forEach !== 'function') {
-        return false;
+        return null;
       }
       let found = false;
       viewports.forEach((_vpState: any, viewportId: string) => {
         const vp = csvs?.getCornerstoneViewport?.(viewportId);
-        if (vp && (vp.type === Enums.ViewportType.ORTHOGRAPHIC || vp.type === Enums.ViewportType.VOLUME_3D)) {
+        if (
+          vp &&
+          (vp.type === Enums.ViewportType.ORTHOGRAPHIC ||
+            vp.type === Enums.ViewportType.VOLUME_3D)
+        ) {
           found = true;
         }
       });
       return found;
     } catch (e) {
-      return false;
+      return null;
     }
   };
 
@@ -227,13 +271,19 @@ export function initSkmEvictionDiagnostics(
   // read. Never touches/returns the decoded pixel data or the ImageLoadObject itself.
   const getCacheEntryMeta = (
     imageId: string
-  ): { present: boolean; sizeInBytes: number | null; sharedCacheKey: string | null } => {
+  ): {
+    known: boolean;
+    present: boolean;
+    sizeInBytes: number | null;
+    sharedCacheKey: string | null;
+  } => {
     try {
       const ic = (cache as any)._imageCache;
       if (ic && typeof ic.get === 'function') {
         const ci = ic.get(imageId);
         if (ci) {
           return {
+            known: true,
             present: true,
             sizeInBytes: typeof ci.sizeInBytes === 'number' ? ci.sizeInBytes : null,
             sharedCacheKey: ci.sharedCacheKey || null,
@@ -249,44 +299,71 @@ export function initSkmEvictionDiagnostics(
         });
         if (found) {
           return {
+            known: true,
             present: true,
             sizeInBytes: typeof found.sizeInBytes === 'number' ? found.sizeInBytes : null,
             sharedCacheKey: found.sharedCacheKey || null,
           };
         }
       }
+      let present = false;
+      try {
+        present = !!(cache as any).getImageLoadObject?.(imageId);
+      } catch (e) {
+        return { known: false, present: false, sizeInBytes: null, sharedCacheKey: null };
+      }
+      return { known: true, present, sizeInBytes: null, sharedCacheKey: null };
     } catch (e) {
-      /* fall through to the public-API presence check below */
+      return { known: false, present: false, sizeInBytes: null, sharedCacheKey: null };
     }
-    let present = false;
-    try {
-      present = !!(cache as any).getImageLoadObject?.(imageId);
-    } catch (e) {
-      present = false;
-    }
-    return { present, sizeInBytes: null, sharedCacheKey: null };
   };
 
-  // ── window.skmProbeCacheEntry(imageId) — read-only (task 2) ───────────────────────────
+  const buildSafetyInput = (imageId: string) => {
+    const snapshot = currentSnapshotAge();
+    const inflight = getInflightSet();
+    const stackVps = getOpenStackViewports();
+    const meta = getCacheEntryMeta(imageId);
+    return {
+      imageId,
+      snapshot,
+      volumePresent: anyVolumePresent(),
+      inflightKnown: inflight.known,
+      inFlight: inflight.set.has(imageId),
+      keepSetKnown: currentPass != null && snapshot.valid,
+      inKeepSet: lastKeepSet.has(imageId),
+      stackViewportCount: stackVps.length,
+      isCurrentDisplayed: stackVps.some(v => v.currentImageId === imageId),
+      cachePresentKnown: meta.known,
+      cachePresent: meta.present,
+      meta,
+      stackVps,
+    };
+  };
+
+  // ── window.skmProbeCacheEntry(imageId) — read-only ───────────────────────────────────
   (window as any).skmProbeCacheEntry = (imageId: string) => {
     if (typeof imageId !== 'string' || !imageId) {
       // eslint-disable-next-line no-console
-      console.warn('[SKM-EVICT-DIAG] skmProbeCacheEntry(imageId) requires a non-empty string imageId');
+      console.warn(
+        '[SKM-EVICT-DIAG] skmProbeCacheEntry(imageId) requires a non-empty string imageId'
+      );
       return null;
     }
     const meta = getCacheEntryMeta(imageId);
     const stackVps = getOpenStackViewports();
+    const age = currentSnapshotAge();
     const result = {
       imageId,
       present: meta.present,
       accountedBytes: meta.sizeInBytes,
       sharedCacheKey: meta.sharedCacheKey,
-      inFlight: getInflightSet().has(imageId),
+      inFlight: getInflightSet().set.has(imageId),
       // null = no evictor pass observed yet in this session; otherwise exact membership
       // in the REAL production keep-set (keep-window ∪ in-flight) from the last pass.
       inKeepSet: currentPass ? lastKeepSet.has(imageId) : null,
-      keepSetSnapshotValid: snapshotValid(),
-      keepSetSnapshotAgeMs: Number.isFinite(snapshotAgeMs()) ? Math.round(snapshotAgeMs()) : null,
+      keepSetSnapshotValid: age.valid,
+      keepSetSnapshotAgeMs: roundAge(age.ageMs),
+      keepSetSnapshotValidityReason: age.reason,
       inAnyOpenViewportStack: stackVps.some(v => v.imageIds.includes(imageId)),
       isCurrentDisplayedImage: stackVps.some(v => v.currentImageId === imageId),
     };
@@ -295,9 +372,10 @@ export function initSkmEvictionDiagnostics(
     return result;
   };
 
-  // ── window.skmListCacheEntries(maxCount) — bounded listing (task 2) ──────────────────
+  // ── window.skmListCacheEntries(maxCount) — bounded listing ───────────────────────────
   (window as any).skmListCacheEntries = (maxCount?: number) => {
-    const requested = typeof maxCount === 'number' && maxCount > 0 ? maxCount : DEFAULT_LIST_COUNT;
+    const requested =
+      typeof maxCount === 'number' && maxCount > 0 ? maxCount : DEFAULT_LIST_COUNT;
     const limit = Math.max(1, Math.min(HARD_MAX_LIST_COUNT, requested));
     const entries: Array<{
       imageId: string;
@@ -309,7 +387,7 @@ export function initSkmEvictionDiagnostics(
     try {
       const ic = (cache as any)._imageCache;
       if (ic && typeof ic.forEach === 'function') {
-        const inflightSet = getInflightSet();
+        const inflightSet = getInflightSet().set;
         ic.forEach((ci: any, key: any) => {
           if (entries.length >= limit) {
             return;
@@ -344,13 +422,14 @@ export function initSkmEvictionDiagnostics(
 
   // ── window.skmGetEvictionDiagnostics() — the current/last-eviction snapshot ──────────
   (window as any).skmGetEvictionDiagnostics = () => {
+    publish(); // refresh age/valid from the shared clock before return
     const snap = (globalThis as any).__skmEvictionDiagnostics;
     // eslint-disable-next-line no-console
     console.log('[SKM-EVICT-DIAG]', snap);
     return snap;
   };
 
-  // ── bounded, identifiers-only cache-removal history (task 4) ─────────────────────────
+  // ── bounded, identifiers-only cache-removal history ─────────────────────────────────
   // SKM 2026-10-10: verified event + payload for pinned Cornerstone 4.22.10 BEFORE
   // subscribing — IMAGE_CACHE_IMAGE_REMOVED already fires reliably in THIS exact build and
   // is consumed in two other production files with this exact payload shape:
@@ -358,7 +437,6 @@ export function initSkmEvictionDiagnostics(
   //   extensions/cornerstone/src/Viewport/.../ViewportSliceProgressScrollbar/helpers.ts
   //     (getImageIdFromCacheEvent: detail.imageId || detail.image?.imageId ||
   //      detail.cachedImage?.imageId)
-  // Reusing that exact, already-verified shape rather than assuming a new one.
   const getImageIdFromCacheEvent = (event: any): string | undefined => {
     const detail = event?.detail;
     return detail?.imageId || detail?.image?.imageId || detail?.cachedImage?.imageId;
@@ -373,7 +451,12 @@ export function initSkmEvictionDiagnostics(
       }
       removalTotal++;
       // Identifiers + accounting metadata only — never the decoded pixel data.
-      removalHistory.push({ imageId, ts: Date.now(), cacheSizeMBAfter: readCacheSizeMB() });
+      // Same clock as snapshot stamps (skmDiagNowMs), not Date.now().
+      removalHistory.push({
+        imageId,
+        ts: skmDiagNowMs(),
+        cacheSizeMBAfter: readCacheSizeMB(),
+      });
       if (removalHistory.length > MAX_REMOVAL_HISTORY) {
         removalHistory.shift();
       }
@@ -382,21 +465,25 @@ export function initSkmEvictionDiagnostics(
     /* best-effort; event name/shape differs → history stays empty, nothing else breaks */
   }
   (window as any).skmGetCacheRemovalHistory = () => {
-    const result = { total: removalTotal, maxRetained: MAX_REMOVAL_HISTORY, entries: [...removalHistory] };
+    const result = {
+      total: removalTotal,
+      maxRetained: MAX_REMOVAL_HISTORY,
+      entries: [...removalHistory],
+    };
     // eslint-disable-next-line no-console
-    console.log(`[SKM-EVICT-DIAG] cache-removal history: ${result.entries.length}/${result.total} retained`);
+    console.log(
+      `[SKM-EVICT-DIAG] cache-removal history: ${result.entries.length}/${result.total} retained`
+    );
     return result;
   };
 
-  // ── OPTIONAL guarded test-only eviction helper (task 3) ───────────────────────────────
+  // ── OPTIONAL guarded test-only eviction helper ───────────────────────────────────────
   // Double-gated: appConfig.skmEvictionDiagnostics.enabled AND .allowTestEviction must
-  // BOTH be true. Refuses using the SAME real production state this module already reuses
-  // above (snapshot validity, in-flight set, keep-set, currently-displayed, volume-present)
-  // before calling the one real removal API (cache.removeImageLoadObject) — never a
-  // separate/duplicated eviction policy.
+  // BOTH be true. Refuses using production keep-set / in-flight / volume / display checks.
+  // Revalidates snapshot freshness AND candidate safety immediately before removal.
   if (allowTestEviction) {
     (window as any).skmTestEvictImageId = (imageId: string) => {
-      const before = readCacheSizeMB() * 1048576; // bytes, for a precise delta
+      const before = readCacheSizeBytes();
       const refuse = (reason: string) => ({
         action: 'refused' as const,
         reason,
@@ -405,32 +492,22 @@ export function initSkmEvictionDiagnostics(
         cacheBytesAfter: before,
         deltaBytes: 0,
       });
-      if (typeof imageId !== 'string' || !imageId) {
-        return refuse('invalid-image-id');
+
+      // First safety pass (also covers missing/invalid id).
+      const first = buildSafetyInput(imageId);
+      const firstGate = evaluateTestEvictSafety(first);
+      if (firstGate.action === 'refused') {
+        return refuse(firstGate.reason);
       }
-      if (!snapshotValid()) {
-        return refuse('stale-or-missing-evictor-snapshot');
+
+      // Revalidate IMMEDIATELY before removal — snapshot may have gone stale, or the
+      // doctor may have scrolled the candidate into the keep-set / display / in-flight.
+      const second = buildSafetyInput(imageId);
+      const secondGate = evaluateTestEvictSafety(second);
+      if (secondGate.action === 'refused') {
+        return refuse(secondGate.reason);
       }
-      if (anyVolumePresent()) {
-        return refuse('volume-present-skip'); // mirrors skmActiveEviction.skipWhenVolumePresent
-      }
-      if (getInflightSet().has(imageId)) {
-        return refuse('in-flight');
-      }
-      if (lastKeepSet.has(imageId)) {
-        return refuse('in-keep-set'); // real production keep-set (keep-window ∪ in-flight)
-      }
-      const stackVps = getOpenStackViewports();
-      if (stackVps.some(v => v.currentImageId === imageId)) {
-        return refuse('currently-displayed');
-      }
-      if (stackVps.length === 0) {
-        return refuse('no-open-stack-viewport');
-      }
-      const meta = getCacheEntryMeta(imageId);
-      if (!meta.present) {
-        return refuse('not-in-cache');
-      }
+
       try {
         (cache as any).removeImageLoadObject(imageId); // the SAME production removal call
       } catch (e) {
@@ -444,7 +521,7 @@ export function initSkmEvictionDiagnostics(
           deltaBytes: 0,
         };
       }
-      const after = readCacheSizeMB() * 1048576;
+      const after = readCacheSizeBytes();
       const result = {
         action: 'evicted' as const,
         imageId,
