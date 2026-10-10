@@ -675,16 +675,14 @@ window.config = {
     // workingSetFraction, cache caps, governor limits, prefetch concurrency, and
     // scheduler. Production budgetFraction (0.9) is unchanged and is used again the
     // instant this override is off.
-    // DEFAULT OFF — existing behaviour byte-for-byte when disabled.
-    // To activate Experiment A for the Testing Agent (office build):
-    //   testKeepWindowEnabled: true,
-    //   testKeepBudgetMB: 700,   // within the 500–800 MiB experimental band
-    // then rebuild:viewer and redeploy. Success ≠ stable alone: need ≥3 full
-    // forward/back traversals stable AND material reduction vs Stage 0 ~1.926 GB
-    // full-study plateau (report bytes/entries/pctOfBaseline/pctReduction via
-    // skmReportKeepVsCache()). Prefetch is NOT clamped here — if residency stays
-    // near full-study or a prefetch–evict–reload cycle appears, document and stop.
-    testKeepWindowEnabled: false,
+    // TEMP (dev Experiment A): enabled for office Testing Agent validation.
+    // REVERT after validation: testKeepWindowEnabled: false (testKeepBudgetMB may stay).
+    // When false, keep sizing uses production budgetFraction × cap unchanged.
+    // Success ≠ stable alone: need ≥3 full forward/back traversals stable AND
+    // material reduction vs Stage 0 ~1.926 GB (skmReportKeepVsCache()). Prefetch
+    // is NOT clamped — if residency stays near full-study or a prefetch–evict–
+    // reload cycle appears, document and stop (no silent retune).
+    testKeepWindowEnabled: true,
     testKeepBudgetMB: 700,
   },
 
