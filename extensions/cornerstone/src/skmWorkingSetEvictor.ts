@@ -134,6 +134,19 @@ export type SkmEvictionConfig = {
    * Ignored when testKeepWindowEnabled is false.
    */
   testKeepBudgetMB?: number;
+  /**
+   * SKM Experiment B (TEST-ONLY): when true AND testReactiveHighWater is a finite number in
+   * [0, 0.98], use that value as the effective reactive gate instead of production
+   * reactiveHighWater (0.85). Independent of Experiment A keep override, prefetch, caps,
+   * and workingSetFraction. Default false — production 0.85 path unchanged.
+   */
+  testReactiveHighWaterEnabled?: boolean;
+  /**
+   * SKM Experiment B (TEST-ONLY): effective reactive fill threshold when
+   * testReactiveHighWaterEnabled is true. Dev experiment value: 0.50. Ignored when the
+   * enable flag is false.
+   */
+  testReactiveHighWater?: number;
 };
 
 /**
@@ -177,6 +190,17 @@ export type SkmEvictorPassRecord = {
   cacheBytesOutsideKeep: number;
   /** Read-only: accounted bytes of entries inside the keep set. */
   cacheBytesInsideKeep: number;
+  /** Production reactiveHighWater from config (unchanged by Experiment B). */
+  configuredReactiveHighWater: number;
+  /** Effective threshold used for underPressure this pass. */
+  effectiveReactiveHighWater: number;
+  /** Experiment B: whether the test reactive-trigger override is active. */
+  testReactiveTriggerActive: boolean;
+  /** Why windowed eviction ran or was skipped this pass. */
+  reactivePathReason: string;
+  /** Decoded cache bytes / cap at pass time (accounting). */
+  cacheBytes: number;
+  cacheCapBytes: number;
 };
 
 /** SKM 2026-10-10 (diagnostics-only): published whenever a batch ACTUALLY removes ≥1
@@ -275,6 +299,20 @@ export function initSkmWorkingSetEvictor(
   const testKeepBudgetMB =
     testKeepWindowEnabled && testKeepBudgetMBRaw > 0 ? testKeepBudgetMBRaw : 0;
   const testKeepWindowActive = testKeepBudgetMB > 0;
+  // Experiment B (TEST-ONLY): independent reactive-trigger override. Default OFF.
+  const testReactiveHighWaterEnabled = config?.testReactiveHighWaterEnabled === true;
+  const testReactiveHighWaterRaw =
+    typeof config?.testReactiveHighWater === 'number' &&
+    Number.isFinite(config.testReactiveHighWater)
+      ? Math.min(0.98, Math.max(0, config.testReactiveHighWater))
+      : NaN;
+  const testReactiveTriggerActive =
+    testReactiveHighWaterEnabled && Number.isFinite(testReactiveHighWaterRaw);
+  // Production reactiveHighWater is preserved in `reactiveHighWater`; effective gate may
+  // temporarily use the test value when Experiment B is on.
+  const effectiveReactiveHighWater = testReactiveTriggerActive
+    ? (testReactiveHighWaterRaw as number)
+    : reactiveHighWater;
 
   // Measure average decoded bytes/slice from the live cache (adapts to real slice size);
   // fall back to the estimate before anything is decoded.
@@ -637,14 +675,15 @@ export function initSkmWorkingSetEvictor(
 
       // ── Fix 3 (REACTIVE gate) — gates ONLY windowed eviction, NOT orphan eviction ─────────
       // Windowed eviction (trimming the CURRENT series' working set) is a RAM-vs-smoothness
-      // tradeoff, so it runs only under real memory pressure (fill ≥ reactiveHighWater): a series
-      // that fits stays fully resident with zero churn. ORPHAN eviction (below) is pure waste
-      // reclamation and runs REGARDLESS of fill (Fix 3b correction), so switching series frees
-      // the old series immediately even with plenty of RAM free — critical on 16 GB/multi-tab.
+      // tradeoff, so it runs only under real memory pressure (fill ≥ effectiveReactiveHighWater):
+      // a series that fits stays fully resident with zero churn. ORPHAN eviction (below) is pure
+      // waste reclamation and runs REGARDLESS of fill (Fix 3b correction). Experiment B may
+      // temporarily lower the effective gate; production reactiveHighWater stays 0.85 in config.
       const capBytes = (cache as any).getMaxCacheSize?.() || 0;
       const curBytes = (cache as any).getCacheSize?.() || 0;
       const fill = capBytes > 0 ? curBytes / capBytes : 0;
-      const underPressure = reactiveHighWater <= 0 || fill >= reactiveHighWater;
+      const underPressure =
+        effectiveReactiveHighWater <= 0 || fill >= effectiveReactiveHighWater;
 
       // Collect decoded slices OUTSIDE the keep-set (windowed candidates), deduped — only under
       // memory pressure; otherwise the whole resident window is kept.
@@ -727,6 +766,22 @@ export function initSkmWorkingSetEvictor(
         /* best-effort diagnostics */
       }
 
+      // Why the reactive/windowed path ran or skipped (diagnostics only).
+      let reactivePathReason: string;
+      if (windowed.length > 0) {
+        reactivePathReason = 'windowed-eviction-queued';
+      } else if (orphans.length > 0) {
+        reactivePathReason = underPressure
+          ? 'orphan-eviction-queued'
+          : 'orphan-eviction-queued-below-reactive-gate';
+      } else if (!underPressure) {
+        reactivePathReason = `skipped-below-effective-reactive-high-water(fill=${Math.round(fill * 100)}%<${Math.round(effectiveReactiveHighWater * 100)}%)`;
+      } else {
+        reactivePathReason =
+          'under-pressure-but-no-candidates-outside-keep';
+      }
+      const reactiveSkip = !underPressure && !windowed.length && !orphans.length;
+
       // SKM 2026-10-10 (diagnostics-only, additive): publish a FRESH pass record — center,
       // keep bounds, fill, candidate counts — on EVERY pass attempt, BEFORE the branch
       // below. This is the exact fix for the diagnosed staleness: previously the
@@ -753,7 +808,7 @@ export function initSkmWorkingSetEvictor(
             underPressure,
             windowedCandidates: windowed.length,
             orphanCandidates: orphans.length,
-            reactiveSkip: !underPressure && !windowed.length && !orphans.length,
+            reactiveSkip,
             keepSet: new Set(keep),
             testKeepWindowActive,
             testKeepBudgetMB: testKeepWindowActive ? testKeepBudgetMB : null,
@@ -763,6 +818,12 @@ export function initSkmWorkingSetEvictor(
             cacheEntriesOutsideKeep,
             cacheBytesOutsideKeep,
             cacheBytesInsideKeep,
+            configuredReactiveHighWater: reactiveHighWater,
+            effectiveReactiveHighWater,
+            testReactiveTriggerActive,
+            reactivePathReason,
+            cacheBytes: curBytes,
+            cacheCapBytes: capBytes,
           });
         } catch (e) {
           /* diagnostics must never break eviction */
@@ -786,6 +847,12 @@ export function initSkmWorkingSetEvictor(
           decodedAfterMB: Math.round(curBytes / 1048576),
           removed: 0,
           totalEvicted: evictionCount,
+          configuredReactiveHighWater: reactiveHighWater,
+          effectiveReactiveHighWater,
+          testReactiveTriggerActive,
+          reactivePathReason,
+          cacheEntriesOutsideKeep,
+          cacheEntriesTotal,
         };
         return;
       }
@@ -875,10 +942,14 @@ export function initSkmWorkingSetEvictor(
       : `[SKM-EVICTOR] active, fixed window: keep ${keepBehind}+${keepAhead} (+${margin}) slices`) +
       ` | Fix 2: idle-batched, batchCap ${maxEvictPerTick}, inputQuiet ${inputQuietMs}ms, ` +
       `abortMove ${abortMoveThreshold}, idleTimeout ${idleTimeoutMs}ms` +
-      ` | Fix 3: reactive, evict only when fill ≥ ${Math.round(reactiveHighWater * 100)}% of cap` +
+      ` | Fix 3: reactive, configured ≥ ${Math.round(reactiveHighWater * 100)}%` +
+      `, effective ≥ ${Math.round(effectiveReactiveHighWater * 100)}% of cap` +
       ` | Fix 3c: self-tick ${tickMs}ms (orphan reclaim without scroll)` +
       (testKeepWindowActive
         ? ` | Experiment A TEST keep override ON: ${testKeepBudgetMB} MB (production budgetFraction ${budgetFraction} unused for keep sizing while on)`
-        : ' | Experiment A TEST keep override OFF (production keep sizing)')
+        : ' | Experiment A TEST keep override OFF (production keep sizing)') +
+      (testReactiveTriggerActive
+        ? ` | Experiment B TEST reactive trigger ON: effective ${effectiveReactiveHighWater} (production configured ${reactiveHighWater})`
+        : ' | Experiment B TEST reactive trigger OFF (production 0.85 path)')
   );
 }

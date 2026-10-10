@@ -169,6 +169,12 @@ export function initSkmEvictionDiagnostics(
             cacheEntriesOutsideKeep: currentPass.cacheEntriesOutsideKeep,
             cacheBytesOutsideKeep: currentPass.cacheBytesOutsideKeep,
             cacheBytesInsideKeep: currentPass.cacheBytesInsideKeep,
+            configuredReactiveHighWater: currentPass.configuredReactiveHighWater,
+            effectiveReactiveHighWater: currentPass.effectiveReactiveHighWater,
+            testReactiveTriggerActive: currentPass.testReactiveTriggerActive,
+            reactivePathReason: currentPass.reactivePathReason,
+            cacheBytes: currentPass.cacheBytes,
+            cacheCapBytes: currentPass.cacheCapBytes,
           }
         : null,
       // Distinct from `current`: the last pass that ACTUALLY removed ≥1 decoded image.
@@ -472,11 +478,20 @@ export function initSkmEvictionDiagnostics(
       total > 0 &&
       outside / total > 0.15 &&
       cur?.reactiveSkip === true;
+    const removedTotal = (globalThis as any).__skmEvictions || 0;
+    const lastEvict = (globalThis as any).__skmEvictionDiagnostics?.lastEviction;
     const result = {
       testKeepWindowActive: cur?.testKeepWindowActive ?? false,
       testKeepBudgetMB: cur?.testKeepBudgetMB ?? null,
       effectiveKeepBudgetBytes: cur?.effectiveKeepBudgetBytes ?? null,
       productionBudgetFraction: cur?.productionBudgetFraction ?? null,
+      configuredReactiveHighWater: cur?.configuredReactiveHighWater ?? null,
+      effectiveReactiveHighWater: cur?.effectiveReactiveHighWater ?? null,
+      testReactiveTriggerActive: cur?.testReactiveTriggerActive ?? false,
+      reactivePathReason: cur?.reactivePathReason ?? null,
+      underPressure: cur?.underPressure ?? null,
+      reactiveSkip: cur?.reactiveSkip ?? null,
+      fillPct: cur?.fillPct ?? null,
       keepLo: cur?.keepLo ?? null,
       keepHi: cur?.keepHi ?? null,
       protectedCount: cur?.protectedCount ?? null,
@@ -485,6 +500,11 @@ export function initSkmEvictionDiagnostics(
       cacheBytesOutsideKeep: cur?.cacheBytesOutsideKeep ?? null,
       cacheBytesInsideKeep: cur?.cacheBytesInsideKeep ?? null,
       cacheBytesNow,
+      cacheCapBytes: cur?.cacheCapBytes ?? null,
+      windowedCandidates: cur?.windowedCandidates ?? null,
+      orphanCandidates: cur?.orphanCandidates ?? null,
+      totalEvictions: removedTotal,
+      lastEviction: lastEvict,
       fullStudyBaselineBytes: baseline,
       pctOfFullStudy: pctOfFullStudy != null ? Math.round(pctOfFullStudy * 10) / 10 : null,
       pctReduction: pctReduction != null ? Math.round(pctReduction * 10) / 10 : null,
@@ -495,8 +515,8 @@ export function initSkmEvictionDiagnostics(
       likelyPrefetchBeyondKeep,
       prefetchCycleNote: likelyPrefetchBeyondKeep
         ? 'Many cache entries lie outside the test keep while reactiveSkip — prefetch may still ' +
-          'decode beyond the keep. Experiment A does not change prefetch; if churn appears under ' +
-          'a later trigger experiment, document and stop (no silent retune).'
+          'decode beyond the keep. If high reDecodes accompany windowed removals, treat as ' +
+          'prefetch–evict–reload evidence: document and STOP (no silent retune).'
         : null,
     };
     // eslint-disable-next-line no-console

@@ -684,6 +684,17 @@ window.config = {
     // reload cycle appears, document and stop (no silent retune).
     testKeepWindowEnabled: true,
     testKeepBudgetMB: 700,
+    // ── Experiment B (TEST-ONLY reactive-trigger override) ────────────────────
+    // When testReactiveHighWaterEnabled:true, windowed eviction uses
+    // testReactiveHighWater instead of production reactiveHighWater (0.85).
+    // Independent of Experiment A; does NOT change prefetch, caps, governor,
+    // workingSetFraction, or production reactiveHighWater when disabled.
+    // Source default is OFF; TEMP for this controlled follow-up (A keep 700 +
+    // trigger 0.50). REVERT after validation:
+    //   testReactiveHighWaterEnabled: false
+    // (leave reactiveHighWater: 0.85 unchanged).
+    testReactiveHighWaterEnabled: true,
+    testReactiveHighWater: 0.5,
   },
 
   // SKM 2026-10-03 (W3 "indicator" warmer): background-download the ACTIVE series
