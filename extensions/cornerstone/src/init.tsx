@@ -40,6 +40,10 @@ import { initSkmWarmer } from './skmBackgroundWarmer';
 // purges decoded slices outside a window around the doctor to bound RAM and prevent the
 // throw. Stack-only, skips MPR/volume. No-op unless appConfig.skmActiveEviction.enabled.
 import { initSkmWorkingSetEvictor } from './skmWorkingSetEvictor';
+// SKM 2026-10-10: READ-ONLY eviction/cache-reclamation diagnostics (probes, bounded
+// cache-removal history, optional guarded test-only eviction helper). No-op unless
+// appConfig.skmEvictionDiagnostics.enabled. See skmEvictionDiagnostics.ts.
+import { initSkmEvictionDiagnostics } from './skmEvictionDiagnostics';
 // SKM 2026-10-04 (Phase A): make WADO-URI stack images purgeable by clearing the loader's
 // legacy per-URL sharedCacheKey (which CS3D 4.22.10 treats as non-evictable). Lets the
 // native LRU bound decoded RAM and eliminates CACHE_SIZE_EXCEEDED. No-op unless
@@ -778,12 +782,22 @@ export default async function init({
     initSkmWarmer(servicesManager, extensionManager, appConfig.skmWarmer);
   }
 
+  // SKM 2026-10-10: READ-ONLY eviction/cache diagnostics. Returns `undefined` (no-op)
+  // unless appConfig.skmEvictionDiagnostics.enabled — in which case initSkmWorkingSetEvictor
+  // below receives optional hooks that let it publish a fresh pass/eviction snapshot. The
+  // evictor's own eviction decisions, thresholds, and scheduling are IDENTICAL either way.
+  const skmEvictionDiagnosticsHooks = initSkmEvictionDiagnostics(
+    servicesManager,
+    appConfig,
+    (appConfig as any)?.skmEvictionDiagnostics || {}
+  );
+
   // SKM 2026-10-04 (Option B correction): start the active working-set evictor. It keeps
   // decoded RAM ≈ a window around the doctor and prevents CACHE_SIZE_EXCEEDED on big
   // single-series stacks (CS3D 4.22.10 won't evict active-stack images itself). Skips
   // MPR/volume sessions entirely. No-op when the flag is off.
   if (appConfig?.skmActiveEviction?.enabled !== false) {
-    initSkmWorkingSetEvictor(servicesManager, appConfig.skmActiveEviction || {});
+    initSkmWorkingSetEvictor(servicesManager, appConfig.skmActiveEviction || {}, skmEvictionDiagnosticsHooks);
   }
 
   // SKM 2026-10: in-app telemetry harness (read-only). Enable during the validation

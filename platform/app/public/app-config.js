@@ -769,6 +769,43 @@ window.config = {
     enabled: true,
   },
 
+  // SKM 2026-10-10: READ-ONLY eviction / cache-reclamation diagnostics (see
+  // skmEvictionDiagnostics.ts). Changes NO eviction decision, threshold, scheduling,
+  // decoding, rendering, or memory budget at any setting below — purely additive
+  // console/global instrumentation. Independent of every other skm* flag; disabling it
+  // leaves skmActiveEviction/skmMemoryBudget/skmWarmer/skmPrefetchConcurrency byte-for-byte
+  // unchanged (initSkmWorkingSetEvictor receives `undefined` hooks when `enabled:false`).
+  //   enabled           : master gate. false (default) = fully inert — no listeners, no
+  //                       globals, zero overhead.
+  //   allowTestEviction : SEPARATE explicit opt-in (both must be true) for the guarded
+  //                       test-only skmTestEvictImageId(imageId) helper, which refuses
+  //                       using the real production keep-set/in-flight/volume checks
+  //                       before calling the one real cache.removeImageLoadObject() API.
+  //                       NEVER set true in a production deployment. Default false.
+  //   maxSnapshotAgeMs  : a pass snapshot older than this is reported invalid for any
+  //                       safety decision (skmGetEvictionDiagnostics().current.valid /
+  //                       skmProbeCacheEntry()'s keepSetSnapshotValid). Default 5000.
+  //   maxRemovalHistory : bounded ring buffer size for the IMAGE_CACHE_IMAGE_REMOVED
+  //                       history (identifiers + accounting metadata only, never pixel
+  //                       data). Default 200.
+  //   maxProbeListCount : default cap for skmListCacheEntries() when no count is passed;
+  //                       a hard ceiling (500) is enforced in code regardless. Default 50.
+  // Console API (DevTools, no PowerShell/host scripting):
+  //   skmProbeCacheEntry(imageId)       → membership/accounting/keep-set/in-flight probe
+  //   skmListCacheEntries(maxCount)     → bounded listing of cached entries
+  //   skmGetEvictionDiagnostics()       → current pass snapshot + last real eviction
+  //   skmGetCacheRemovalHistory()       → bounded removal event history
+  //   skmTestEvictImageId(imageId)      → TEST-ONLY (requires allowTestEviction:true)
+  // TO REVERT: set enabled:false (default), or delete the init call in init.tsx and
+  // extensions/cornerstone/src/skmEvictionDiagnostics.ts.
+  skmEvictionDiagnostics: {
+    enabled: false,
+    allowTestEviction: false,
+    maxSnapshotAgeMs: 5000,
+    maxRemovalHistory: 200,
+    maxProbeListCount: 50,
+  },
+
   showStudyList: true,
   showLoadingIndicator: true,
   showWarningMessageForCrossOrigin: false,

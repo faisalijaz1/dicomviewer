@@ -122,6 +122,53 @@ export type SkmEvictionConfig = {
   tickMs?: number;
 };
 
+/**
+ * SKM 2026-10-10 (diagnostics-only, additive): a read-only record of what ONE evictor
+ * pass attempt computed, published on EVERY pass — including a reactive-skip (nothing
+ * evicted because the series fits under the high-water mark) — so a diagnostics
+ * consumer never sees a stale center/keep-window left over from a PREVIOUS pass.
+ * `keepSet` is a fresh clone (imageId strings only — never pixel data or image objects)
+ * of the exact Set the real eviction decision uses this pass (keep-window ∪ in-flight).
+ * Pure data; carries no behaviour and cannot be used to change any decision here.
+ */
+export type SkmEvictorPassRecord = {
+  ts: number;
+  center: number;
+  direction: number;
+  keepLo: number;
+  keepHi: number;
+  keepAhead: number;
+  keepBehind: number;
+  stackViewports: number;
+  protectedCount: number;
+  fillPct: number;
+  underPressure: boolean;
+  windowedCandidates: number;
+  orphanCandidates: number;
+  reactiveSkip: boolean;
+  keepSet: Set<string>;
+};
+
+/** SKM 2026-10-10 (diagnostics-only): published whenever a batch ACTUALLY removes ≥1
+ * decoded image — distinct from SkmEvictorPassRecord so "last real eviction" can be told
+ * apart from "most recent pass attempt" (a pass can run and evict nothing). */
+export type SkmEvictorEvictRecord = {
+  ts: number;
+  center: number;
+  removedThisBatch: number;
+  totalEvicted: number;
+  pass: number;
+};
+
+/** SKM 2026-10-10 (diagnostics-only): optional hooks a diagnostics module can supply to
+ * observe the evictor's own pass/evict data. Both are no-ops when undefined (default) —
+ * this file's eviction decisions, thresholds, and scheduling are IDENTICAL whether or not
+ * any hook is supplied. */
+export type SkmEvictorDiagnosticHooks = {
+  onPass?: (record: SkmEvictorPassRecord) => void;
+  onEvict?: (record: SkmEvictorEvictRecord) => void;
+};
+
 let evictorInitialized = false;
 let evictionCount = 0; // total removeImageLoadObject() calls (window.__skmEvictions)
 let lastCenter: number | null = null;
@@ -158,7 +205,14 @@ function scheduleIdle(fn: () => void, timeoutMs: number): void {
   setTimeout(fn, 16);
 }
 
-export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvictionConfig): void {
+export function initSkmWorkingSetEvictor(
+  servicesManager: any,
+  config: SkmEvictionConfig,
+  // SKM 2026-10-10 (diagnostics-only, additive): optional, defaults to undefined so
+  // behaviour is byte-for-byte unchanged for every existing caller. See
+  // SkmEvictorDiagnosticHooks above and skmEvictionDiagnostics.ts.
+  diagnosticHooks?: SkmEvictorDiagnosticHooks
+): void {
   if (evictorInitialized) {
     return;
   }
@@ -415,6 +469,22 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
         recentBatches.shift();
       }
       (globalThis as any).__skmEvictorBatches = recentBatches;
+
+      // SKM 2026-10-10 (diagnostics-only, additive): a REAL eviction happened — distinct
+      // from a pass merely running (see onPass above). No decision is made here.
+      if (diagnosticHooks?.onEvict) {
+        try {
+          diagnosticHooks.onEvict({
+            ts: Date.now(),
+            center: currentActiveCenter(),
+            removedThisBatch,
+            totalEvicted: evictionCount,
+            pass: passSeq,
+          });
+        } catch (e) {
+          /* diagnostics must never break eviction */
+        }
+      }
     }
 
     // Publish incrementally so telemetry can read progress mid-pass.
@@ -575,6 +645,37 @@ export function initSkmWorkingSetEvictor(servicesManager: any, config: SkmEvicti
         }
       } catch (e) {
         /* cache map shape differs → no orphan sweep (windowed eviction still runs) */
+      }
+
+      // SKM 2026-10-10 (diagnostics-only, additive): publish a FRESH pass record — center,
+      // keep bounds, fill, candidate counts — on EVERY pass attempt, BEFORE the branch
+      // below. This is the exact fix for the diagnosed staleness: previously the
+      // reactive-skip early-return only patched a few fields onto the PREVIOUS pass's
+      // __skmEvictorLast, leaving its center/keepLo/keepHi stale while this pass's own
+      // (already-computed, just below) values were discarded. No eviction decision below
+      // is changed by this call; diagnosticHooks is undefined unless explicitly wired.
+      if (diagnosticHooks?.onPass) {
+        try {
+          diagnosticHooks.onPass({
+            ts: Date.now(),
+            center: activeIdx,
+            direction,
+            keepLo: keepLo === Infinity ? 0 : keepLo,
+            keepHi: keepHi === -Infinity ? 0 : keepHi,
+            keepAhead: keepAheadN,
+            keepBehind: keepBehindN,
+            stackViewports: stackVps.length,
+            protectedCount: keep.size,
+            fillPct: Math.round(fill * 100),
+            underPressure,
+            windowedCandidates: windowed.length,
+            orphanCandidates: orphans.length,
+            reactiveSkip: !underPressure && !windowed.length && !orphans.length,
+            keepSet: new Set(keep),
+          });
+        } catch (e) {
+          /* diagnostics must never break eviction */
+        }
       }
 
       // Nothing to reclaim this pass (no orphans, and either not under pressure or the window is
