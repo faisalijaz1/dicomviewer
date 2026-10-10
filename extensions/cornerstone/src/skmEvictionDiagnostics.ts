@@ -160,6 +160,15 @@ export function initSkmEvictionDiagnostics(
             windowedCandidates: currentPass.windowedCandidates,
             orphanCandidates: currentPass.orphanCandidates,
             reactiveSkip: currentPass.reactiveSkip,
+            // Experiment A — keep vs residency (identifiers/bytes only)
+            testKeepWindowActive: currentPass.testKeepWindowActive,
+            testKeepBudgetMB: currentPass.testKeepBudgetMB,
+            effectiveKeepBudgetBytes: currentPass.effectiveKeepBudgetBytes,
+            productionBudgetFraction: currentPass.productionBudgetFraction,
+            cacheEntriesTotal: currentPass.cacheEntriesTotal,
+            cacheEntriesOutsideKeep: currentPass.cacheEntriesOutsideKeep,
+            cacheBytesOutsideKeep: currentPass.cacheBytesOutsideKeep,
+            cacheBytesInsideKeep: currentPass.cacheBytesInsideKeep,
           }
         : null,
       // Distinct from `current`: the last pass that ACTUALLY removed ≥1 decoded image.
@@ -429,6 +438,72 @@ export function initSkmEvictionDiagnostics(
     return snap;
   };
 
+  // ── window.skmReportKeepVsCache(fullStudyBaselineBytes?) — Experiment A residency report ─
+  // Compares effective keep window with live decoded-cache residency. Success for
+  // bounded-window optimization requires BOTH stability (≥3 traversals — measured by the
+  // Testing Agent) AND material reduction vs Stage 0 full-study baseline (~1.926 GB).
+  // A stable full-study plateau is "stable residency only", not bounded-window success.
+  (window as any).skmReportKeepVsCache = (fullStudyBaselineBytes?: number) => {
+    publish();
+    const cur = (globalThis as any).__skmEvictionDiagnostics?.current;
+    let cacheBytesNow = 0;
+    try {
+      cacheBytesNow = (cache as any).getCacheSize?.() || 0;
+    } catch (e) {
+      cacheBytesNow = 0;
+    }
+    const baseline =
+      typeof fullStudyBaselineBytes === 'number' && fullStudyBaselineBytes > 0
+        ? fullStudyBaselineBytes
+        : 1.926 * 1024 * 1024 * 1024; // Stage 0 accepted ~1.926 GB full-study plateau
+    const plateauBytes = cacheBytesNow;
+    const pctOfFullStudy = baseline > 0 ? (100 * plateauBytes) / baseline : null;
+    const pctReduction = baseline > 0 ? 100 - (pctOfFullStudy as number) : null;
+    // Heuristic cycle signal (document only — Experiment A does not retune prefetch):
+    // many decoded entries outside keep while reactiveSkip and underPressure false suggests
+    // prefetch is filling beyond the test keep; if later A+B causes high reDecodes + removals,
+    // that is prefetch–evict–reload evidence → stop, do not silently retune.
+    const outside = cur?.cacheEntriesOutsideKeep ?? null;
+    const total = cur?.cacheEntriesTotal ?? null;
+    const likelyPrefetchBeyondKeep =
+      !!cur?.testKeepWindowActive &&
+      typeof outside === 'number' &&
+      typeof total === 'number' &&
+      total > 0 &&
+      outside / total > 0.15 &&
+      cur?.reactiveSkip === true;
+    const result = {
+      testKeepWindowActive: cur?.testKeepWindowActive ?? false,
+      testKeepBudgetMB: cur?.testKeepBudgetMB ?? null,
+      effectiveKeepBudgetBytes: cur?.effectiveKeepBudgetBytes ?? null,
+      productionBudgetFraction: cur?.productionBudgetFraction ?? null,
+      keepLo: cur?.keepLo ?? null,
+      keepHi: cur?.keepHi ?? null,
+      protectedCount: cur?.protectedCount ?? null,
+      cacheEntriesTotal: total,
+      cacheEntriesOutsideKeep: outside,
+      cacheBytesOutsideKeep: cur?.cacheBytesOutsideKeep ?? null,
+      cacheBytesInsideKeep: cur?.cacheBytesInsideKeep ?? null,
+      cacheBytesNow,
+      fullStudyBaselineBytes: baseline,
+      pctOfFullStudy: pctOfFullStudy != null ? Math.round(pctOfFullStudy * 10) / 10 : null,
+      pctReduction: pctReduction != null ? Math.round(pctReduction * 10) / 10 : null,
+      classificationNote:
+        'Bounded-window SUCCESS requires stable residency over ≥3 full forward/back traversals ' +
+        'AND material reduction vs fullStudyBaselineBytes. Stable ≈ full-study plateau = ' +
+        '"stable residency only", not bounded-window success.',
+      likelyPrefetchBeyondKeep,
+      prefetchCycleNote: likelyPrefetchBeyondKeep
+        ? 'Many cache entries lie outside the test keep while reactiveSkip — prefetch may still ' +
+          'decode beyond the keep. Experiment A does not change prefetch; if churn appears under ' +
+          'a later trigger experiment, document and stop (no silent retune).'
+        : null,
+    };
+    // eslint-disable-next-line no-console
+    console.log('[SKM-EVICT-DIAG] keep vs cache', result);
+    return result;
+  };
+
   // ── bounded, identifiers-only cache-removal history ─────────────────────────────────
   // SKM 2026-10-10: verified event + payload for pinned Cornerstone 4.22.10 BEFORE
   // subscribing — IMAGE_CACHE_IMAGE_REMOVED already fires reliably in THIS exact build and
@@ -547,7 +622,7 @@ export function initSkmEvictionDiagnostics(
   console.log(
     '[SKM-EVICT-DIAG] active (diagnostic-only; no eviction/threshold/scheduling change) — ' +
       'skmProbeCacheEntry(imageId), skmListCacheEntries(maxCount), skmGetEvictionDiagnostics(), ' +
-      'skmGetCacheRemovalHistory()' +
+      'skmGetCacheRemovalHistory(), skmReportKeepVsCache(fullStudyBaselineBytes?)' +
       (allowTestEviction ? ', skmTestEvictImageId(imageId) [TEST-ONLY]' : '')
   );
 

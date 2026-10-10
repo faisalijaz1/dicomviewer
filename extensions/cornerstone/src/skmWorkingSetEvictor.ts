@@ -120,6 +120,20 @@ export type SkmEvictionConfig = {
    * cheaply while under the high-water). Default 750. Set 0 to disable.
    */
   tickMs?: number;
+  /**
+   * SKM Experiment A (TEST-ONLY): when true AND testKeepBudgetMB > 0, size the protected
+   * keep window from testKeepBudgetMB bytes instead of production
+   * (budgetFraction × maxCacheSize). Does NOT change reactiveHighWater, workingSetFraction,
+   * cache caps, prefetch, or the production budgetFraction value used when this is false.
+   * Default false — production path unchanged.
+   */
+  testKeepWindowEnabled?: boolean;
+  /**
+   * SKM Experiment A (TEST-ONLY): keep-window byte budget in MiB when testKeepWindowEnabled.
+   * Recommended Experiment A value: 700 (within the 500–800 MiB experimental band).
+   * Ignored when testKeepWindowEnabled is false.
+   */
+  testKeepBudgetMB?: number;
 };
 
 /**
@@ -147,6 +161,22 @@ export type SkmEvictorPassRecord = {
   orphanCandidates: number;
   reactiveSkip: boolean;
   keepSet: Set<string>;
+  /** Experiment A: whether the test-only keep budget override is active this pass. */
+  testKeepWindowActive: boolean;
+  /** Experiment A: configured test budget MiB (null when override off). */
+  testKeepBudgetMB: number | null;
+  /** Effective keep budget bytes used for this pass's window sizing. */
+  effectiveKeepBudgetBytes: number;
+  /** Production budgetFraction (unchanged); used when override is off. */
+  productionBudgetFraction: number;
+  /** Read-only: decoded cache entry count at pass time. */
+  cacheEntriesTotal: number;
+  /** Read-only: decoded entries whose imageId is NOT in the keep set. */
+  cacheEntriesOutsideKeep: number;
+  /** Read-only: accounted bytes of those outside-keep entries. */
+  cacheBytesOutsideKeep: number;
+  /** Read-only: accounted bytes of entries inside the keep set. */
+  cacheBytesInsideKeep: number;
 };
 
 /** SKM 2026-10-10 (diagnostics-only): published whenever a batch ACTUALLY removes ≥1
@@ -236,6 +266,15 @@ export function initSkmWorkingSetEvictor(
   const tickMs = Math.max(0, config?.tickMs ?? 750);
   const inputQuietMs = Math.max(0, config?.inputQuietMs ?? 120);
   const abortMoveThreshold = Math.max(1, config?.abortMoveThreshold ?? 100);
+  // Experiment A (TEST-ONLY): independent keep-budget override. Default OFF.
+  const testKeepWindowEnabled = config?.testKeepWindowEnabled === true;
+  const testKeepBudgetMBRaw =
+    typeof config?.testKeepBudgetMB === 'number' && Number.isFinite(config.testKeepBudgetMB)
+      ? config.testKeepBudgetMB
+      : 0;
+  const testKeepBudgetMB =
+    testKeepWindowEnabled && testKeepBudgetMBRaw > 0 ? testKeepBudgetMBRaw : 0;
+  const testKeepWindowActive = testKeepBudgetMB > 0;
 
   // Measure average decoded bytes/slice from the live cache (adapts to real slice size);
   // fall back to the estimate before anything is decoded.
@@ -260,9 +299,20 @@ export function initSkmWorkingSetEvictor(
     return avgSliceBytesEstimate;
   };
 
+  // Effective keep-budget bytes for THIS pass. Production: budgetFraction × cap.
+  // Experiment A (testKeepWindowActive): testKeepBudgetMB × 1 MiB only — does not mutate
+  // budgetFraction, reactiveHighWater, caps, or prefetch.
+  const effectiveKeepBudgetBytes = (): number => {
+    if (testKeepWindowActive) {
+      return testKeepBudgetMB * 1048576;
+    }
+    const capBytes = (cache as any).getMaxCacheSize?.() || 768 * 1048576;
+    return budgetFraction * capBytes;
+  };
+
   // Budget-based per-viewport keep (slices), split ahead/behind by scroll direction. The
-  // total across all open stack viewports stays within budgetFraction × cap, so N panes share
-  // the budget instead of each demanding a full window.
+  // total across all open stack viewports stays within the effective keep budget, so N panes
+  // share the budget instead of each demanding a full window.
   const computeKeep = (dir: number, nStack: number): { ahead: number; behind: number } => {
     if (!budgetBased) {
       return {
@@ -270,9 +320,8 @@ export function initSkmWorkingSetEvictor(
         behind: dir >= 0 ? keepBehind : keepAhead,
       };
     }
-    const capBytes = (cache as any).getMaxCacheSize?.() || 768 * 1048576;
     const avg = measureAvgSliceBytes();
-    const totalSlices = Math.max(1, Math.floor((budgetFraction * capBytes) / avg));
+    const totalSlices = Math.max(1, Math.floor(effectiveKeepBudgetBytes() / avg));
     const perViewport = Math.max(1, Math.floor(totalSlices / Math.max(1, nStack)));
     const ahead = Math.max(1, Math.floor(perViewport * aheadBias));
     const behind = Math.max(1, perViewport - ahead);
@@ -650,6 +699,34 @@ export function initSkmWorkingSetEvictor(
         /* cache map shape differs → no orphan sweep (windowed eviction still runs) */
       }
 
+      // Experiment A diagnostics (read-only): compare keep set vs actual decoded cache
+      // residency — counts/bytes of entries outside keep. Never retains pixel buffers.
+      let cacheEntriesTotal = 0;
+      let cacheEntriesOutsideKeep = 0;
+      let cacheBytesOutsideKeep = 0;
+      let cacheBytesInsideKeep = 0;
+      try {
+        const ic = (cache as any)._imageCache;
+        if (ic && typeof ic.forEach === 'function') {
+          ic.forEach((ci: any, key: any) => {
+            const imageId = typeof key === 'string' && key ? key : ci && ci.imageId;
+            if (typeof imageId !== 'string' || !imageId) {
+              return;
+            }
+            const sz = typeof ci?.sizeInBytes === 'number' ? ci.sizeInBytes : 0;
+            cacheEntriesTotal++;
+            if (keep.has(imageId)) {
+              cacheBytesInsideKeep += sz;
+            } else {
+              cacheEntriesOutsideKeep++;
+              cacheBytesOutsideKeep += sz;
+            }
+          });
+        }
+      } catch (e) {
+        /* best-effort diagnostics */
+      }
+
       // SKM 2026-10-10 (diagnostics-only, additive): publish a FRESH pass record — center,
       // keep bounds, fill, candidate counts — on EVERY pass attempt, BEFORE the branch
       // below. This is the exact fix for the diagnosed staleness: previously the
@@ -678,6 +755,14 @@ export function initSkmWorkingSetEvictor(
             orphanCandidates: orphans.length,
             reactiveSkip: !underPressure && !windowed.length && !orphans.length,
             keepSet: new Set(keep),
+            testKeepWindowActive,
+            testKeepBudgetMB: testKeepWindowActive ? testKeepBudgetMB : null,
+            effectiveKeepBudgetBytes: Math.round(effectiveKeepBudgetBytes()),
+            productionBudgetFraction: budgetFraction,
+            cacheEntriesTotal,
+            cacheEntriesOutsideKeep,
+            cacheBytesOutsideKeep,
+            cacheBytesInsideKeep,
           });
         } catch (e) {
           /* diagnostics must never break eviction */
@@ -791,6 +876,9 @@ export function initSkmWorkingSetEvictor(
       ` | Fix 2: idle-batched, batchCap ${maxEvictPerTick}, inputQuiet ${inputQuietMs}ms, ` +
       `abortMove ${abortMoveThreshold}, idleTimeout ${idleTimeoutMs}ms` +
       ` | Fix 3: reactive, evict only when fill ≥ ${Math.round(reactiveHighWater * 100)}% of cap` +
-      ` | Fix 3c: self-tick ${tickMs}ms (orphan reclaim without scroll)`
+      ` | Fix 3c: self-tick ${tickMs}ms (orphan reclaim without scroll)` +
+      (testKeepWindowActive
+        ? ` | Experiment A TEST keep override ON: ${testKeepBudgetMB} MB (production budgetFraction ${budgetFraction} unused for keep sizing while on)`
+        : ' | Experiment A TEST keep override OFF (production keep sizing)')
   );
 }

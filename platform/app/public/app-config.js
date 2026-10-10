@@ -668,6 +668,24 @@ window.config = {
     // Without it, switching 2001→4403 left the old series pinned and the prefetcher paused at its
     // high-water until a scroll "unstuck" it (the reported pause). Near-free while idle. 0 = off.
     tickMs: 750,
+    // ── Experiment A (TEST-ONLY keep-window override) ─────────────────────────
+    // When testKeepWindowEnabled:true AND testKeepBudgetMB > 0, the evictor sizes the
+    // protected keep window from testKeepBudgetMB (MiB) instead of
+    // production (budgetFraction × maxCacheSize). Independent of reactiveHighWater,
+    // workingSetFraction, cache caps, governor limits, prefetch concurrency, and
+    // scheduler. Production budgetFraction (0.9) is unchanged and is used again the
+    // instant this override is off.
+    // DEFAULT OFF — existing behaviour byte-for-byte when disabled.
+    // To activate Experiment A for the Testing Agent (office build):
+    //   testKeepWindowEnabled: true,
+    //   testKeepBudgetMB: 700,   // within the 500–800 MiB experimental band
+    // then rebuild:viewer and redeploy. Success ≠ stable alone: need ≥3 full
+    // forward/back traversals stable AND material reduction vs Stage 0 ~1.926 GB
+    // full-study plateau (report bytes/entries/pctOfBaseline/pctReduction via
+    // skmReportKeepVsCache()). Prefetch is NOT clamped here — if residency stays
+    // near full-study or a prefetch–evict–reload cycle appears, document and stop.
+    testKeepWindowEnabled: false,
+    testKeepBudgetMB: 700,
   },
 
   // SKM 2026-10-03 (W3 "indicator" warmer): background-download the ACTIVE series
@@ -799,10 +817,10 @@ window.config = {
   // TO REVERT: set enabled:false (default), or delete the init call in init.tsx and
   // extensions/cornerstone/src/skmEvictionDiagnostics.ts.
   skmEvictionDiagnostics: {
-    // TEMP (non-prod Playwright validation): both true for Phases B–E; restore both
-    // to false after the investigation (separate cleanup commit).
+    // Read-only diagnostics for Experiment A (keep vs cache). allowTestEviction MUST
+    // stay false for this stage — no guarded test removal API in the Experiment A build.
     enabled: true,
-    allowTestEviction: true,
+    allowTestEviction: false,
     maxSnapshotAgeMs: 5000,
     maxRemovalHistory: 200,
     maxProbeListCount: 50,
