@@ -676,24 +676,18 @@ window.config = {
     // Experiment B: when true, use testReactiveHighWater instead of reactiveHighWater.
     testReactiveHighWaterEnabled: false,
     testReactiveHighWater: 0.5, // inactive while testReactiveHighWaterEnabled is false
-    // Idle outside-keep cleanup (below reactive gate after quiet). Default OFF for
-    // initial production baseline — not fully validated for general rollout.
-    idleOutsideKeepCleanupEnabled: false,
+    // Idle outside-keep cleanup — TEMP OFFICE CANARY (https://192.192.8.173).
+    // Source default remains OFF (=== true). Production reactiveHighWater 0.85 +
+    // normal budgetFraction keep. REVERT false after canary. Not general-prod approved.
+    idleOutsideKeepCleanupEnabled: true,
     idleOutsideKeepQuietMs: 2500,
     maxIdleEvictPerTick: 10,
   },
 
-  // ── Prefetch→keep clamp (Experiment C) — PRODUCTION DEFAULT OFF ────────────
-  // When enabled:true, clamps studyPrefetcher windowAhead/windowBehind to the
-  // effective keep window. Source/init is inert unless enabled === true.
-  // navigationLeadSlices / maxVelocityLeadSlices are module defaults (40 / 200) used
-  // when the clamp is on; they do not affect runtime while enabled is false.
-  //
-  // TEMPORARY OFFICE CANARY (https://192.192.8.173) — NOT global production authorization.
-  // Only enabled:true flipped; production reactiveHighWater 0.85 + normal keep; no A/B
-  // testKeep / testReactive / idleOutsideKeep overrides. Source/init still requires
-  // enabled === true (opt-in). REVERT enabled:false after canary validation.
-  // Clamp is NOT claimed production-validated for all offices merely by config tests.
+  // ── Prefetch→keep clamp — TEMP OFFICE CANARY (https://192.192.8.173) ───────
+  // Source/init inert unless enabled === true. Production reactiveHighWater 0.85 +
+  // normal keep; testKeep/testReactive OFF. REVERT enabled:false after canary.
+  // NOT global production authorization.
   skmPrefetchKeepClamp: {
     enabled: true,
     navigationLeadSlices: 40,
@@ -797,14 +791,12 @@ window.config = {
     enabled: false,
   },
 
-  // SKM 2026-10-10: READ-ONLY eviction / cache-reclamation diagnostics.
-  // Production: enabled false (fully inert). Office/validation: enabled true,
-  // allowTestEviction ALWAYS false unless an explicit guarded eviction test is required.
-  // live.* vs lastPass.* freshness (cd8c2d1) remains in source when enabled.
-  // Console when enabled: skmGetEvictionDiagnostics(), skmReportKeepVsCache(),
-  // skmProbeCacheEntry(), skmListCacheEntries(), skmGetCacheRemovalHistory().
+  // SKM 2026-10-10: READ-ONLY eviction diagnostics — TEMP OFFICE CANARY only
+  // (needed to verify idle outside-keep reclaim via live.* vs lastPass.*).
+  // allowTestEviction MUST stay false. REVERT enabled:false after canary.
+  // Console: skmGetEvictionDiagnostics(), skmReportKeepVsCache(), skmProbeCacheEntry().
   skmEvictionDiagnostics: {
-    enabled: false,
+    enabled: true,
     allowTestEviction: false,
     maxSnapshotAgeMs: 5000,
     maxRemovalHistory: 200,
