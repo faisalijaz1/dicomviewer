@@ -710,7 +710,7 @@ window.config = {
   // memory alone is not success. If UX regresses, stop for review (no silent retune).
   skmPrefetchKeepClamp: {
     enabled: true,
-    navigationLeadSlices: 40,
+    navigationLeadSlices: 200,
     alignWarmerNearSkip: true,
     evalMs: 250,
     velocityLookAheadMs: 500,
