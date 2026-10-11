@@ -689,15 +689,13 @@ window.config = {
   // navigationLeadSlices / maxVelocityLeadSlices are module defaults (40 / 200) used
   // when the clamp is on; they do not affect runtime while enabled is false.
   //
-  // CANARY (controlled rollout — flip ONLY enabled:true on a validation workstation;
-  // keep production reactiveHighWater 0.85 and normal budgetFraction keep — do NOT
-  // also turn on testKeepWindow / testReactive overrides):
-  //   skmPrefetchKeepClamp: { enabled: true, navigationLeadSlices: 40,
-  //     alignWarmerNearSkip: true, evalMs: 250, velocityLookAheadMs: 500,
-  //     maxVelocityLeadSlices: 200 }
+  // TEMPORARY OFFICE CANARY (https://192.192.8.173) — NOT global production authorization.
+  // Only enabled:true flipped; production reactiveHighWater 0.85 + normal keep; no A/B
+  // testKeep / testReactive / idleOutsideKeep overrides. Source/init still requires
+  // enabled === true (opt-in). REVERT enabled:false after canary validation.
   // Clamp is NOT claimed production-validated for all offices merely by config tests.
   skmPrefetchKeepClamp: {
-    enabled: false,
+    enabled: true,
     navigationLeadSlices: 40,
     alignWarmerNearSkip: true,
     evalMs: 250,
