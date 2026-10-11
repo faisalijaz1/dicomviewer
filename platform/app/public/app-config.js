@@ -668,54 +668,36 @@ window.config = {
     // Without it, switching 2001→4403 left the old series pinned and the prefetcher paused at its
     // high-water until a scroll "unstuck" it (the reported pause). Near-free while idle. 0 = off.
     tickMs: 750,
-    // ── Experiment A (TEST-ONLY keep-window override) ─────────────────────────
-    // When testKeepWindowEnabled:true AND testKeepBudgetMB > 0, the evictor sizes the
-    // protected keep window from testKeepBudgetMB (MiB) instead of
-    // production (budgetFraction × maxCacheSize). Independent of reactiveHighWater,
-    // workingSetFraction, cache caps, governor limits, prefetch concurrency, and
-    // scheduler. Production budgetFraction (0.9) is unchanged and is used again the
-    // instant this override is off.
-    // TEMP (dev Experiment A): enabled for office Testing Agent validation.
-    // REVERT after validation: testKeepWindowEnabled: false (testKeepBudgetMB may stay).
-    // When false, keep sizing uses production budgetFraction × cap unchanged.
-    // Success ≠ stable alone: need ≥3 full forward/back traversals stable AND
-    // material reduction vs Stage 0 ~1.926 GB (skmReportKeepVsCache()). Prefetch
-    // is NOT clamped — if residency stays near full-study or a prefetch–evict–
-    // reload cycle appears, document and stop (no silent retune).
-    testKeepWindowEnabled: true,
-    testKeepBudgetMB: 700,
-    // ── Experiment B (TEST-ONLY reactive-trigger override) ────────────────────
-    // When testReactiveHighWaterEnabled:true, windowed eviction uses
-    // testReactiveHighWater instead of production reactiveHighWater (0.85).
-    // Independent of Experiment A; does NOT change prefetch, caps, governor,
-    // workingSetFraction, or production reactiveHighWater when disabled.
-    // Source default is OFF; TEMP for this controlled follow-up (A keep 700 +
-    // trigger 0.50). REVERT after validation:
-    //   testReactiveHighWaterEnabled: false
-    // (leave reactiveHighWater: 0.85 unchanged).
-    testReactiveHighWaterEnabled: true,
-    testReactiveHighWater: 0.5,
-    // Idle outside-keep cleanup: TEMP enabled for office A+B+C idle-retention validation.
-    // Source/code default remains OFF (idleOutsideKeepCleanupEnabled !== true).
-    // Does NOT change production reactiveHighWater (0.85). REVERT to false after validation.
-    idleOutsideKeepCleanupEnabled: true,
+    // ── TEST-ONLY overrides (source default OFF; PRODUCTION = false) ──────────
+    // Experiment A: when true AND testKeepBudgetMB > 0, size keep from test MiB instead
+    // of production budgetFraction × cap. Ignored when false.
+    testKeepWindowEnabled: false,
+    testKeepBudgetMB: 700, // inactive while testKeepWindowEnabled is false
+    // Experiment B: when true, use testReactiveHighWater instead of reactiveHighWater.
+    testReactiveHighWaterEnabled: false,
+    testReactiveHighWater: 0.5, // inactive while testReactiveHighWaterEnabled is false
+    // Idle outside-keep cleanup (below reactive gate after quiet). Default OFF for
+    // initial production baseline — not fully validated for general rollout.
+    idleOutsideKeepCleanupEnabled: false,
     idleOutsideKeepQuietMs: 2500,
     maxIdleEvictPerTick: 10,
   },
 
-  // ── Experiment C (TEST-ONLY prefetch→keep clamp) ───────────────────────────
-  // When enabled, clamps studyPrefetcher windowAhead/windowBehind to the effective
-  // keep window (from the evictor / Experiment A budget) so prefetch cannot continuously
-  // decode far outside keep (A+B churn root cause). navigationLeadSlices is the minimum
-  // lead; velocity-adaptive boost may raise it but NEVER above keep (trade-off documented
-  // in skmReportPrefetchKeepClamp().leadCappedToKeep). alignWarmerNearSkip keeps the
-  // byte warmer beyond the clamped decode band. Does NOT change workingSetFraction,
-  // caps, governor limits, reactiveHighWater production value, or eviction safety guards.
-  // Source default OFF. TEMP for office A+B+C validation — REVERT enabled:false after.
-  // Success = stable residency ≪ 1.926 GB over ≥3 traversals AND responsive rapid scroll;
-  // memory alone is not success. If UX regresses, stop for review (no silent retune).
+  // ── Prefetch→keep clamp (Experiment C) — PRODUCTION DEFAULT OFF ────────────
+  // When enabled:true, clamps studyPrefetcher windowAhead/windowBehind to the
+  // effective keep window. Source/init is inert unless enabled === true.
+  // navigationLeadSlices / maxVelocityLeadSlices are module defaults (40 / 200) used
+  // when the clamp is on; they do not affect runtime while enabled is false.
+  //
+  // CANARY (controlled rollout — flip ONLY enabled:true on a validation workstation;
+  // keep production reactiveHighWater 0.85 and normal budgetFraction keep — do NOT
+  // also turn on testKeepWindow / testReactive overrides):
+  //   skmPrefetchKeepClamp: { enabled: true, navigationLeadSlices: 40,
+  //     alignWarmerNearSkip: true, evalMs: 250, velocityLookAheadMs: 500,
+  //     maxVelocityLeadSlices: 200 }
+  // Clamp is NOT claimed production-validated for all offices merely by config tests.
   skmPrefetchKeepClamp: {
-    enabled: true,
+    enabled: false,
     navigationLeadSlices: 40,
     alignWarmerNearSkip: true,
     evalMs: 250,
@@ -798,63 +780,33 @@ window.config = {
   // the DevTools console — NO PowerShell / host scripting:
   //   skmTelemetry.reset()   before a scroll/jump test
   //   skmTelemetry.report()  after → console.table summary
-  // Changes NO behaviour. Enable during validation; set false for production.
+  // Changes NO behaviour. Enable during validation; false for production.
   skmTelemetry: {
-    enabled: true,
+    enabled: false,
   },
 
-  // SKM 2026-10-09 (QA fix): read-only scroll-position → displayed-image follow
-  // instrumentation (see skmScrollFollowTelemetry.ts). Surfaced via DevTools console:
-  //   skmScrollFollowReset()                         before a scroll test
-  //   skmScrollFollowReport()                         after → per-viewport summary
-  //   skmScrollFollowReport(viewportId, {stallThresholdMs}) for a specific viewport/threshold
-  //   skmScrollFollowRawLog(viewportId)                raw requested/displayed timeline
-  // Changes NO behaviour. Enable during validation; set false for production.
+  // SKM 2026-10-09 (QA fix): read-only scroll-follow instrumentation.
+  // Enable during validation; false for production.
+  // Console: skmScrollFollowReset() / skmScrollFollowReport() / skmScrollFollowRawLog()
   skmScrollFollow: {
-    enabled: true,
+    enabled: false,
   },
 
-  // SKM 2026-10-09 (QA fix — Priority 2): read-only study/series-switch timing
-  // breakdown (see skmStudySwitchTelemetry.ts). Surfaced via DevTools console:
-  //   skmStudySwitchReport()   after switching studies/series → stage breakdown
-  // Changes NO behaviour. Enable during validation; set false for production.
+  // SKM 2026-10-09 (QA fix — Priority 2): read-only study/series-switch timing.
+  // Enable during validation; false for production.
+  // Console: skmStudySwitchReport()
   skmStudySwitchTelemetry: {
-    enabled: true,
+    enabled: false,
   },
 
-  // SKM 2026-10-10: READ-ONLY eviction / cache-reclamation diagnostics (see
-  // skmEvictionDiagnostics.ts). Changes NO eviction decision, threshold, scheduling,
-  // decoding, rendering, or memory budget at any setting below — purely additive
-  // console/global instrumentation. Independent of every other skm* flag; disabling it
-  // leaves skmActiveEviction/skmMemoryBudget/skmWarmer/skmPrefetchConcurrency byte-for-byte
-  // unchanged (initSkmWorkingSetEvictor receives `undefined` hooks when `enabled:false`).
-  //   enabled           : master gate. false (default) = fully inert — no listeners, no
-  //                       globals, zero overhead.
-  //   allowTestEviction : SEPARATE explicit opt-in (both must be true) for the guarded
-  //                       test-only skmTestEvictImageId(imageId) helper, which refuses
-  //                       using the real production keep-set/in-flight/volume checks
-  //                       before calling the one real cache.removeImageLoadObject() API.
-  //                       NEVER set true in a production deployment. Default false.
-  //   maxSnapshotAgeMs  : a pass snapshot older than this is reported invalid for any
-  //                       safety decision (skmGetEvictionDiagnostics().current.valid /
-  //                       skmProbeCacheEntry()'s keepSetSnapshotValid). Default 5000.
-  //   maxRemovalHistory : bounded ring buffer size for the IMAGE_CACHE_IMAGE_REMOVED
-  //                       history (identifiers + accounting metadata only, never pixel
-  //                       data). Default 200.
-  //   maxProbeListCount : default cap for skmListCacheEntries() when no count is passed;
-  //                       a hard ceiling (500) is enforced in code regardless. Default 50.
-  // Console API (DevTools, no PowerShell/host scripting):
-  //   skmProbeCacheEntry(imageId)       → membership/accounting/keep-set/in-flight probe
-  //   skmListCacheEntries(maxCount)     → bounded listing of cached entries
-  //   skmGetEvictionDiagnostics()       → current pass snapshot + last real eviction
-  //   skmGetCacheRemovalHistory()       → bounded removal event history
-  //   skmTestEvictImageId(imageId)      → TEST-ONLY (requires allowTestEviction:true)
-  // TO REVERT: set enabled:false (default), or delete the init call in init.tsx and
-  // extensions/cornerstone/src/skmEvictionDiagnostics.ts.
+  // SKM 2026-10-10: READ-ONLY eviction / cache-reclamation diagnostics.
+  // Production: enabled false (fully inert). Office/validation: enabled true,
+  // allowTestEviction ALWAYS false unless an explicit guarded eviction test is required.
+  // live.* vs lastPass.* freshness (cd8c2d1) remains in source when enabled.
+  // Console when enabled: skmGetEvictionDiagnostics(), skmReportKeepVsCache(),
+  // skmProbeCacheEntry(), skmListCacheEntries(), skmGetCacheRemovalHistory().
   skmEvictionDiagnostics: {
-    // Read-only diagnostics for Experiment A (keep vs cache). allowTestEviction MUST
-    // stay false for this stage — no guarded test removal API in the Experiment A build.
-    enabled: true,
+    enabled: false,
     allowTestEviction: false,
     maxSnapshotAgeMs: 5000,
     maxRemovalHistory: 200,
