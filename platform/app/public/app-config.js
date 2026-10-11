@@ -697,6 +697,26 @@ window.config = {
     testReactiveHighWater: 0.5,
   },
 
+  // ── Experiment C (TEST-ONLY prefetch→keep clamp) ───────────────────────────
+  // When enabled, clamps studyPrefetcher windowAhead/windowBehind to the effective
+  // keep window (from the evictor / Experiment A budget) so prefetch cannot continuously
+  // decode far outside keep (A+B churn root cause). navigationLeadSlices is the minimum
+  // lead; velocity-adaptive boost may raise it but NEVER above keep (trade-off documented
+  // in skmReportPrefetchKeepClamp().leadCappedToKeep). alignWarmerNearSkip keeps the
+  // byte warmer beyond the clamped decode band. Does NOT change workingSetFraction,
+  // caps, governor limits, reactiveHighWater production value, or eviction safety guards.
+  // Source default OFF. TEMP for office A+B+C validation — REVERT enabled:false after.
+  // Success = stable residency ≪ 1.926 GB over ≥3 traversals AND responsive rapid scroll;
+  // memory alone is not success. If UX regresses, stop for review (no silent retune).
+  skmPrefetchKeepClamp: {
+    enabled: true,
+    navigationLeadSlices: 40,
+    alignWarmerNearSkip: true,
+    evalMs: 250,
+    velocityLookAheadMs: 500,
+    maxVelocityLeadSlices: 200,
+  },
+
   // SKM 2026-10-03 (W3 "indicator" warmer): background-download the ACTIVE series
   // into the browser HTTP cache so the vertical progress bar reaches 100% while
   // decode stays windowed (W2). It never decodes or touches the stack/MPR — it only

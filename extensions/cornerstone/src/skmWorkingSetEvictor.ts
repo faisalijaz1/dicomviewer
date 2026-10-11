@@ -635,6 +635,23 @@ export function initSkmWorkingSetEvictor(
 
       const { ahead: keepAheadN, behind: keepBehindN } = computeKeep(direction, stackVps.length);
 
+      // Experiment C: publish keep window numbers (no pixel data) for prefetch clamp.
+      try {
+        (globalThis as any).__skmKeepWindow = {
+          ahead: keepAheadN,
+          behind: keepBehindN,
+          margin,
+          nStack: stackVps.length,
+          center: activeIdx,
+          direction,
+          budgetBytes: Math.round(effectiveKeepBudgetBytes()),
+          testKeepWindowActive,
+          ts: nowMs(),
+        };
+      } catch (e) {
+        /* best-effort */
+      }
+
       const keep = new Set<string>();
       let keepLo = Infinity;
       let keepHi = -Infinity;

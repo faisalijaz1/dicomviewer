@@ -56,6 +56,9 @@ import { initSkmWadoRsTranscodedLoader } from './skmWadoRsTranscodedLoader';
 // Cornerstone cache cap, the per-tab budget split, and the derived decode window.
 import { initSkmMemoryBudget } from './skmMemoryBudget';
 import { initSkmPrefetchConcurrency } from './skmPrefetchConcurrency';
+// SKM Experiment C (TEST-ONLY): clamp prefetch decode window to the effective keep
+// window. No-op unless appConfig.skmPrefetchKeepClamp.enabled.
+import { initSkmPrefetchKeepClamp } from './skmPrefetchKeepClamp';
 // for validating the caching/RAM architecture. No-op unless appConfig.skmTelemetry.enabled.
 import { initSkmTelemetry } from './skmTelemetry';
 // SKM 2026-10-09 (QA fix — scroll-position → displayed-image follow instrumentation):
@@ -799,6 +802,10 @@ export default async function init({
   if (appConfig?.skmActiveEviction?.enabled !== false) {
     initSkmWorkingSetEvictor(servicesManager, appConfig.skmActiveEviction || {}, skmEvictionDiagnosticsHooks);
   }
+
+  // SKM Experiment C: clamp prefetch to keep (after evictor so __skmKeepWindow exists).
+  // Fully inert unless skmPrefetchKeepClamp.enabled:true.
+  initSkmPrefetchKeepClamp(servicesManager, (appConfig as any)?.skmPrefetchKeepClamp || {});
 
   // SKM 2026-10: in-app telemetry harness (read-only). Enable during the validation
   // phase; call skmTelemetry.report() in the DevTools console. No host scripting.

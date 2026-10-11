@@ -513,10 +513,11 @@ export function initSkmEvictionDiagnostics(
         'AND material reduction vs fullStudyBaselineBytes. Stable ≈ full-study plateau = ' +
         '"stable residency only", not bounded-window success.',
       likelyPrefetchBeyondKeep,
+      prefetchKeepClamp: (globalThis as any).__skmPrefetchKeepClamp || null,
       prefetchCycleNote: likelyPrefetchBeyondKeep
-        ? 'Many cache entries lie outside the test keep while reactiveSkip — prefetch may still ' +
-          'decode beyond the keep. If high reDecodes accompany windowed removals, treat as ' +
-          'prefetch–evict–reload evidence: document and STOP (no silent retune).'
+        ? 'Many cache entries lie outside the test keep — prefetch may still decode beyond keep. ' +
+          'If Experiment C clamp is ON this should fall; if high reDecodes accompany windowed ' +
+          'removals, treat as prefetch–evict–reload: document and STOP (no silent retune).'
         : null,
     };
     // eslint-disable-next-line no-console

@@ -464,10 +464,18 @@ export function initSkmWarmer(
     let skipAhead = mwSkipAhead;
     let skipBehind = mwSkipBehind;
     try {
-      const b = (globalThis as any).__skmBudget;
-      if (b && typeof b.nearSkip === 'number' && b.nearSkip > 0) {
-        skipAhead = b.nearSkip;
-        skipBehind = b.nearSkip;
+      // Experiment C: when prefetch is clamped to keep, warmer must skip that same
+      // decode band (else it defeats the clamp). Prefer clamp nearSkip when present.
+      const clampSkip = (globalThis as any).__skmPrefetchKeepClampNearSkip;
+      if (typeof clampSkip === 'number' && clampSkip > 0) {
+        skipAhead = clampSkip;
+        skipBehind = clampSkip;
+      } else {
+        const b = (globalThis as any).__skmBudget;
+        if (b && typeof b.nearSkip === 'number' && b.nearSkip > 0) {
+          skipAhead = b.nearSkip;
+          skipBehind = b.nearSkip;
+        }
       }
     } catch (e) {
       /* use config fallback */
