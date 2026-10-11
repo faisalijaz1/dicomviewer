@@ -68,6 +68,24 @@ export function pickFairSeriesIndex(input: FairPickInput): number {
 }
 
 /**
+ * Whether the warmer should skip the prefetch near-band for this series.
+ * Prefetch is focused-first/sequential, so only the preferred series' near band is owned.
+ */
+export function shouldApplyNearSkip(input: {
+  nearSkipPreferredOnly: boolean;
+  seriesKey: string;
+  preferredKey: string | null;
+}): boolean {
+  if (!input.nearSkipPreferredOnly) {
+    return true; // legacy: skip near band on every job
+  }
+  if (!input.preferredKey) {
+    return false;
+  }
+  return input.seriesKey === input.preferredKey;
+}
+
+/**
  * Split a shared concurrency budget across N open series (at least 1 each when possible).
  */
 export function splitConcurrencyBudget(totalSlots: number, seriesCount: number): number[] {

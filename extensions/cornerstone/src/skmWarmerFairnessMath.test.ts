@@ -3,7 +3,11 @@
  * node --experimental-strip-types extensions/cornerstone/src/skmWarmerFairnessMath.test.ts
  */
 import assert from 'node:assert/strict';
-import { pickFairSeriesIndex, splitConcurrencyBudget } from './skmWarmerFairnessMath.ts';
+import {
+  pickFairSeriesIndex,
+  shouldApplyNearSkip,
+  splitConcurrencyBudget,
+} from './skmWarmerFairnessMath.ts';
 
 {
   assert.equal(
@@ -92,6 +96,58 @@ import { pickFairSeriesIndex, splitConcurrencyBudget } from './skmWarmerFairness
   assert.deepEqual(splitConcurrencyBudget(5, 2), [3, 2]);
   assert.deepEqual(splitConcurrencyBudget(3, 1), [3]);
   assert.deepEqual(splitConcurrencyBudget(2, 3), [1, 1, 0]);
+}
+
+{
+  // Preferred-only nearSkip: inactive series must NOT skip (fills Ready-bar hole).
+  assert.equal(
+    shouldApplyNearSkip({
+      nearSkipPreferredOnly: true,
+      seriesKey: 'active',
+      preferredKey: 'active',
+    }),
+    true
+  );
+  assert.equal(
+    shouldApplyNearSkip({
+      nearSkipPreferredOnly: true,
+      seriesKey: 'other',
+      preferredKey: 'active',
+    }),
+    false
+  );
+  assert.equal(
+    shouldApplyNearSkip({
+      nearSkipPreferredOnly: false,
+      seriesKey: 'other',
+      preferredKey: 'active',
+    }),
+    true
+  );
+}
+
+{
+  // activeBias=1 → ~1:1 for equal series
+  const keys = ['active', 'other'];
+  const remaining = [100, 100];
+  let active = 0;
+  let other = 0;
+  for (let t = 0; t < 200; t++) {
+    const idx = pickFairSeriesIndex({
+      keys,
+      remaining,
+      preferredKey: 'active',
+      pickTick: t,
+      activeBias: 1,
+    });
+    if (idx === 0) {
+      active++;
+    } else {
+      other++;
+    }
+  }
+  assert.equal(active, 100);
+  assert.equal(other, 100);
 }
 
 console.log('skmWarmerFairnessMath.test.ts: all assertions passed');

@@ -27,7 +27,7 @@
 // eslint-disable-next-line
 import { cache, eventTarget } from '@cornerstonejs/core';
 import { subscribeStackNewImage } from './utils/skmStackNewImage';
-import { pickFairSeriesIndex } from './skmWarmerFairnessMath';
+import { pickFairSeriesIndex, shouldApplyNearSkip } from './skmWarmerFairnessMath';
 
 export type SkmWarmerConfig = {
   enabled?: boolean;
@@ -69,6 +69,18 @@ export type SkmWarmerConfig = {
   rethrottleMs?: number;
   /** |Δindex| beyond which the moving window abandons and restarts (far jump). Default 120. */
   farJumpThreshold?: number;
+  /**
+   * Fair multi-viewport pick bias (preferred:other cycle numerator). 1 → ~1:1, 2 → ~2:1.
+   * Only used when activeSeriesOnly:false. Default 1 (equal large series should share bandwidth).
+   */
+  activeBias?: number;
+  /**
+   * When true (default), nearSkip applies only to the preferred/active series — inactive
+   * open series get their near band byte-warmed too, because sequential prefetch does not
+   * own that band until the focused series' window drains. Set false to skip near band on
+   * every fair job (legacy Test G behaviour; starves inactive Ready bars).
+   */
+  nearSkipPreferredOnly?: boolean;
 };
 
 /** Event the monotonic progress bar listens to (see scrollbar hooks). */
@@ -390,6 +402,9 @@ export function initSkmWarmer(
   const mwSkipAhead = Math.max(0, config?.nearSkipAhead ?? 300);
   const mwSkipBehind = Math.max(0, config?.nearSkipBehind ?? 150);
   const mwThrottle = Math.max(50, config?.rethrottleMs ?? 250);
+  const mwFarJumpThreshold = Math.max(1, config?.farJumpThreshold ?? 120);
+  const fairActiveBias = Math.max(1, Math.floor(config?.activeBias ?? 1));
+  const nearSkipPreferredOnly = config?.nearSkipPreferredOnly !== false;
   // SKM 2026-10-04 (Phase B): sweep the WHOLE study (near-doctor first, ahead-biased), not
   // just ±ahead/behind, so the Ready N/Total frontier keeps advancing to 100% in the
   // background instead of stopping around the initial window. Bytes only (HTTP cache); the
@@ -453,37 +468,43 @@ export function initSkmWarmer(
     }
   };
 
-  // Ordered, ahead-biased list of imageIds to warm around `center` (center-out).
-  const mwOrderedWindow = (imageIds: string[], center: number, dir: number): string[] => {
+  // Ordered, ahead-biased list of imageIds to warm around center (center-out).
+  // applyNearSkip:false includes the near band (inactive series: prefetch does not own it yet).
+  const mwOrderedWindow = (
+    imageIds: string[],
+    center: number,
+    dir: number,
+    opts?: { applyNearSkip?: boolean }
+  ): string[] => {
     const last = imageIds.length - 1;
     // Phase B: when warming the whole study, extend the walk to both ends (still near-first,
     // ahead-biased); otherwise keep the bounded ±ahead/behind window.
     const aEnd = mwWholeStudy ? last : Math.min(last, center + (dir > 0 ? mwAhead : mwBehind));
     const bEnd = mwWholeStudy ? 0 : Math.max(0, center - (dir > 0 ? mwBehind : mwAhead));
-    // Far-band only: skip the near band the prefetcher decodes (fix G — no double-fetch).
-    // SKM 2026-10-07 (Fix 5): the prefetch decode window is now derived at runtime from the
-    // adaptive per-tab memory budget (skmMemoryBudget → window.__skmBudget.nearSkip). Read it
-    // live so the warmer always skips exactly the band the prefetcher currently decodes and
-    // byte-warms only BEYOND it — regardless of machine tier or tab count. Falls back to the
-    // static config values when the budget governor isn't present.
-    let skipAhead = mwSkipAhead;
-    let skipBehind = mwSkipBehind;
-    try {
-      // Experiment C: when prefetch is clamped to keep, warmer must skip that same
-      // decode band (else it defeats the clamp). Prefer clamp nearSkip when present.
-      const clampSkip = (globalThis as any).__skmPrefetchKeepClampNearSkip;
-      if (typeof clampSkip === 'number' && clampSkip > 0) {
-        skipAhead = clampSkip;
-        skipBehind = clampSkip;
-      } else {
-        const b = (globalThis as any).__skmBudget;
-        if (b && typeof b.nearSkip === 'number' && b.nearSkip > 0) {
-          skipAhead = b.nearSkip;
-          skipBehind = b.nearSkip;
+    // Far-band only: skip the near band the prefetcher decodes (Test G — no double-fetch).
+    // SKM 2026-10-07 (Fix 5): live nearSkip from keep-clamp / budget when present.
+    // Fair multi-viewport: only apply nearSkip when opts.applyNearSkip !== false so
+    // inactive series are not left with a keep-sized Ready-bar hole.
+    let skipAhead = 0;
+    let skipBehind = 0;
+    if (opts?.applyNearSkip !== false) {
+      skipAhead = mwSkipAhead;
+      skipBehind = mwSkipBehind;
+      try {
+        const clampSkip = (globalThis as any).__skmPrefetchKeepClampNearSkip;
+        if (typeof clampSkip === 'number' && clampSkip > 0) {
+          skipAhead = clampSkip;
+          skipBehind = clampSkip;
+        } else {
+          const b = (globalThis as any).__skmBudget;
+          if (b && typeof b.nearSkip === 'number' && b.nearSkip > 0) {
+            skipAhead = b.nearSkip;
+            skipBehind = b.nearSkip;
+          }
         }
+      } catch (e) {
+        /* use config fallback */
       }
-    } catch (e) {
-      /* use config fallback */
     }
     const nearLo = center - skipBehind;
     const nearHi = center + skipAhead;
@@ -492,8 +513,8 @@ export function initSkmWarmer(
       if (i < 0 || i > last || !imageIds[i]) {
         return;
       }
-      if (i >= nearLo && i <= nearHi) {
-        return; // prefetcher owns this slice
+      if ((skipAhead > 0 || skipBehind > 0) && i >= nearLo && i <= nearHi) {
+        return; // prefetcher owns this slice (preferred series only in fair mode)
       }
       if (warmedImageIds.has(imageIds[i])) {
         return; // already byte-warmed this session — keep the sweep list to UNwarmed only,
@@ -556,14 +577,13 @@ export function initSkmWarmer(
     // (that caused re-scan churn). Between restarts the running sweep keeps progressing. A far
     // jump (> restart threshold) re-prioritises. This optimisation never applies across a
     // series change — seriesChanged bypasses it unconditionally, every time.
-    const MW_RESTART_THRESHOLD = 50;
     const centerDelta = mwLastCenter !== null ? center - mwLastCenter : null;
     if (
       !seriesChanged &&
       mwLastCenter !== null &&
       currentRunId > 0 &&
       centerDelta !== null &&
-      Math.abs(centerDelta) < MW_RESTART_THRESHOLD
+      Math.abs(centerDelta) < mwFarJumpThreshold
     ) {
       return;
     }
@@ -759,7 +779,7 @@ export function initSkmWarmer(
           remaining,
           preferredKey: fairPreferredDsUID,
           pickTick: fairPickTick++,
-          activeBias: 2,
+          activeBias: fairActiveBias,
         });
         if (idx < 0) {
           if (inflight.size === 0) {
@@ -804,7 +824,9 @@ export function initSkmWarmer(
     const open = mwGetOpenSeries();
     const openSet = new Set(open.map(s => s.dsUID));
     const active = mwGetActiveSeries();
+    const prevPreferred = fairPreferredDsUID;
     fairPreferredDsUID = active?.dsUID ?? open[0]?.dsUID ?? null;
+    const preferredChanged = prevPreferred !== fairPreferredDsUID;
 
     // Drop jobs for series no longer displayed in any viewport.
     fairJobs.forEach((job, dsUID) => {
@@ -822,12 +844,18 @@ export function initSkmWarmer(
     for (const s of open) {
       const center = mwGetCenter(s.viewportId);
       const existing = fairJobs.get(s.dsUID);
+      // Prefetch owns the near band only for the preferred series (sequential panes).
+      const applyNearSkip = shouldApplyNearSkip({
+        nearSkipPreferredOnly,
+        seriesKey: s.dsUID,
+        preferredKey: fairPreferredDsUID,
+      });
       if (!existing) {
         const controller = new AbortController();
         warmerGenerationStartedCount++;
         fairJobs.set(s.dsUID, {
           dsUID: s.dsUID,
-          queue: mwOrderedWindow(s.imageIds, center, 1),
+          queue: mwOrderedWindow(s.imageIds, center, 1, { applyNearSkip }),
           controller,
           center,
           direction: 1,
@@ -835,11 +863,16 @@ export function initSkmWarmer(
         continue;
       }
       const delta = center - existing.center;
-      if (Math.abs(delta) >= 50) {
-        existing.direction = delta >= 0 ? 1 : -1;
+      if (preferredChanged || Math.abs(delta) >= mwFarJumpThreshold) {
+        if (Math.abs(delta) >= mwFarJumpThreshold) {
+          existing.direction = delta >= 0 ? 1 : -1;
+        }
         existing.center = center;
         // Re-prioritise remaining work; do not abort in-flight (series still open).
-        existing.queue = mwOrderedWindow(s.imageIds, center, existing.direction);
+        // Preferred change rebuilds so nearSkip ownership follows focus.
+        existing.queue = mwOrderedWindow(s.imageIds, center, existing.direction, {
+          applyNearSkip,
+        });
       } else {
         existing.center = center;
       }
@@ -847,20 +880,31 @@ export function initSkmWarmer(
 
     // eslint-disable-next-line no-console
     console.log(
-      `[SKM-WARMER] fair multi-viewport sync: ${fairJobs.size} series, ` +
-        `preferred=${fairPreferredDsUID || 'none'}, slots=${effectiveConcurrency()}`
+      '[SKM-WARMER] fair multi-viewport sync: ' +
+        fairJobs.size +
+        ' series, preferred=' +
+        (fairPreferredDsUID || 'none') +
+        ', bias=' +
+        fairActiveBias +
+        ', slots=' +
+        effectiveConcurrency() +
+        ', nearSkipPreferredOnly=' +
+        nearSkipPreferredOnly
     );
     void fairPumpLoop();
   };
 
+  let fairStarted = false;
   const fairSchedule = () => {
     if (fairTimer) {
       return;
     }
+    const delay = fairStarted ? mwThrottle : Math.max(mwThrottle, startDelayMs);
     fairTimer = setTimeout(() => {
       fairTimer = null;
+      fairStarted = true;
       fairSync();
-    }, mwThrottle);
+    }, delay);
   };
 
   try {
@@ -961,6 +1005,9 @@ export function initSkmWarmer(
       fairPicksOther,
       fairQueues,
       fairPumpRunning,
+      fairActiveBias,
+      nearSkipPreferredOnly,
+      mwFarJumpThreshold,
     };
     // eslint-disable-next-line no-console
     console.log('[SKM-WARMER] diagnostics:', result);

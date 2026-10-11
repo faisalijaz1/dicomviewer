@@ -808,11 +808,16 @@ lane (8) already had spare capacity.
 
 ## 11. CURRENT STOPPING POINT / WHERE WE STOPPED
 
-- **Current `master` HEAD:** `82b89de` — cosmetic scrollbar/progress polish.
-- **Latest *functional* change:** `60d5317` — adaptive prefetch concurrency.
+- **Multi-viewport P0 (in flight):** fair warmer (`2523c72`) was necessary but
+  insufficient — inactive Ready bars still hit a nearSkip hole under sequential
+  prefetch. Follow-up: series-aware nearSkip + `activeBias:1` (see
+  `docs/SKM_MULTI_VIEWPORT_PERF_AUDIT.md`). **Office Scenario A/B vs `2523c72`
+  required before production deploy. Incomplete runs are not benchmarks.**
+- Memory-reclamation canaries remain paused (do not change reactive/idle/budget
+  thresholds as part of multi-viewport work).
+- **Still NOT yet proven:** adaptive prefetch concurrency A/B (`60d5317`).
 - **Proven in office:** memory governor (6.2), 2816/4096 profile (16 GB 1-tab &
   2-tab), Preferences UI.
-- **NOT yet proven:** adaptive prefetch concurrency (`60d5317`).
 
 ### Next step — Office A/B validation of adaptive prefetch concurrency
 

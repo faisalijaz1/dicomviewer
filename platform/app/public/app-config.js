@@ -764,11 +764,18 @@ window.config = {
     concurrency: 4,
     globalConcurrency: 8,
     rethrottleMs: 250,
+    // Wired into fairSync / mwRecenter (was inert / hard-coded 50 before).
     farJumpThreshold: 120,
     // SKM multi-viewport fairness: inactive panes were starved (2×3674: one bar ~100%
     // while the other stalled; WADO showed one SeriesInstanceUID). Keep concurrency
     // unchanged; schedule fairly across open series instead.
     activeSeriesOnly: false,
+    // 1 = ~1:1 preferred:other warmer picks (2 was still too biased for equal CTs).
+    activeBias: 1,
+    // nearSkip only on the focused series — sequential prefetch does not own inactive
+    // near bands, so skipping them left a keep-sized hole (~10% of 3674) on the inactive bar.
+    nearSkipPreferredOnly: true,
+    // Honored on the first fairSync (was inert for moving-window / fair paths).
     startDelayMs: 1500,
   },
 
