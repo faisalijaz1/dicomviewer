@@ -706,7 +706,10 @@ window.config = {
   //                         on-screen slice). Default 3.
   //   globalConcurrency   : absolute cap across ALL tabs (BroadcastChannel) — the
   //                         NAS-burst guard. Default 6.
-  //   activeSeriesOnly    : warm only the active series (true) vs all open (false).
+  //   activeSeriesOnly    : true = warm ONLY the active viewport series and ABORT the
+  //                         previous job on switch (starves inactive Ready bars). false =
+  //                         fair multi-viewport: all open stack series share concurrency
+  //                         (~2:1 active bias); abort only when a series leaves the grid.
   //   startDelayMs        : wait after a series opens before warming, so first image
   //                         + initial window win the network first. Default 1500.
   // TO REVERT: enabled:false (whole module dormant; identical to the W2 build).
@@ -762,7 +765,10 @@ window.config = {
     globalConcurrency: 8,
     rethrottleMs: 250,
     farJumpThreshold: 120,
-    activeSeriesOnly: true,
+    // SKM multi-viewport fairness: inactive panes were starved (2×3674: one bar ~100%
+    // while the other stalled; WADO showed one SeriesInstanceUID). Keep concurrency
+    // unchanged; schedule fairly across open series instead.
+    activeSeriesOnly: false,
     startDelayMs: 1500,
   },
 

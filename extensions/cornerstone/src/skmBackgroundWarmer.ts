@@ -27,6 +27,7 @@
 // eslint-disable-next-line
 import { cache, eventTarget } from '@cornerstonejs/core';
 import { subscribeStackNewImage } from './utils/skmStackNewImage';
+import { pickFairSeriesIndex } from './skmWarmerFairnessMath';
 
 export type SkmWarmerConfig = {
   enabled?: boolean;
@@ -253,6 +254,10 @@ export function initSkmWarmer(
 
   const effectiveConcurrency = () =>
     Math.max(1, Math.min(perTab, Math.floor(globalCap / Math.max(1, liveTabs)) || 1));
+
+  // Default true = legacy active-viewport-only warmer (starves inactive panes).
+  // false = fair multi-viewport warming (see fairSync / fairPumpLoop below).
+  const activeSeriesOnly = config?.activeSeriesOnly !== false;
 
   // SKM 2026-10-09 (QA fix — Priority 2 round 3): warmSeries() now REQUIRES the generation's
   // AbortSignal (from beginNewWarmerGeneration()) and forwards it to fetch(), so a stale
@@ -613,11 +618,267 @@ export function initSkmWarmer(
     }, mwThrottle);
   };
 
+  // ── Multi-viewport fair warmer (activeSeriesOnly:false) ───────────────────
+  // Root cause of 2×3674 pane imbalance: mwGetActiveSeries() + beginNewWarmerGeneration()
+  // warm ONLY the active viewport and ABORT the previous series on switch — so an
+  // inactive pane's Ready bar stalls while WADO traffic shows a single SeriesInstanceUID.
+  // Fair mode keeps a queue per open stack series, shares effectiveConcurrency() slots,
+  // prefers the active series (~2:1) but never starves others, and only aborts a job when
+  // that series leaves every viewport.
+  type FairJob = {
+    dsUID: string;
+    queue: string[];
+    controller: AbortController;
+    center: number;
+    direction: number;
+  };
+  const fairJobs = new Map<string, FairJob>();
+  let fairPreferredDsUID: string | null = null;
+  let fairPickTick = 0;
+  let fairPumpRunning = false;
+  let fairTimer: ReturnType<typeof setTimeout> | null = null;
+  let fairSyncCount = 0;
+  let fairPicksActive = 0;
+  let fairPicksOther = 0;
+
+  const mwGetOpenSeries = (): Array<{
+    dsUID: string;
+    imageIds: string[];
+    viewportId: string;
+  }> => {
+    const out: Array<{ dsUID: string; imageIds: string[]; viewportId: string }> = [];
+    const seen = new Set<string>();
+    try {
+      const { viewportGridService, displaySetService, cornerstoneViewportService } =
+        servicesManager.services;
+      const state = viewportGridService.getState();
+      const viewports: Map<string, any> = state?.viewports;
+      if (!viewports || typeof viewports.forEach !== 'function') {
+        return out;
+      }
+      const dataSource = extensionManager.getActiveDataSource()[0];
+      viewports.forEach((vpState: any, viewportId: string) => {
+        try {
+          const vp = cornerstoneViewportService?.getCornerstoneViewport?.(viewportId);
+          if (
+            vp &&
+            (vp.type === 'orthographic' ||
+              vp.type === 'volume3d' ||
+              (vp as any).type === 'ORTHOGRAPHIC' ||
+              (vp as any).type === 'VOLUME_3D')
+          ) {
+            return; // stack warmer only
+          }
+        } catch (e) {
+          /* treat as stack candidate */
+        }
+        const dsUID = vpState?.displaySetInstanceUIDs?.[0];
+        if (!dsUID || seen.has(dsUID)) {
+          return;
+        }
+        const displaySet = displaySetService
+          .getActiveDisplaySets()
+          .find((ds: any) => ds.displaySetInstanceUID === dsUID);
+        if (!displaySet) {
+          return;
+        }
+        const imageIds: string[] = dataSource.getImageIdsForDisplaySet(displaySet);
+        if (!imageIds || imageIds.length === 0) {
+          return;
+        }
+        seen.add(dsUID);
+        out.push({ dsUID, imageIds, viewportId });
+      });
+    } catch (e) {
+      return out;
+    }
+    return out;
+  };
+
+  const fairFetchOne = async (imageId: string, signal: AbortSignal): Promise<void> => {
+    if (!imageId || signal.aborted || warmedImageIds.has(imageId)) {
+      return;
+    }
+    try {
+      if (cache.getImageLoadObject && cache.getImageLoadObject(imageId)) {
+        warmedImageIds.add(imageId);
+        emitAvailable(imageId);
+        return;
+      }
+    } catch (e) {
+      /* fetch */
+    }
+    const url = urlFromImageId(imageId);
+    if (!url) {
+      return;
+    }
+    warmerInFlightFetches++;
+    try {
+      const res = await fetch(url, { method: 'GET', signal });
+      if (res.ok) {
+        await res.arrayBuffer().catch(() => undefined);
+        warmedImageIds.add(imageId);
+        emitAvailable(imageId);
+      } else if (res.body) {
+        await res.body.cancel().catch(() => undefined);
+      }
+    } catch (e) {
+      if ((e as any)?.name === 'AbortError') {
+        warmerFetchAbortedCount++;
+      }
+    } finally {
+      warmerInFlightFetches--;
+    }
+  };
+
+  const fairPumpLoop = async () => {
+    if (fairPumpRunning) {
+      return;
+    }
+    fairPumpRunning = true;
+    const inflight = new Set<Promise<void>>();
+    try {
+      for (;;) {
+        while (inflight.size >= effectiveConcurrency()) {
+          await Promise.race(inflight);
+        }
+        // Drop aborted jobs (series left the grid) so pickFairSeriesIndex cannot spin.
+        fairJobs.forEach((job, dsUID) => {
+          if (job.controller.signal.aborted) {
+            fairJobs.delete(dsUID);
+            return;
+          }
+          while (job.queue.length && warmedImageIds.has(job.queue[0])) {
+            job.queue.shift();
+          }
+        });
+        const keys = Array.from(fairJobs.keys());
+        const remaining = keys.map(k => fairJobs.get(k)?.queue.length || 0);
+        const idx = pickFairSeriesIndex({
+          keys,
+          remaining,
+          preferredKey: fairPreferredDsUID,
+          pickTick: fairPickTick++,
+          activeBias: 2,
+        });
+        if (idx < 0) {
+          if (inflight.size === 0) {
+            break;
+          }
+          await Promise.race(inflight);
+          continue;
+        }
+        const job = fairJobs.get(keys[idx]);
+        if (!job || job.controller.signal.aborted) {
+          continue;
+        }
+        const imageId = job.queue.shift();
+        if (!imageId) {
+          continue;
+        }
+        if (keys[idx] === fairPreferredDsUID) {
+          fairPicksActive++;
+        } else {
+          fairPicksOther++;
+        }
+        const p = fairFetchOne(imageId, job.controller.signal).finally(() => {
+          inflight.delete(p);
+        });
+        inflight.add(p);
+        await new Promise(r => setTimeout(r, 0)); // yield to interaction lane
+      }
+    } finally {
+      fairPumpRunning = false;
+    }
+    // fairSync may have enqueued work while we were exiting; restart if needed.
+    const hasWork = Array.from(fairJobs.values()).some(
+      j => !j.controller.signal.aborted && j.queue.length > 0
+    );
+    if (hasWork) {
+      void fairPumpLoop();
+    }
+  };
+
+  const fairSync = () => {
+    fairSyncCount++;
+    const open = mwGetOpenSeries();
+    const openSet = new Set(open.map(s => s.dsUID));
+    const active = mwGetActiveSeries();
+    fairPreferredDsUID = active?.dsUID ?? open[0]?.dsUID ?? null;
+
+    // Drop jobs for series no longer displayed in any viewport.
+    fairJobs.forEach((job, dsUID) => {
+      if (!openSet.has(dsUID)) {
+        try {
+          job.controller.abort();
+        } catch (e) {
+          /* noop */
+        }
+        fairJobs.delete(dsUID);
+        warmerGenerationCancelledCount++;
+      }
+    });
+
+    for (const s of open) {
+      const center = mwGetCenter(s.viewportId);
+      const existing = fairJobs.get(s.dsUID);
+      if (!existing) {
+        const controller = new AbortController();
+        warmerGenerationStartedCount++;
+        fairJobs.set(s.dsUID, {
+          dsUID: s.dsUID,
+          queue: mwOrderedWindow(s.imageIds, center, 1),
+          controller,
+          center,
+          direction: 1,
+        });
+        continue;
+      }
+      const delta = center - existing.center;
+      if (Math.abs(delta) >= 50) {
+        existing.direction = delta >= 0 ? 1 : -1;
+        existing.center = center;
+        // Re-prioritise remaining work; do not abort in-flight (series still open).
+        existing.queue = mwOrderedWindow(s.imageIds, center, existing.direction);
+      } else {
+        existing.center = center;
+      }
+    }
+
+    // eslint-disable-next-line no-console
+    console.log(
+      `[SKM-WARMER] fair multi-viewport sync: ${fairJobs.size} series, ` +
+        `preferred=${fairPreferredDsUID || 'none'}, slots=${effectiveConcurrency()}`
+    );
+    void fairPumpLoop();
+  };
+
+  const fairSchedule = () => {
+    if (fairTimer) {
+      return;
+    }
+    fairTimer = setTimeout(() => {
+      fairTimer = null;
+      fairSync();
+    }, mwThrottle);
+  };
+
   try {
     const { viewportGridService } = servicesManager.services;
     const E = viewportGridService.EVENTS;
-    if (config?.movingWindow) {
-      // Follow the doctor: re-centre on viewport/grid changes and on every slice change.
+    if (config?.movingWindow && !activeSeriesOnly) {
+      // Fair multi-viewport: all open stack series share the warmer budget.
+      viewportGridService.subscribe(E.VIEWPORTS_READY, fairSchedule);
+      viewportGridService.subscribe(E.ACTIVE_VIEWPORT_ID_CHANGED, fairSchedule);
+      viewportGridService.subscribe(E.GRID_STATE_CHANGED, fairSchedule);
+      subscribeStackNewImage(fairSchedule);
+      // eslint-disable-next-line no-console
+      console.log(
+        '[SKM-WARMER] fair multi-viewport mode ON (activeSeriesOnly:false) — ' +
+          'inactive panes are warmed without aborting sibling series'
+      );
+    } else if (config?.movingWindow) {
+      // Legacy: follow the doctor on the ACTIVE viewport only.
       viewportGridService.subscribe(E.VIEWPORTS_READY, mwSchedule);
       viewportGridService.subscribe(E.ACTIVE_VIEWPORT_ID_CHANGED, mwSchedule);
       viewportGridService.subscribe(E.GRID_STATE_CHANGED, mwSchedule);
@@ -666,6 +927,10 @@ export function initSkmWarmer(
   //                                  while a PREVIOUS one's workers had not yet all returned
   //                                  (the exact condition that used to let traffic accumulate)
   (window as any).skmWarmerDiagnostics = () => {
+    const fairQueues: Record<string, number> = {};
+    fairJobs.forEach((job, dsUID) => {
+      fairQueues[dsUID] = job.queue.length;
+    });
     const result = {
       warmerGenerationStarted: warmerGenerationStartedCount,
       warmerGenerationCancelled: warmerGenerationCancelledCount,
@@ -687,6 +952,15 @@ export function initSkmWarmer(
       // the stock/WADO-URI path. See skmWarmerHasWarmed(imageId) to check a specific
       // imageId.
       warmedImageIdCount: warmedImageIds.size,
+      // Multi-viewport fairness (activeSeriesOnly:false)
+      activeSeriesOnly,
+      fairJobCount: fairJobs.size,
+      fairPreferredDsUID,
+      fairSyncCount,
+      fairPicksActive,
+      fairPicksOther,
+      fairQueues,
+      fairPumpRunning,
     };
     // eslint-disable-next-line no-console
     console.log('[SKM-WARMER] diagnostics:', result);
