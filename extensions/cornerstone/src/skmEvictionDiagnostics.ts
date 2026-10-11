@@ -175,6 +175,10 @@ export function initSkmEvictionDiagnostics(
             reactivePathReason: currentPass.reactivePathReason,
             cacheBytes: currentPass.cacheBytes,
             cacheCapBytes: currentPass.cacheCapBytes,
+            idleOutsideKeepCleanupEnabled: currentPass.idleOutsideKeepCleanupEnabled,
+            idleOutsideKeepCleanupActive: currentPass.idleOutsideKeepCleanupActive,
+            idleOutsideKeepGateReason: currentPass.idleOutsideKeepGateReason,
+            passBatchCap: currentPass.passBatchCap,
           }
         : null,
       // Distinct from `current`: the last pass that ACTUALLY removed ≥1 decoded image.
@@ -489,6 +493,10 @@ export function initSkmEvictionDiagnostics(
       effectiveReactiveHighWater: cur?.effectiveReactiveHighWater ?? null,
       testReactiveTriggerActive: cur?.testReactiveTriggerActive ?? false,
       reactivePathReason: cur?.reactivePathReason ?? null,
+      idleOutsideKeepCleanupEnabled: cur?.idleOutsideKeepCleanupEnabled ?? false,
+      idleOutsideKeepCleanupActive: cur?.idleOutsideKeepCleanupActive ?? false,
+      idleOutsideKeepGateReason: cur?.idleOutsideKeepGateReason ?? null,
+      passBatchCap: cur?.passBatchCap ?? null,
       underPressure: cur?.underPressure ?? null,
       reactiveSkip: cur?.reactiveSkip ?? null,
       fillPct: cur?.fillPct ?? null,

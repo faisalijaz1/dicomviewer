@@ -695,6 +695,13 @@ window.config = {
     // (leave reactiveHighWater: 0.85 unchanged).
     testReactiveHighWaterEnabled: true,
     testReactiveHighWater: 0.5,
+    // Idle outside-keep cleanup (default OFF): below reactive fill gate, after quietMs,
+    // reclaim decoded images outside the keep window via the existing windowed path.
+    // Does NOT change production reactiveHighWater (0.85). Leave false until office
+    // Validation Agent enables it for the idle-retention experiment.
+    idleOutsideKeepCleanupEnabled: false,
+    idleOutsideKeepQuietMs: 2500,
+    maxIdleEvictPerTick: 10,
   },
 
   // ── Experiment C (TEST-ONLY prefetch→keep clamp) ───────────────────────────

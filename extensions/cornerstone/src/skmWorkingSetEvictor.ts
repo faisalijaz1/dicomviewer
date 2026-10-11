@@ -48,6 +48,13 @@
 // eslint-disable-next-line
 import { cache, Enums } from '@cornerstonejs/core';
 import { subscribeStackNewImage } from './utils/skmStackNewImage';
+import {
+  evaluateIdleOutsideKeepScanGate,
+  isIdleOutsideKeepCleanupActive,
+  resolveEvictBatchCap,
+  resolveWindowedPathReason,
+  shouldCollectWindowedCandidates,
+} from './skmIdleOutsideKeepCleanupMath';
 
 export type SkmEvictionConfig = {
   enabled?: boolean;
@@ -147,6 +154,22 @@ export type SkmEvictionConfig = {
    * enable flag is false.
    */
   testReactiveHighWater?: number;
+  /**
+   * Idle outside-keep cleanup: when true, allow the existing windowed (outside-keep)
+   * candidate scan below the reactive fill gate IF input has been quiet long enough.
+   * Default false — production / disabled behaviour unchanged (reactive-only windowed path).
+   */
+  idleOutsideKeepCleanupEnabled?: boolean;
+  /**
+   * Minimum ms since last STACK_NEW_IMAGE before idle outside-keep cleanup may scan.
+   * Default 2500. Must be ≫ inputQuietMs so active scrolling never takes this path.
+   */
+  idleOutsideKeepQuietMs?: number;
+  /**
+   * Max removals per batch for idle outside-keep cleanup passes (gentler than
+   * maxEvictPerTick). Default 10. Reactive-pressure passes still use maxEvictPerTick.
+   */
+  maxIdleEvictPerTick?: number;
 };
 
 /**
@@ -201,6 +224,14 @@ export type SkmEvictorPassRecord = {
   /** Decoded cache bytes / cap at pass time (accounting). */
   cacheBytes: number;
   cacheCapBytes: number;
+  /** Idle outside-keep cleanup feature enabled in config. */
+  idleOutsideKeepCleanupEnabled: boolean;
+  /** True when this pass queued windowed work via idle cleanup (not reactive pressure). */
+  idleOutsideKeepCleanupActive: boolean;
+  /** Idle scan gate reason (diagnostics). */
+  idleOutsideKeepGateReason: string;
+  /** Per-batch removal cap used for this pass (normal vs idle). */
+  passBatchCap: number;
 };
 
 /** SKM 2026-10-10 (diagnostics-only): published whenever a batch ACTUALLY removes ≥1
@@ -313,6 +344,11 @@ export function initSkmWorkingSetEvictor(
   const effectiveReactiveHighWater = testReactiveTriggerActive
     ? (testReactiveHighWaterRaw as number)
     : reactiveHighWater;
+  // Idle outside-keep cleanup (default OFF): windowed reclaim below reactive gate only after
+  // a long quiet period. Does not change production reactiveHighWater or scroll-time path.
+  const idleOutsideKeepCleanupEnabled = config?.idleOutsideKeepCleanupEnabled === true;
+  const idleOutsideKeepQuietMs = Math.max(0, config?.idleOutsideKeepQuietMs ?? 2500);
+  const maxIdleEvictPerTick = Math.max(1, config?.maxIdleEvictPerTick ?? 10);
 
   // Measure average decoded bytes/slice from the live cache (adapts to real slice size);
   // fall back to the estimate before anything is decoded.
@@ -417,6 +453,8 @@ export function initSkmWorkingSetEvictor(
   let passKeepBehindN = 0;
   let passProtected = 0;
   let passStackVps = 0;
+  let passBatchCap = maxEvictPerTick; // per-pass: maxEvictPerTick or maxIdleEvictPerTick
+  let passIdleOutsideKeepCleanupActive = false;
 
   // Current centre of the active viewport (best-effort; 0 if unknown).
   const currentActiveCenter = (): number => {
@@ -448,7 +486,7 @@ export function initSkmWorkingSetEvictor(
       removed: passRemoved, // removed this pass (across all batches)
       lastRemoved: passRemoved,
       batches: passBatches,
-      maxBatch: passMaxBatch, // largest single batch this pass (should be ≤ maxEvictPerTick)
+      maxBatch: passMaxBatch, // largest single batch this pass (should be ≤ passBatchCap)
       yields: passYields, // times a batch was deferred due to active scrolling
       aborted: passAborted, // 1 if the pass aborted on a far jump
       passMs: Math.round(nowMs() - passStartT), // wall time pass→finish (incl. idle gaps)
@@ -456,12 +494,17 @@ export function initSkmWorkingSetEvictor(
       decodedBeforeMB: passDecodedBeforeMB,
       decodedAfterMB: Math.round(((cache as any).getCacheSize?.() || 0) / 1048576),
       totalEvicted: evictionCount,
-      batchCap: maxEvictPerTick,
+      batchCap: passBatchCap,
       reactiveSkip: false, // this snapshot is from a real eviction pass
       reactiveSkips,
       orphans: passOrphans, // orphan (closed-series) images queued this pass (Fix 3b)
       orphanSweeps, // cumulative passes that queued ≥1 orphan
       orphanQueuedTotal, // cumulative orphan images queued (Fix 3b)
+      idleOutsideKeepCleanupEnabled,
+      idleOutsideKeepCleanupActive: passIdleOutsideKeepCleanupActive,
+      reactivePathReason: passIdleOutsideKeepCleanupActive
+        ? 'idle-outside-keep-cleanup'
+        : 'windowed-eviction-queued',
     };
     (globalThis as any).__skmEvictorLast = last;
     return last;
@@ -518,7 +561,7 @@ export function initSkmWorkingSetEvictor(
 
     const t0 = nowMs();
     let removedThisBatch = 0;
-    while (removedThisBatch < maxEvictPerTick && passCandidates.length) {
+    while (removedThisBatch < passBatchCap && passCandidates.length) {
       const imageId = passCandidates.pop() as string;
       if (!imageId || passKeep.has(imageId)) {
         continue; // protected (keep-set from pass start) — never evict
@@ -702,11 +745,23 @@ export function initSkmWorkingSetEvictor(
       const underPressure =
         effectiveReactiveHighWater <= 0 || fill >= effectiveReactiveHighWater;
 
-      // Collect decoded slices OUTSIDE the keep-set (windowed candidates), deduped — only under
-      // memory pressure; otherwise the whole resident window is kept.
+      // Idle outside-keep cleanup (default OFF): below reactive gate, may still scan for
+      // outside-keep candidates after a long quiet period. Active scrolling fails the quiet
+      // gate; runBatch still defers on inputQuietMs and aborts on far moves.
+      const msSinceLastInput = lastInputAt > 0 ? Math.max(0, nowMs() - lastInputAt) : 0;
+      const idleScan = evaluateIdleOutsideKeepScanGate({
+        enabled: idleOutsideKeepCleanupEnabled,
+        underPressure,
+        msSinceLastInput,
+        idleOutsideKeepQuietMs,
+      });
+      const collectWindowed = shouldCollectWindowedCandidates(underPressure, idleScan);
+
+      // Collect decoded slices OUTSIDE the keep-set (windowed candidates), deduped.
+      // Under pressure: always (Fix 3). Below pressure: only when idle cleanup gate allows.
       const candidateSet = new Set<string>();
       const windowed: string[] = [];
-      if (underPressure) {
+      if (collectWindowed) {
         for (const { imageIds } of stackVps) {
           for (let i = 0; i < imageIds.length; i++) {
             const imageId = imageIds[i];
@@ -726,6 +781,18 @@ export function initSkmWorkingSetEvictor(
           }
         }
       }
+
+      const idleOutsideKeepCleanupActive = isIdleOutsideKeepCleanupActive(
+        underPressure,
+        idleScan,
+        windowed.length
+      );
+      const passCap = resolveEvictBatchCap({
+        underPressure,
+        idleOutsideKeepCleanupActive,
+        maxEvictPerTick,
+        maxIdleEvictPerTick,
+      });
 
       // ── Fix 3b (ORPHAN eviction) ───────────────────────────────────────────
       // Decoded images belonging to series NO LONGER displayed in any viewport (e.g. after the
@@ -783,20 +850,17 @@ export function initSkmWorkingSetEvictor(
         /* best-effort diagnostics */
       }
 
-      // Why the reactive/windowed path ran or skipped (diagnostics only).
-      let reactivePathReason: string;
-      if (windowed.length > 0) {
-        reactivePathReason = 'windowed-eviction-queued';
-      } else if (orphans.length > 0) {
-        reactivePathReason = underPressure
-          ? 'orphan-eviction-queued'
-          : 'orphan-eviction-queued-below-reactive-gate';
-      } else if (!underPressure) {
-        reactivePathReason = `skipped-below-effective-reactive-high-water(fill=${Math.round(fill * 100)}%<${Math.round(effectiveReactiveHighWater * 100)}%)`;
-      } else {
-        reactivePathReason =
-          'under-pressure-but-no-candidates-outside-keep';
-      }
+      // Why the reactive/windowed/idle path ran or skipped (diagnostics only).
+      const fillPctRounded = Math.round(fill * 100);
+      const reactivePathReason = resolveWindowedPathReason({
+        underPressure,
+        idleScan,
+        windowedCount: windowed.length,
+        orphanCount: orphans.length,
+        fillPct: fillPctRounded,
+        effectiveReactiveHighWater,
+      });
+      // "Reactive skip" = below pressure and no work queued (idle cleanup may still run).
       const reactiveSkip = !underPressure && !windowed.length && !orphans.length;
 
       // SKM 2026-10-10 (diagnostics-only, additive): publish a FRESH pass record — center,
@@ -821,7 +885,7 @@ export function initSkmWorkingSetEvictor(
             keepBehind: keepBehindN,
             stackViewports: stackVps.length,
             protectedCount: keep.size,
-            fillPct: Math.round(fill * 100),
+            fillPct: fillPctRounded,
             underPressure,
             windowedCandidates: windowed.length,
             orphanCandidates: orphans.length,
@@ -841,6 +905,10 @@ export function initSkmWorkingSetEvictor(
             reactivePathReason,
             cacheBytes: curBytes,
             cacheCapBytes: capBytes,
+            idleOutsideKeepCleanupEnabled,
+            idleOutsideKeepCleanupActive,
+            idleOutsideKeepGateReason: idleScan.idleGateReason,
+            passBatchCap: passCap,
           });
         } catch (e) {
           /* diagnostics must never break eviction */
@@ -856,7 +924,7 @@ export function initSkmWorkingSetEvictor(
         (globalThis as any).__skmEvictorLast = {
           ...((globalThis as any).__skmEvictorLast || {}),
           reactiveSkip: !underPressure,
-          fillPct: Math.round(fill * 100),
+          fillPct: fillPctRounded,
           reactiveSkips,
           orphanSweeps,
           orphanQueuedTotal,
@@ -870,6 +938,12 @@ export function initSkmWorkingSetEvictor(
           reactivePathReason,
           cacheEntriesOutsideKeep,
           cacheEntriesTotal,
+          idleOutsideKeepCleanupEnabled,
+          idleOutsideKeepCleanupActive: false,
+          idleOutsideKeepGateReason: idleScan.idleGateReason,
+          passBatchCap: passCap,
+          windowedCandidates: 0,
+          underPressure,
         };
         return;
       }
@@ -902,6 +976,8 @@ export function initSkmWorkingSetEvictor(
       passKeepBehindN = keepBehindN;
       passProtected = keep.size;
       passStackVps = stackVps.length;
+      passBatchCap = passCap;
+      passIdleOutsideKeepCleanupActive = idleOutsideKeepCleanupActive;
 
       if (!passCandidates.length) {
         finishPass('empty');
@@ -967,6 +1043,9 @@ export function initSkmWorkingSetEvictor(
         : ' | Experiment A TEST keep override OFF (production keep sizing)') +
       (testReactiveTriggerActive
         ? ` | Experiment B TEST reactive trigger ON: effective ${effectiveReactiveHighWater} (production configured ${reactiveHighWater})`
-        : ' | Experiment B TEST reactive trigger OFF (production 0.85 path)')
+        : ' | Experiment B TEST reactive trigger OFF (production 0.85 path)') +
+      (idleOutsideKeepCleanupEnabled
+        ? ` | idleOutsideKeepCleanup ON: quiet≥${idleOutsideKeepQuietMs}ms, idleBatchCap ${maxIdleEvictPerTick}`
+        : ' | idleOutsideKeepCleanup OFF (default)')
   );
 }
