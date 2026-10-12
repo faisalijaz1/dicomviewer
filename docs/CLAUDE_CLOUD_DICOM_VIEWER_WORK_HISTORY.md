@@ -816,6 +816,7 @@ lane (8) already had spare capacity.
 - Memory-reclamation canaries remain paused (do not change reactive/idle/budget
   thresholds as part of multi-viewport work).
 - **Still NOT yet proven:** adaptive prefetch concurrency A/B (`60d5317`).
+- **Prefetch 15–20 canary rolled back (2026-10-12):** commit `4e2bc4f` raised min/base/max/multiTab to 15/15/20/20, the prefetch pool lane to 20, and set `canaryDecodeAheadCap: 20`. Manual two-viewport scrolling showed more loading spinners and lag. Office config is back to min 4, base 8, max 10, multiTab 6, prefetch lane 10, decode-ahead = workers−1. Scroll behavior after this rollback has not been retested.
 - **Proven in office:** memory governor (6.2), 2816/4096 profile (16 GB 1-tab &
   2-tab), Preferences UI.
 
