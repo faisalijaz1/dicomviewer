@@ -813,6 +813,13 @@ lane (8) already had spare capacity.
   prefetch. Follow-up: series-aware nearSkip + `activeBias:1` (see
   `docs/SKM_MULTI_VIEWPORT_PERF_AUDIT.md`). **Office Scenario A/B vs `2523c72`
   required before production deploy. Incomplete runs are not benchmarks.**
+- **Slice thumb and input stamp follow-up (2026-10-12):** fast ArrowDown left
+  `aria-valuenow` up to 4 behind the viewport index because React committed an older
+  slice over the direct paint, and the thumb only listened for `STACK_NEW_IMAGE`.
+  It now also paints on stack scroll and again after each React commit.
+  `data-skm-slice-index` is the per-slice marker; integer CSS pixels still share
+  several slices on a 3674-slice track. Reactive-skip snapshots now refresh
+  `lastInputAt` / `msSinceInput`, and each input stamp writes them immediately.
 - **Slice thumb tracks the displayed index (2026-10-12):** the progress-scrollbar
   thumb used whole pixel buckets, so it stayed still for several slices, and fast
   scroll queued a React overlay render behind the canvas. The thumb now moves

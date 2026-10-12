@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   cache as cornerstoneCache,
   Enums,
@@ -21,13 +21,14 @@ function paintSliceIndicator(
   }
   const clamped = Math.max(0, Math.min(numberOfSlices - 1, imageIndex));
   const thumb = element.querySelector('[data-skm-slice-indicator]') as HTMLElement | null;
-  if (thumb) {
-    const fillTop = Number(thumb.dataset.skmFillTop);
-    const maxTop = Number(thumb.dataset.skmMaxTop);
-    if (Number.isFinite(fillTop) && Number.isFinite(maxTop)) {
-      thumb.style.top = `${fillTop + (clamped / (numberOfSlices - 1)) * maxTop}px`;
+    if (thumb) {
+      const fillTop = Number(thumb.dataset.skmFillTop);
+      const maxTop = Number(thumb.dataset.skmMaxTop);
+      if (Number.isFinite(fillTop) && Number.isFinite(maxTop)) {
+        thumb.style.top = `${fillTop + (clamped / (numberOfSlices - 1)) * maxTop}px`;
+      }
+      thumb.dataset.skmSliceIndex = String(clamped);
     }
-  }
   const slider = element.querySelector('[aria-label="Image navigation scrollbar"]');
   if (slider) {
     slider.setAttribute('aria-valuenow', String(clamped));
@@ -176,14 +177,63 @@ export function useViewportSliceSync({
     };
 
     element.addEventListener(eventId, updateIndex);
+    const scrollEventName =
+      (Enums.Events as any).STACK_VIEWPORT_SCROLL || 'CORNERSTONE_STACK_VIEWPORT_SCROLL';
+    const onStackScroll = () => {
+      const live = cornerstoneViewportService.getCornerstoneViewport(viewportId);
+      if (!live || live instanceof VolumeViewport3D) {
+        return;
+      }
+      const liveIndex = live.getCurrentImageIdIndex?.();
+      const liveCount = live.getNumberOfSlices?.();
+      if (typeof liveIndex !== 'number' || typeof liveCount !== 'number') {
+        return;
+      }
+      // Requested index moves before STACK_NEW_IMAGE. Paint that index now so the
+      // thumb is not left on the previous displayed slice during a fast step.
+      paintSliceIndicator(element, liveIndex, liveCount);
+      pendingSlice = { imageIndex: liveIndex, numberOfSlices: liveCount };
+      if (sliceRaf) {
+        return;
+      }
+      sliceRaf = requestAnimationFrame(() => {
+        sliceRaf = 0;
+        if (pendingSlice) {
+          setImageSliceData(pendingSlice);
+        }
+      });
+    };
+    if (scrollEventName !== eventId) {
+      element.addEventListener(scrollEventName, onStackScroll);
+    }
 
     return () => {
       element.removeEventListener(eventId, updateIndex);
+      if (scrollEventName !== eventId) {
+        element.removeEventListener(scrollEventName, onStackScroll);
+      }
       if (sliceRaf) {
         cancelAnimationFrame(sliceRaf);
       }
     };
   }, [viewportData, element, viewportId, cornerstoneViewportService, setImageSliceData]);
+
+  // A React commit of an older slice can write aria/top after the direct paint.
+  // Re-apply the viewport's current index before the browser paints.
+  useLayoutEffect(() => {
+    if (!element) {
+      return;
+    }
+    const viewport = cornerstoneViewportService.getCornerstoneViewport(viewportId);
+    if (!viewport || viewport instanceof VolumeViewport3D) {
+      return;
+    }
+    const liveIndex = viewport.getCurrentImageIdIndex?.();
+    const liveCount = viewport.getNumberOfSlices?.();
+    if (typeof liveIndex === 'number' && typeof liveCount === 'number') {
+      paintSliceIndicator(element, liveIndex, liveCount);
+    }
+  });
 }
 
 export function useLoadedSliceBytes({

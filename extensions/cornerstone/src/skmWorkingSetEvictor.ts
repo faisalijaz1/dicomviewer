@@ -1076,6 +1076,8 @@ export function initSkmWorkingSetEvictor(
           passBatchCap: passCap,
           windowedCandidates: 0,
           underPressure,
+          lastInputAt,
+          msSinceInput: lastInputAt > 0 ? Math.max(0, Math.round(nowMs() - lastInputAt)) : null,
         };
         return;
       }
@@ -1141,8 +1143,24 @@ export function initSkmWorkingSetEvictor(
   // STACK_NEW_IMAGE is a NON-bubbling element CustomEvent; wire it PER ELEMENT via
   // ELEMENT_ENABLED (the pattern skmTelemetry uses). Each displayed-slice change both
   // records input time (for the actively-scrolling yield) and (re)schedules a pass.
+  const publishInputStamp = () => {
+    try {
+      const last = (globalThis as any).__skmEvictorLast;
+      if (!last) {
+        return;
+      }
+      last.lastInputAt = lastInputAt;
+      last.msSinceInput = lastInputAt > 0 ? Math.max(0, Math.round(nowMs() - lastInputAt)) : null;
+    } catch (e) {
+      /* diagnostics must never break eviction */
+    }
+  };
+
   const markInteraction = () => {
     lastInputAt = nowMs();
+    // Reactive-skip passes only patch a few fields onto the previous snapshot, so a
+    // poll of __skmEvictorLast would otherwise keep the last full pass's input time.
+    publishInputStamp();
   };
   const onInput = () => {
     markInteraction();
