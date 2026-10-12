@@ -4,14 +4,21 @@
  *
  *  Policy unchanged: only writes studyPrefetcherService.config.maxNumPrefetchRequests.
  *  Decision reason + ring buffer are READ-ONLY diagnostics for Testing Agent.
+ *
+ *  Office-test fixed pin (OFF by default):
+ *    appConfig.skmPrefetchConcurrency.allowFixedPrefetchConcurrency === true
+ *    then: skmSetFixedPrefetchConcurrency(n) / skmResetFixedPrefetchConcurrency()
+ *          / skmGetFixedPrefetchConcurrency()
+ *  Pin only affects prefetch scheduling; does not change interaction lane, workers,
+ *  warmer, cache, eviction, WADO, or adaptive policy defaults.
  * ────────────────────────────────────────────────────────────────────────────
  */
 
 // eslint-disable-next-line
 import { cache } from '@cornerstonejs/core';
 import {
-  decidePrefetchConcurrencyTarget,
-  rampPrefetchConcurrency,
+  decidePrefetchConcurrencyEvalWithPin,
+  resolveFixedPrefetchPin,
   type PrefetchConcDecisionReason,
 } from './skmPrefetchConcurrencyMath';
 
@@ -36,6 +43,13 @@ export type SkmPrefetchConcurrencyConfig = {
   stepPerEval?: number;
   /** Ring buffer size for decision traces. Default 120. */
   decisionLogMax?: number;
+  /**
+   * OFFICE-TEST ONLY. Default false.
+   * When true, registers skmSet/Reset/GetFixedPrefetchConcurrency so the Testing Agent
+   * can pin maxNumPrefetchRequests across adaptive eval ticks. A console call alone cannot
+   * enable this — the flag must be true in app-config.
+   */
+  allowFixedPrefetchConcurrency?: boolean;
 };
 
 export type SkmPrefetchConcDecisionRecord = {
@@ -44,6 +58,10 @@ export type SkmPrefetchConcDecisionRecord = {
   previous: number;
   current: number;
   target: number;
+  /** Tester-requested pin when reason===test_pin; otherwise null. */
+  requested: number | null;
+  /** Value written to maxNumPrefetchRequests (same as current). */
+  configured: number;
   effective: number;
   activeTab: boolean;
   idleMs: number | null;
@@ -92,8 +110,11 @@ export function initSkmPrefetchConcurrency(
   const BACKOFF_FILL = Math.min(0.98, Math.max(RAISE_FILL + 0.05, config.backoffFill ?? 0.88));
   const STEP = Math.max(1, config.stepPerEval ?? 2);
   const LOG_MAX = Math.max(20, Math.min(500, config.decisionLogMax ?? 120));
+  const allowFixedPin = config.allowFixedPrefetchConcurrency === true;
 
   let conc = BASE;
+  /** Session pin: raw tester request; null = adaptive. Only honored when allowFixedPin. */
+  let fixedPinRequested: number | null = null;
   const decisionLog: SkmPrefetchConcDecisionRecord[] = [];
 
   const readBudget = (): any => {
@@ -171,12 +192,21 @@ export function initSkmPrefetchConcurrency(
     }
   };
 
+  const pinCaps = () => ({
+    poolOrControllerMax: MAX,
+    decodeAheadCap: decodeAheadCap(),
+    minAllowed: MIN,
+  });
+
   const idleNote = (
     reason: PrefetchConcDecisionReason,
     stackViewports: number,
     previous: number,
     current: number
   ): string | null => {
+    if (reason === 'test_pin') {
+      return null;
+    }
     if (reason === 'idle' && stackViewports >= 2 && previous > current) {
       return 'idle_overrides_multi_viewport: activeTab=false forces MIN even with ≥2 stack panes';
     }
@@ -184,6 +214,25 @@ export function initSkmPrefetchConcurrency(
       return 'idle_overrides_multi_viewport: activeTab=false; multi_viewport branch not evaluated';
     }
     return null;
+  };
+
+  const pinNote = (decision: {
+    reason: PrefetchConcDecisionReason;
+    requested: number | null;
+    configured: number;
+    effective: number;
+    cappedBelowRequest: boolean;
+  }): string | null => {
+    if (decision.reason !== 'test_pin') {
+      return null;
+    }
+    if (decision.cappedBelowRequest) {
+      return (
+        `test_pin: requested=${decision.requested} configured=${decision.configured} ` +
+        `effective=${decision.effective} (capped below request by pool/decodeAhead limits)`
+      );
+    }
+    return `test_pin: requested=${decision.requested} configured=${decision.configured} effective=${decision.effective}`;
   };
 
   const evalLoop = () => {
@@ -200,45 +249,53 @@ export function initSkmPrefetchConcurrency(
             ? b.idleMs
             : null;
 
-      const { target, reason } = decidePrefetchConcurrencyTarget({
-        activeTab: active,
-        liveTabs,
-        stackViewports,
-        fill,
-        minRequests: MIN,
-        baseRequests: BASE,
-        maxRequests: MAX,
-        multiTabRequests: MULTITAB,
-        raiseFill: RAISE_FILL,
-        backoffFill: BACKOFF_FILL,
+      const aheadCap = decodeAheadCap();
+      const decision = decidePrefetchConcurrencyEvalWithPin({
+        pinRequested: allowFixedPin ? fixedPinRequested : null,
+        pinCaps: {
+          poolOrControllerMax: MAX,
+          decodeAheadCap: aheadCap,
+          minAllowed: MIN,
+        },
+        current: conc,
+        step: STEP,
+        adaptive: {
+          activeTab: active,
+          liveTabs,
+          stackViewports,
+          fill,
+          minRequests: MIN,
+          baseRequests: BASE,
+          maxRequests: MAX,
+          multiTabRequests: MULTITAB,
+          raiseFill: RAISE_FILL,
+          backoffFill: BACKOFF_FILL,
+        },
       });
 
       const previous = conc;
-      conc = rampPrefetchConcurrency({
-        current: conc,
-        target,
-        step: STEP,
-        minRequests: MIN,
-        maxRequests: MAX,
-      });
+      conc = decision.configured;
 
       if ((sp as any).config) {
         (sp as any).config.maxNumPrefetchRequests = conc;
       }
 
-      const aheadCap = decodeAheadCap();
-      const effective =
-        typeof aheadCap === 'number' ? Math.min(conc, aheadCap) : conc;
       const sched = readScheduler();
-      const note = idleNote(reason, stackViewports, previous, conc);
+      const note =
+        pinNote(decision) || idleNote(decision.reason, stackViewports, previous, conc);
 
       const snap = {
         current: conc,
-        target,
-        effective,
-        reason,
+        target: decision.target,
+        requested: decision.requested,
+        configured: decision.configured,
+        effective: decision.effective,
+        reason: decision.reason,
         previous,
         changed: previous !== conc,
+        pinActive: decision.pinActive,
+        adaptiveEnabled: true,
+        allowFixedPrefetchConcurrency: allowFixedPin,
         active,
         idleMs,
         liveTabs,
@@ -261,11 +318,13 @@ export function initSkmPrefetchConcurrency(
 
       const rec: SkmPrefetchConcDecisionRecord = {
         t: snap.t,
-        reason,
+        reason: decision.reason,
         previous,
         current: conc,
-        target,
-        effective,
+        target: decision.target,
+        requested: decision.requested,
+        configured: decision.configured,
+        effective: decision.effective,
         activeTab: active,
         idleMs,
         liveTabs,
@@ -313,6 +372,8 @@ export function initSkmPrefetchConcurrency(
           prev: r.previous,
           curr: r.current,
           target: r.target,
+          requested: r.requested,
+          configured: r.configured,
           effective: r.effective,
           fillPct: r.fillPct,
           active: r.activeTab,
@@ -327,12 +388,125 @@ export function initSkmPrefetchConcurrency(
     return decisionLog.slice();
   };
 
+  const snapshotFixedPin = (status: string) => {
+    const aheadCap = decodeAheadCap();
+    const pin =
+      fixedPinRequested != null
+        ? resolveFixedPrefetchPin(fixedPinRequested, pinCaps())
+        : null;
+    const result = {
+      status,
+      allowFixedPrefetchConcurrency: allowFixedPin,
+      adaptiveEnabled: true,
+      pinActive: fixedPinRequested != null,
+      requested: fixedPinRequested,
+      configured: pin?.configured ?? (fixedPinRequested != null ? null : conc),
+      effectiveMax: pin?.effectiveMax ?? null,
+      current: conc,
+      cappedBelowRequest: pin?.cappedBelowRequest ?? false,
+      poolOrControllerMax: MAX,
+      decodeAheadCap: aheadCap,
+      minAllowed: MIN,
+      error: null as string | null,
+    };
+    // eslint-disable-next-line no-console
+    console.log('[SKM-PREFETCH-CONC][TEST] fixed prefetch concurrency:', result);
+    return result;
+  };
+
+  const rejectFixedPin = (status: string, error: string, requested: number | null = null) => {
+    const result = {
+      status,
+      allowFixedPrefetchConcurrency: allowFixedPin,
+      adaptiveEnabled: true,
+      pinActive: fixedPinRequested != null,
+      requested,
+      configured: null as number | null,
+      effectiveMax: null as number | null,
+      current: conc,
+      cappedBelowRequest: false,
+      poolOrControllerMax: MAX,
+      decodeAheadCap: decodeAheadCap(),
+      minAllowed: MIN,
+      error,
+    };
+    // eslint-disable-next-line no-console
+    console.warn('[SKM-PREFETCH-CONC][TEST]', error);
+    // eslint-disable-next-line no-console
+    console.log('[SKM-PREFETCH-CONC][TEST] fixed prefetch concurrency:', result);
+    return result;
+  };
+
+  (window as any).skmSetFixedPrefetchConcurrency = (n: number | null | undefined) => {
+    if (!allowFixedPin) {
+      return rejectFixedPin(
+        'rejected-gate',
+        'skmSetFixedPrefetchConcurrency rejected: allowFixedPrefetchConcurrency is false in app-config (office-test gate). Console alone cannot enable this.',
+        typeof n === 'number' ? n : null
+      );
+    }
+    if (n === null || n === undefined) {
+      fixedPinRequested = null;
+      evalLoop();
+      return snapshotFixedPin('reset');
+    }
+    const resolved = resolveFixedPrefetchPin(n, pinCaps());
+    if (!resolved.ok) {
+      return rejectFixedPin(
+        'rejected-invalid',
+        resolved.error || 'invalid pin request',
+        typeof n === 'number' ? Math.floor(n) : null
+      );
+    }
+    fixedPinRequested = resolved.requested;
+    evalLoop();
+    const snap = snapshotFixedPin(resolved.cappedBelowRequest ? 'set-capped' : 'set');
+    if (resolved.cappedBelowRequest) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[SKM-PREFETCH-CONC][TEST] requested',
+        resolved.requested,
+        'exceeds supported effective max',
+        resolved.effectiveMax,
+        '(configured=',
+        resolved.configured,
+        '). Pin held at configured; requested and effective remain distinguishable.'
+      );
+    }
+    return snap;
+  };
+
+  (window as any).skmResetFixedPrefetchConcurrency = () => {
+    if (!allowFixedPin) {
+      return rejectFixedPin(
+        'rejected-gate',
+        'skmResetFixedPrefetchConcurrency rejected: allowFixedPrefetchConcurrency is false in app-config.'
+      );
+    }
+    fixedPinRequested = null;
+    evalLoop();
+    return snapshotFixedPin('reset');
+  };
+
+  (window as any).skmGetFixedPrefetchConcurrency = () => {
+    if (!allowFixedPin) {
+      return rejectFixedPin(
+        'gate-off',
+        'allowFixedPrefetchConcurrency is false; pin APIs are inactive. Adaptive controller is running; production policy unchanged.'
+      );
+    }
+    return snapshotFixedPin(fixedPinRequested != null ? 'active' : 'inactive');
+  };
+
   // eslint-disable-next-line no-console
   console.log(
     '[SKM-PREFETCH-CONC] adaptive prefetch concurrency active —',
     `min ${MIN}, base ${BASE}, max ${MAX} (pool lane ${poolPrefetchLane}), multiTab ${MULTITAB}` +
       ` | raiseFill ${RAISE_FILL}, backoffFill ${BACKOFF_FILL}, step ${STEP}/${EVAL_MS}ms` +
-      ' | interaction lane untouched | decisions: skmPrefetchConcDecisionLog()'
+      ' | interaction lane untouched | decisions: skmPrefetchConcDecisionLog()' +
+      (allowFixedPin
+        ? ' | OFFICE-TEST pin: skmSetFixedPrefetchConcurrency(n) / skmResetFixedPrefetchConcurrency() / skmGetFixedPrefetchConcurrency()'
+        : ' | fixed pin gate OFF (allowFixedPrefetchConcurrency:false)')
   );
 }
 

@@ -1113,6 +1113,12 @@ skmSetMemoryBudget(base, ceil)  // e.g. skmSetMemoryBudget(5120, 6144) for 32 GB
 skmSetMemoryCeiling(mb)         // set only the ceiling (UI uses this)
 skmResetMemoryBudget()          // Auto / clear override
 skmGetPrefetchConcurrency()     // adaptive concurrency snapshot (__skmPrefetchConcurrency)
+// OFFICE-TEST pin (requires skmPrefetchConcurrency.allowFixedPrefetchConcurrency:true):
+skmSetFixedPrefetchConcurrency(4)   // hold configured target across adaptive ticks
+skmSetFixedPrefetchConcurrency(6)   // same; 8/10 may be capped — see requested vs effectiveMax
+skmGetFixedPrefetchConcurrency()    // { pinActive, adaptiveEnabled, requested, configured, effectiveMax }
+skmResetFixedPrefetchConcurrency()  // clear pin → normal adaptive reasons
+skmPrefetchConcDecisionLog()        // reason 'test_pin' while held
 ```
 
 **Build / deploy (office):**

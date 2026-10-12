@@ -571,6 +571,13 @@ window.config = {
     raiseFill: 0.55,      // single active tab + fill below this → raise toward max
     backoffFill: 0.88,    // fill at/above this → drop toward min (near the cap)
     stepPerEval: 2,       // ramp ±2 so concurrency never jumps in one burst
+    // OFFICE-TEST ONLY (default false in production). When true, Testing Agent may pin
+    // maxNumPrefetchRequests across adaptive eval ticks without redeploying this file:
+    //   skmSetFixedPrefetchConcurrency(4|6|…) / skmResetFixedPrefetchConcurrency()
+    //   / skmGetFixedPrefetchConcurrency()
+    // Console alone cannot enable the pin when this flag is false. Does NOT change
+    // adaptive defaults, interaction lane, workers, warmer, cache, eviction, or WADO.
+    allowFixedPrefetchConcurrency: true,
   },
 
   // SKM 2026-10-04 (Phase A — skmPurgeableStackImages): THE Cornerstone-level fix.
