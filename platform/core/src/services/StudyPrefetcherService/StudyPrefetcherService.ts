@@ -1,3 +1,4 @@
+import { alignedPrefetchWindow } from './skmWorkingSetAlignmentMath';
 import { PubSubService } from '../_shared/pubSubServiceInterface';
 import { ExtensionManager } from '../../extensions';
 import ServicesManager from '../ServicesManager';
@@ -1344,6 +1345,39 @@ class StudyPrefetcherService extends PubSubService {
     return centers;
   }
 
+  // Open stack viewports, including ones showing a different series. The evictor
+  // splits the keep budget by this count; prefetch must use the same divisor or
+  // each series prefetches a window the evictor treats as expendable.
+  private _countOpenStackViewports(): number {
+    try {
+      const services: any = this._servicesManager.services;
+      const vgs = services?.viewportGridService;
+      const csvs = services?.cornerstoneViewportService;
+      const viewports = vgs?.getState()?.viewports;
+      if (!viewports || typeof viewports.forEach !== 'function') {
+        return 1;
+      }
+      let n = 0;
+      viewports.forEach((_vp: any, viewportId: string) => {
+        const csVp = csvs?.getCornerstoneViewport?.(viewportId);
+        if (!csVp || typeof csVp.getImageIds !== 'function') {
+          return;
+        }
+        const type = String(csVp.type || '').toLowerCase();
+        if (type === 'orthographic' || type === 'volume3d' || type === 'volume_3d') {
+          return;
+        }
+        const ids = csVp.getImageIds() || [];
+        if (ids.length) {
+          n++;
+        }
+      });
+      return Math.max(1, n);
+    } catch (e) {
+      return 1;
+    }
+  }
+
   // The centre index of the ACTIVE (focused) viewport; falls back to the per-series
   // (last-writer) centre only when no active viewport is resolvable.
   private _getActiveCenter(): number {
@@ -1662,11 +1696,10 @@ class StudyPrefetcherService extends PubSubService {
     const dir = this._direction >= 0 ? 1 : -1;
     const last = imageIds.length - 1;
 
-    // Phase 1: prioritise the UNION of every pane showing this series (active pane first), not a
-    // single last-writer centre. Phase 2: divide the decode window by the number of panes so the
-    // prefetch window per pane matches the evictor's per-viewport keep (budget ÷ nStack) — this
-    // removes the prefetch>evict mismatch that caused the decode→evict→re-decode treadmill. Also
-    // intrinsically clamps the per-series window to the series length (Req 1).
+    // Phase 1: prioritise the UNION of every pane showing this series (active pane first).
+    // Phase 2: divide by max(panes of this series, open stack viewports) so two different
+    // series share the governor window the same way the evictor shares the keep budget.
+    // Same series in both panes is unchanged (both counts match). Not a second clamp.
     let centers = this._getViewportCentersForDisplaySet(displaySet.displaySetInstanceUID);
     if (!centers.length) {
       centers = [this._getCenterIndexForDisplaySet(displaySet.displaySetInstanceUID)];
@@ -1681,8 +1714,16 @@ class StudyPrefetcherService extends PubSubService {
       centers = [activeInfo.idx, ...centers.filter(c => c !== activeInfo.idx)];
     }
     const nPanes = Math.max(1, centers.length);
-    const effAhead = Math.max(immediate + 1, Math.floor(cfgAhead / nPanes));
-    const effBehind = Math.max(immediate + 1, Math.floor(cfgBehind / nPanes));
+    const openStacks = this._countOpenStackViewports();
+    const aligned = alignedPrefetchWindow({
+      configuredAhead: cfgAhead,
+      configuredBehind: cfgBehind,
+      panesShowingThisSeries: nPanes,
+      openStackViewports: openStacks,
+      immediateRadius: immediate,
+    });
+    const effAhead = aligned.ahead;
+    const effBehind = aligned.behind;
 
     // Build each pane's ordered window, then round-robin merge so no pane starves the other.
     const perCenter = centers.map(c =>
