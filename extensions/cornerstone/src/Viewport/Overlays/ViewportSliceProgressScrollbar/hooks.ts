@@ -192,20 +192,9 @@ export function useViewportSliceSync({
     element.addEventListener(eventId, updateIndex);
     const scrollEventName =
       (Enums.Events as any).STACK_VIEWPORT_SCROLL || 'CORNERSTONE_STACK_VIEWPORT_SCROLL';
-    const onStackScroll = () => {
-      const live = cornerstoneViewportService.getCornerstoneViewport(viewportId);
-      if (!live || live instanceof VolumeViewport3D) {
-        return;
-      }
-      const liveIndex = live.getCurrentImageIdIndex?.();
-      const liveCount = live.getNumberOfSlices?.();
-      if (typeof liveIndex !== 'number' || typeof liveCount !== 'number') {
-        return;
-      }
-      // Requested index moves before STACK_NEW_IMAGE. Paint that index now so the
-      // thumb is not left on the previous displayed slice during a fast step.
-      paintSliceIndicator(element, liveIndex, liveCount);
-      pendingSlice = { imageIndex: liveIndex, numberOfSlices: liveCount };
+    const publishSlice = (imageIndex: number, numberOfSlices: number) => {
+      paintSliceIndicator(element, imageIndex, numberOfSlices);
+      pendingSlice = { imageIndex, numberOfSlices };
       if (sliceRaf) {
         return;
       }
@@ -214,6 +203,34 @@ export function useViewportSliceSync({
         if (pendingSlice) {
           setImageSliceData(pendingSlice);
         }
+      });
+    };
+
+    const onStackScroll = event => {
+      const live = cornerstoneViewportService.getCornerstoneViewport(viewportId);
+      if (!live || live instanceof VolumeViewport3D) {
+        return;
+      }
+      const fromEvent = event?.detail ? getImageIndexFromEvent(event) : undefined;
+      const fromViewport = live.getCurrentImageIdIndex?.();
+      const liveIndex = typeof fromEvent === 'number' ? fromEvent : fromViewport;
+      const liveCount = live.getNumberOfSlices?.();
+      if (typeof liveIndex !== 'number' || typeof liveCount !== 'number') {
+        return;
+      }
+      // The scroll event can run before currentImageIdIndex moves. Paint the
+      // requested index now, then again after this turn so a sync sample does
+      // not observe the previous slice.
+      publishSlice(liveIndex, liveCount);
+      queueMicrotask(() => {
+        queueMicrotask(() => {
+          const again = live.getCurrentImageIdIndex?.();
+          const count = live.getNumberOfSlices?.();
+          if (typeof again !== 'number' || typeof count !== 'number') {
+            return;
+          }
+          publishSlice(again, count);
+        });
       });
     };
     if (scrollEventName !== eventId) {

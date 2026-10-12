@@ -813,6 +813,11 @@ lane (8) already had spare capacity.
   prefetch. Follow-up: series-aware nearSkip + `activeBias:1` (see
   `docs/SKM_MULTI_VIEWPORT_PERF_AUDIT.md`). **Office Scenario A/B vs `2523c72`
   required before production deploy. Incomplete runs are not benchmarks.**
+- **Slice thumb same-turn index (2026-10-13):** fast ArrowDown left aria and
+  `data-skm-slice-index` one behind `getCurrentImageIdIndex` because the scroll
+  paint read the index before it moved, and the sample ran before `STACK_NEW_IMAGE`.
+  The thumb now repaints from the viewport index after that turn. A flat decoded-cache
+  stretch of ~60 slices at ~30% fill is the ahead window, not a below-85% purge.
 - **Slice thumb paint target (2026-10-13):** direct paint queried the cornerstone
   element. The progress scrollbar is a sibling overlay, so `data-skm-slice-index`
   never appeared and aria kept updating only from React (1–2 slices behind).
