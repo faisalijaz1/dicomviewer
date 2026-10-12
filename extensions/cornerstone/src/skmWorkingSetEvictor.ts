@@ -48,7 +48,11 @@
 // eslint-disable-next-line
 import { cache, Enums } from '@cornerstonejs/core';
 import { subscribeStackNewImage } from './utils/skmStackNewImage';
-import { planInteractionEvictionBatch } from './skmEvictionInteractionMath';
+import {
+  planEvictionStep,
+  resolveInteractionHoldMs,
+  selectRemovals,
+} from './skmEvictionInteractionMath';
 import {
   evaluateIdleOutsideKeepScanGate,
   isIdleOutsideKeepCleanupActive,
@@ -110,10 +114,11 @@ export type SkmEvictionConfig = {
    * SKM 2026-10-05 (Fix 2): if the last displayed-slice change (STACK_NEW_IMAGE) was within
    * this many ms, the doctor is "actively scrolling" and the pump DEFERS the batch instead of
    * competing with the current image request/render. Default 120.
-   * SKM 2026-10-12: wheel and pressed-pointer input update the same timestamp. While it is
-   * fresh, the next batch is scheduled with setTimeout (not requestIdleCallback), so the
-   * 500 ms idle timeout cannot run removals during the gesture. A single small batch is
-   * allowed only once fill is a margin above the prefetcher's pause, which cannot refill it.
+   * SKM 2026-10-12: wheel, pressed-pointer, and keyboard slice navigation stamp the same
+   * timestamp. The guard stays active for idleTimeoutMs + inputQuietMs, not only 120ms,
+   * because a batch woken by the 500ms idle timeout otherwise sees the short window
+   * already expired. Deferred batches keep their candidate list and resume after that
+   * hold. A segment also stops after maxRemovalsPerPass or maxPassEvictMs.
    */
   inputQuietMs?: number;
   /**
@@ -175,6 +180,19 @@ export type SkmEvictionConfig = {
    * maxEvictPerTick). Default 10. Reactive-pressure passes still use maxEvictPerTick.
    */
   maxIdleEvictPerTick?: number;
+  /**
+   * Max removals in one reactive segment before the pass yields the main thread
+   * and continues later with the same candidates. Default 100 (two batches of 50).
+   */
+  maxRemovalsPerPass?: number;
+  /**
+   * Max main-thread milliseconds spent in removeImageLoadObject during one segment.
+   * Default 48, just under a long-task budget. A segment stops when either this or
+   * maxRemovalsPerPass is reached.
+   */
+  maxPassEvictMs?: number;
+  /** Gap (ms) after a segment budget before the same candidates continue. Default 50. */
+  passYieldGapMs?: number;
 };
 
 /**
@@ -280,21 +298,6 @@ function nowMs(): number {
   }
 }
 
-// Idle scheduler: requestIdleCallback when present (with a timeout so a busy tab still
-// drains), else a short setTimeout. Never a tight 0ms self-loop.
-function scheduleIdle(fn: () => void, timeoutMs: number): void {
-  try {
-    const ric = (globalThis as any).requestIdleCallback;
-    if (typeof ric === 'function') {
-      ric(fn, { timeout: timeoutMs });
-      return;
-    }
-  } catch (e) {
-    /* fall through */
-  }
-  setTimeout(fn, 16);
-}
-
 export function initSkmWorkingSetEvictor(
   servicesManager: any,
   config: SkmEvictionConfig,
@@ -325,6 +328,13 @@ export function initSkmWorkingSetEvictor(
   // Fix 3c: periodic self-tick (ms) so eviction runs during background decode without a scroll.
   const tickMs = Math.max(0, config?.tickMs ?? 750);
   const inputQuietMs = Math.max(0, config?.inputQuietMs ?? 120);
+  const interactionHoldMs = resolveInteractionHoldMs(inputQuietMs, idleTimeoutMs);
+  // Two batches of 50, or ~48ms of removal time, then yield. The 2379-image
+  // megapass was ~48 batches and ~1.5s of main-thread removal.
+  const maxRemovalsPerPass = Math.max(1, config?.maxRemovalsPerPass ?? 100);
+  const maxPassEvictMs = Math.max(1, config?.maxPassEvictMs ?? 48);
+  const passYieldGapMs = Math.max(16, config?.passYieldGapMs ?? 50);
+  const emergencyBatchCap = 10;
   const abortMoveThreshold = Math.max(1, config?.abortMoveThreshold ?? 100);
   // Experiment A (TEST-ONLY): independent keep-budget override. Default OFF.
   const testKeepWindowEnabled = config?.testKeepWindowEnabled === true;
@@ -448,6 +458,17 @@ export function initSkmWorkingSetEvictor(
   let passBatches = 0;
   let passMaxBatch = 0;
   let passYields = 0;
+  let passBudgetYields = 0;
+  let passOutcome:
+    | 'running'
+    | 'interaction-deferred'
+    | 'budget-exhausted'
+    | 'completed'
+    | 'no-eligible-candidates'
+    | 'aborted' = 'running';
+  let segmentRemoved = 0;
+  let segmentEvictMs = 0;
+  let resumeTimer: ReturnType<typeof setTimeout> | null = null;
   let passAborted = 0;
   let passOrphans = 0; // orphan (closed-series) images queued for eviction this pass (Fix 3b)
   let passStartT = 0;
@@ -492,7 +513,12 @@ export function initSkmWorkingSetEvictor(
       lastRemoved: passRemoved,
       batches: passBatches,
       maxBatch: passMaxBatch, // largest single batch this pass (should be ≤ passBatchCap)
-      yields: passYields, // times a batch was deferred due to active scrolling
+      yields: passYields, // interaction-deferred batches (removeCap 0 while the hold is active)
+      budgetYields: passBudgetYields, // segments stopped by the removal or time budget
+      passOutcome,
+      lastInputAt,
+      interactionHoldMs,
+      msSinceInput: lastInputAt > 0 ? Math.max(0, Math.round(nowMs() - lastInputAt)) : null,
       aborted: passAborted, // 1 if the pass aborted on a far jump
       passMs: Math.round(nowMs() - passStartT), // wall time pass→finish (incl. idle gaps)
       evictMs: Math.round(passEvictMs), // main-thread time actually spent removing
@@ -515,9 +541,22 @@ export function initSkmWorkingSetEvictor(
     return last;
   };
 
+  const clearResume = () => {
+    if (resumeTimer) {
+      clearTimeout(resumeTimer);
+      resumeTimer = null;
+    }
+  };
+
   const finishPass = (reason: 'drained' | 'aborted' | 'empty') => {
+    clearResume();
     if (reason === 'aborted') {
       passAborted = 1;
+      passOutcome = 'aborted';
+    } else if (passRemoved > 0) {
+      passOutcome = 'completed';
+    } else {
+      passOutcome = 'no-eligible-candidates';
     }
     const last = publishLast();
     passActive = false;
@@ -528,9 +567,10 @@ export function initSkmWorkingSetEvictor(
     if (passRemoved > 0 || reason === 'aborted') {
       // eslint-disable-next-line no-console
       console.log(
-        `[SKM-EVICTOR] pass#${passSeq} ${reason}: center=${lastCenter} ` +
+        `[SKM-EVICTOR] pass#${passSeq} ${passOutcome}: center=${lastCenter} ` +
           `keep=[${last.keepLo}..${last.keepHi}] removed=${passRemoved} in ${passBatches} batch(es) ` +
-          `(max ${passMaxBatch}/${maxEvictPerTick}, yields ${passYields}, orphans ${passOrphans}) ` +
+          `(max ${passMaxBatch}/${maxEvictPerTick}, yields ${passYields}, ` +
+          `budgetYields ${passBudgetYields}, orphans ${passOrphans}) ` +
           `decodedMB ${passDecodedBeforeMB}→${last.decodedAfterMB} evictMs ${last.evictMs} ` +
           `(total ${evictionCount})`
       );
@@ -565,68 +605,88 @@ export function initSkmWorkingSetEvictor(
     }
   };
 
-  const interactionActive = (): boolean =>
-    inputQuietMs > 0 && nowMs() - lastInputAt < inputQuietMs;
-
-  // Wait out the quiet interval. Not requestIdleCallback: its timeout would run
-  // this function during a busy scroll even when the guard still wants to defer.
-  const scheduleQuietWait = () => {
-    const wait = Math.max(16, inputQuietMs - (nowMs() - lastInputAt));
-    setTimeout(runBatch, wait);
+  // One continuation timer. resetSegment lets the next step remove again after a
+  // budget or emergency pause; interaction deferrals keep the current segment counts.
+  let resetSegmentOnResume = false;
+  const scheduleResume = (waitMs: number, resetSegment: boolean) => {
+    clearResume();
+    resetSegmentOnResume = resetSegment;
+    resumeTimer = setTimeout(() => {
+      resumeTimer = null;
+      if (resetSegmentOnResume) {
+        segmentRemoved = 0;
+        segmentEvictMs = 0;
+        resetSegmentOnResume = false;
+      }
+      runBatch();
+    }, Math.max(16, waitMs));
   };
 
-  // Run ONE small batch of removals from passCandidates, then either schedule the next
-  // batch (idle) or finish the pass. Defers if the doctor is actively scrolling; aborts if
-  // the centre jumped far since the pass started.
+  // Run ONE small batch, then return the main thread. Rechecks input and the segment
+  // budget immediately before any removal. Does not use requestIdleCallback: its
+  // timeout forced batches during scroll after the 120ms window had expired.
   const runBatch = () => {
     if (!passActive) {
       return;
     }
-    if (!passCandidates.length) {
-      finishPass('drained');
-      return;
-    }
 
-    // Abort a pass whose keep-set is now stale because the doctor jumped far. The next
-    // STACK_NEW_IMAGE already (re)scheduled a pass that will recompute around the new centre.
     if (Math.abs(currentActiveCenter() - passCenterAtStart) > abortMoveThreshold) {
       finishPass('aborted');
       return;
     }
 
-    // Recheck immediately before this batch. Wheel/pointer/STACK_NEW_IMAGE all stamp
-    // lastInputAt. While that stamp is fresh, do not remove unless fill is already
-    // above the prefetcher pause by the emergency margin — and then only one small batch.
-    const plan = planInteractionEvictionBatch({
-      interacting: interactionActive(),
+    const plan = planEvictionStep({
+      candidatesRemaining: passCandidates.length,
+      removedThisPass: passRemoved,
+      segmentRemoved,
+      segmentEvictMs,
+      now: nowMs(),
+      lastInputAt,
+      holdMs: interactionHoldMs,
       fill: cacheFill(),
       prefetchPauseFill: readPrefetchPauseFill(),
       normalBatchCap: passBatchCap,
-      emergencyBatchCap: 10,
+      emergencyBatchCap,
+      maxRemovalsPerSegment: maxRemovalsPerPass,
+      maxSegmentEvictMs: maxPassEvictMs,
+      yieldGapMs: passYieldGapMs,
     });
-    if (plan.removeCap <= 0) {
+
+    if (plan.outcome === 'completed' || plan.outcome === 'no-eligible-candidates') {
+      finishPass('drained');
+      return;
+    }
+    if (plan.outcome === 'interaction-deferred') {
       passYields++;
-      scheduleQuietWait();
+      passOutcome = 'interaction-deferred';
+      publishLast();
+      scheduleResume(plan.waitMs, false);
+      return;
+    }
+    if (plan.outcome === 'budget-exhausted') {
+      passBudgetYields++;
+      passOutcome = 'budget-exhausted';
+      publishLast();
+      scheduleResume(plan.waitMs, true);
       return;
     }
 
     const t0 = nowMs();
+    const selected = selectRemovals({
+      candidates: passCandidates,
+      isProtected: imageId => passKeep.has(imageId),
+      isPresent: imageId => {
+        try {
+          return !!(cache as any).getImageLoadObject?.(imageId);
+        } catch (e) {
+          return false;
+        }
+      },
+      removeCap: plan.removeCap,
+      maxExaminations: 400,
+    });
     let removedThisBatch = 0;
-    while (removedThisBatch < plan.removeCap && passCandidates.length) {
-      const imageId = passCandidates.pop() as string;
-      if (!imageId || passKeep.has(imageId)) {
-        continue; // protected (keep-set from pass start) — never evict
-      }
-      // Only purge things actually taking decoded memory right now.
-      let present = false;
-      try {
-        present = !!(cache as any).getImageLoadObject?.(imageId);
-      } catch (e) {
-        present = false;
-      }
-      if (!present) {
-        continue;
-      }
+    for (const imageId of selected.removed) {
       try {
         (cache as any).removeImageLoadObject(imageId);
         removedThisBatch++;
@@ -636,6 +696,8 @@ export function initSkmWorkingSetEvictor(
     }
     const dt = nowMs() - t0;
     passEvictMs += dt;
+    segmentEvictMs += dt;
+    segmentRemoved += removedThisBatch;
 
     if (removedThisBatch > 0) {
       evictionCount += removedThisBatch;
@@ -645,19 +707,19 @@ export function initSkmWorkingSetEvictor(
       if (removedThisBatch > passMaxBatch) {
         passMaxBatch = removedThisBatch;
       }
-      recentBatches.push({ t: Date.now(), size: removedThisBatch, ms: Math.round(dt), pass: passSeq });
+      recentBatches.push({
+        t: Date.now(),
+        size: removedThisBatch,
+        ms: Math.round(dt),
+        pass: passSeq,
+      });
       if (recentBatches.length > 60) {
         recentBatches.shift();
       }
       (globalThis as any).__skmEvictorBatches = recentBatches;
 
-      // SKM 2026-10-10 (diagnostics-only, additive): a REAL eviction happened — distinct
-      // from a pass merely running (see onPass above). No decision is made here.
       if (diagnosticHooks?.onEvict) {
         try {
-          // SKM 2026-10-10: same clock as age math in skmEvictionDiagnostics (nowMs /
-          // performance.now) — never Date.now(), which mixed clocks and produced
-          // huge negative ages while valid stayed true.
           diagnosticHooks.onEvict({
             ts: nowMs(),
             center: currentActiveCenter(),
@@ -671,18 +733,33 @@ export function initSkmWorkingSetEvictor(
       }
     }
 
-    // Publish incrementally so telemetry can read progress mid-pass.
-    publishLast();
-
-    if (passCandidates.length) {
-      if (plan.next === 'quiet-wait') {
-        scheduleQuietWait();
-      } else {
-        scheduleIdle(runBatch, idleTimeoutMs);
-      }
-    } else {
-      finishPass('drained');
+    if (!passCandidates.length) {
+      finishPass(passRemoved > 0 ? 'drained' : 'empty');
+      return;
     }
+
+    // Emergency: at most one small batch, then the full hold. That cannot walk
+    // fill from the emergency line back through the prefetch pause in one step,
+    // and the next step rechecks fill before removing anything else.
+    if (plan.emergency) {
+      segmentRemoved = maxRemovalsPerPass;
+      passOutcome = 'budget-exhausted';
+      publishLast();
+      scheduleResume(interactionHoldMs, true);
+      return;
+    }
+
+    if (segmentRemoved >= maxRemovalsPerPass || segmentEvictMs >= maxPassEvictMs) {
+      passBudgetYields++;
+      passOutcome = 'budget-exhausted';
+      publishLast();
+      scheduleResume(passYieldGapMs, true);
+      return;
+    }
+
+    passOutcome = 'running';
+    publishLast();
+    scheduleResume(passYieldGapMs, false);
   };
 
   // Build the keep-set + candidate list for a new pass (the cheap scan), then start the
@@ -1022,6 +1099,10 @@ export function initSkmWorkingSetEvictor(
       passBatches = 0;
       passMaxBatch = 0;
       passYields = 0;
+      passBudgetYields = 0;
+      passOutcome = 'running';
+      segmentRemoved = 0;
+      segmentEvictMs = 0;
       passAborted = 0;
       passStartT = nowMs();
       passEvictMs = 0;
@@ -1039,7 +1120,7 @@ export function initSkmWorkingSetEvictor(
         return;
       }
 
-      scheduleIdle(runBatch, idleTimeoutMs);
+      scheduleResume(16, false);
     } catch (e) {
       // best-effort; never break scrolling
       passActive = false;
@@ -1083,6 +1164,26 @@ export function initSkmWorkingSetEvictor(
       },
       listenOpts
     );
+    window.addEventListener(
+      'keydown',
+      (evt: KeyboardEvent) => {
+        switch (evt.key) {
+          case 'ArrowUp':
+          case 'ArrowDown':
+          case 'ArrowLeft':
+          case 'ArrowRight':
+          case 'PageUp':
+          case 'PageDown':
+          case 'Home':
+          case 'End':
+            markInteraction();
+            break;
+          default:
+            break;
+        }
+      },
+      listenOpts
+    );
   } catch (e) {
     /* best-effort */
   }
@@ -1109,8 +1210,9 @@ export function initSkmWorkingSetEvictor(
       ? `[SKM-EVICTOR] active, BUDGET-BASED: fill ${Math.round(budgetFraction * 100)}% of cap, ` +
         `aheadBias ${aheadBias}, margin ${margin} (keep window sized live from avg slice bytes)`
       : `[SKM-EVICTOR] active, fixed window: keep ${keepBehind}+${keepAhead} (+${margin}) slices`) +
-      ` | Fix 2: idle-batched, batchCap ${maxEvictPerTick}, inputQuiet ${inputQuietMs}ms, ` +
-      `abortMove ${abortMoveThreshold}, idleTimeout ${idleTimeoutMs}ms` +
+      ` | Fix 2: segment budget ${maxRemovalsPerPass} removals or ${maxPassEvictMs}ms, ` +
+      `batchCap ${maxEvictPerTick}, interactionHold ${interactionHoldMs}ms ` +
+      `(quiet ${inputQuietMs} + idle ${idleTimeoutMs}), abortMove ${abortMoveThreshold}` +
       ` | Fix 3: reactive, configured ≥ ${Math.round(reactiveHighWater * 100)}%` +
       `, effective ≥ ${Math.round(effectiveReactiveHighWater * 100)}% of cap` +
       ` | Fix 3c: self-tick ${tickMs}ms (orphan reclaim without scroll)` +
