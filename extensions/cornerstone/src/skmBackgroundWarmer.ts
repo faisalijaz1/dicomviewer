@@ -715,22 +715,31 @@ export function initSkmWarmer(
     return out;
   };
 
-  const fairFetchOne = async (imageId: string, signal: AbortSignal): Promise<void> => {
+  const fairRetryCounts = new Map<string, number>();
+  const FAIR_MAX_RETRIES = 2;
+  // After queues drain, only re-enqueue a small gap (true holes / failed fetches).
+  // Large gaps are the preferred nearSkip band still owned by prefetch — do not storm.
+  const FAIR_RECONCILE_MAX_MISSING = 8;
+  let fairNeedsReconcile = true;
+
+  type FairFetchResult = 'ok' | 'fail' | 'abort' | 'skip';
+
+  const fairFetchOne = async (imageId: string, signal: AbortSignal): Promise<FairFetchResult> => {
     if (!imageId || signal.aborted || warmedImageIds.has(imageId)) {
-      return;
+      return signal.aborted ? 'abort' : 'skip';
     }
     try {
       if (cache.getImageLoadObject && cache.getImageLoadObject(imageId)) {
         warmedImageIds.add(imageId);
         emitAvailable(imageId);
-        return;
+        return 'ok';
       }
     } catch (e) {
       /* fetch */
     }
     const url = urlFromImageId(imageId);
     if (!url) {
-      return;
+      return 'fail';
     }
     warmerInFlightFetches++;
     try {
@@ -739,13 +748,19 @@ export function initSkmWarmer(
         await res.arrayBuffer().catch(() => undefined);
         warmedImageIds.add(imageId);
         emitAvailable(imageId);
-      } else if (res.body) {
+        fairRetryCounts.delete(imageId);
+        return 'ok';
+      }
+      if (res.body) {
         await res.body.cancel().catch(() => undefined);
       }
+      return 'fail';
     } catch (e) {
       if ((e as any)?.name === 'AbortError') {
         warmerFetchAbortedCount++;
+        return 'abort';
       }
+      return 'fail';
     } finally {
       warmerInFlightFetches--;
     }
@@ -801,9 +816,20 @@ export function initSkmWarmer(
         } else {
           fairPicksOther++;
         }
-        const p = fairFetchOne(imageId, job.controller.signal).finally(() => {
-          inflight.delete(p);
-        });
+        const jobRef = job;
+        const p = fairFetchOne(imageId, job.controller.signal)
+          .then(result => {
+            if (result === 'fail' && !jobRef.controller.signal.aborted) {
+              const n = fairRetryCounts.get(imageId) || 0;
+              if (n < FAIR_MAX_RETRIES) {
+                fairRetryCounts.set(imageId, n + 1);
+                jobRef.queue.push(imageId);
+              }
+            }
+          })
+          .finally(() => {
+            inflight.delete(p);
+          });
         inflight.add(p);
         await new Promise(r => setTimeout(r, 0)); // yield to interaction lane
       }
@@ -811,9 +837,60 @@ export function initSkmWarmer(
       fairPumpRunning = false;
     }
     // fairSync may have enqueued work while we were exiting; restart if needed.
-    const hasWork = Array.from(fairJobs.values()).some(
+    let hasWork = Array.from(fairJobs.values()).some(
       j => !j.controller.signal.aborted && j.queue.length > 0
     );
+    if (!hasWork && fairNeedsReconcile) {
+      fairNeedsReconcile = false;
+      let missing = 0;
+      let cacheEmitted = 0;
+      const toEnqueue: Array<{ job: FairJob; imageId: string }> = [];
+      for (const s of mwGetOpenSeries()) {
+        const job = fairJobs.get(s.dsUID);
+        if (!job || job.controller.signal.aborted) {
+          continue;
+        }
+        for (const id of s.imageIds) {
+          if (!id || warmedImageIds.has(id)) {
+            continue;
+          }
+          try {
+            if (cache.getImageLoadObject && cache.getImageLoadObject(id)) {
+              warmedImageIds.add(id);
+              emitAvailable(id);
+              cacheEmitted++;
+              continue;
+            }
+          } catch (e) {
+            /* enqueue */
+          }
+          toEnqueue.push({ job, imageId: id });
+          missing++;
+        }
+      }
+      if (toEnqueue.length > 0 && toEnqueue.length <= FAIR_RECONCILE_MAX_MISSING) {
+        for (const item of toEnqueue) {
+          item.job.queue.push(item.imageId);
+        }
+        // eslint-disable-next-line no-console
+        console.log(
+          '[SKM-WARMER] drain reconcile: enqueued ' +
+            toEnqueue.length +
+            ' unwarmed hole(s); cache-emitted ' +
+            cacheEmitted
+        );
+        hasWork = true;
+      } else if (missing > FAIR_RECONCILE_MAX_MISSING) {
+        // eslint-disable-next-line no-console
+        console.log(
+          '[SKM-WARMER] drain reconcile: ' +
+            missing +
+            ' still unwarmed (likely preferred nearSkip / prefetch); cache-emitted ' +
+            cacheEmitted +
+            ' — not storming warmer'
+        );
+      }
+    }
     if (hasWork) {
       void fairPumpLoop();
     }
@@ -821,6 +898,7 @@ export function initSkmWarmer(
 
   const fairSync = () => {
     fairSyncCount++;
+    fairNeedsReconcile = true;
     const open = mwGetOpenSeries();
     const openSet = new Set(open.map(s => s.dsUID));
     const active = mwGetActiveSeries();

@@ -150,6 +150,7 @@ export function useLoadedSliceBytes({
   viewportData,
   imageIds,
   imageIdToIndex,
+  imageIdToIndices,
   loadedBatchIntervalMs,
   monotonic = false,
 }: {
@@ -158,6 +159,8 @@ export function useLoadedSliceBytes({
   viewportData: ViewportData;
   imageIds: string[];
   imageIdToIndex: Map<string, number>;
+  /** When set, one imageId marks every duplicate stack index (avoids Ready N-1/N). */
+  imageIdToIndices?: Map<string, number[]>;
   loadedBatchIntervalMs: number;
   // SKM 2026-10-03 (W5): when true, a slice that was ever loaded stays lit on the
   // bar even after the LRU evicts it. Required with windowed decode (W2) — only a
@@ -202,13 +205,21 @@ export function useLoadedSliceBytes({
       return;
     }
 
+    const indicesFor = (imageId: string): number[] => {
+      const many = imageIdToIndices?.get(imageId);
+      if (many && many.length) {
+        return many;
+      }
+      const one = imageIdToIndex.get(imageId);
+      return one !== undefined ? [one] : [];
+    };
+
     const markLoaded = event => {
       const imageId = getImageIdFromCacheEvent(event);
       if (!imageId) {
         return;
       }
-      const index = imageIdToIndex.get(imageId);
-      if (index !== undefined) {
+      for (const index of indicesFor(imageId)) {
         setLoadedByte(index);
       }
     };
@@ -221,8 +232,7 @@ export function useLoadedSliceBytes({
       if (!imageId) {
         return;
       }
-      const index = imageIdToIndex.get(imageId);
-      if (index !== undefined) {
+      for (const index of indicesFor(imageId)) {
         bulkDownloadedRef.current.add(index);
         setLoadedByte(index);
       }
@@ -240,12 +250,11 @@ export function useLoadedSliceBytes({
       if (!imageId) {
         return;
       }
-      const index = imageIdToIndex.get(imageId);
-      if (index !== undefined) {
+      for (const index of indicesFor(imageId)) {
         // SKM P2: keep the bar MONOTONIC for bulk-downloaded slices even when
         // Cornerstone's LRU evicts their decoded copy (bytes still available).
         if (bulkDownloadedRef.current.has(index)) {
-          return;
+          continue;
         }
         clearLoadedByte(index);
       }
@@ -271,6 +280,7 @@ export function useLoadedSliceBytes({
     numberOfSlices,
     viewportData,
     imageIdToIndex,
+    imageIdToIndices,
     resetLoaded,
     setLoadedByte,
     clearLoadedByte,

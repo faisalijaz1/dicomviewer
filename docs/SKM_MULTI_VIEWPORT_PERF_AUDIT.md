@@ -66,3 +66,28 @@ Cold-cache and separate warm-cache; raw timestamps; repeated runs; limitations; 
 
 **Pass signals (directional):** inactive bar reaches ~100% without a long ~90% stall; last-complete wall time improves; TTFI / first-touch not regressed vs ~0.6–0.9s reference; interaction lane stays responsive.  
 **No RadiAnt claim** until comparable numbers exist.
+
+---
+
+## 6. Post-`722b80e` focused findings (3673/3674 + ~9.3s TTFI)
+
+**TA artifact:** full report for `index.62f482eb.js` was not checked into the repo; symptoms taken from the TA summary.
+
+### Issue A — Ready stuck at 3,673/3,674 after queues drained
+
+**Evidence (code):**
+- Ready denominator used `viewport.getNumberOfSlices()` while marks only resolve via `imageIds` / `imageIdToIndex` (single index; duplicates overwrite).
+- Fair warmer shifted a slice off the queue before fetch completed; non-OK / network failure did **not** re-queue → permanent unwarmed hole after drain.
+- Walk simulation: no off-by-one outside `nearSkip`; a single-slice plateau matches failure/accounting, not fairness starvation.
+
+**Likely causes (ranked):** (1) failed/aborted warmer fetch without retry; (2) progress accounting (`numberOfSlices` vs `imageIds`, or duplicate `imageId`); (3) one preferred nearSkip slice never decoded and never warmed — less likely alone if only **one** missing after long idle.
+
+**Fix (minimal):** retry failed fair fetches (≤2); drain-reconcile only when ≤8 unwarmed+uncached (emit cache hits; do not storm nearSkip); Ready total + multi-index marks from `imageIds`. Does **not** fake completion.
+
+### Issue B — ~9.3s first visible after assignment
+
+**Evidence (code):** `skmWarmer.startDelayMs` (1500) and `prefetchStartDelayMs` (1000) delay **background** work only; displayed slice still uses the interaction lane. Neither can alone explain 9.3s.
+
+**Likely causes:** cold study/metadata/assignment path, or TA waiting on Ready/overlay rather than `IMAGE_RENDERED` / first canvas paint. Historical ~0.6–0.9s is a warm-path reference.
+
+**Fix:** no scheduler change without measuring `IMAGE_RENDERED` (or equivalent) vs badge observation. TA should record both timestamps.
