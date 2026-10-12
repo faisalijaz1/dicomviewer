@@ -7,6 +7,8 @@ import {
   decidePrefetchConcurrencyEvalWithPin,
   decidePrefetchConcurrencyTarget,
   rampPrefetchConcurrency,
+  resolveConfiguredDecodeWorkerCount,
+  resolveDecodeAheadCap,
   resolveFixedPrefetchPin,
 } from './skmPrefetchConcurrencyMath.ts';
 
@@ -276,6 +278,61 @@ const pinCaps = {
   assert.equal(d.configured, 6); // ramp 4→6 step 2
   assert.equal(d.requested, null);
   assert.equal(d.pinActive, false);
+}
+
+{
+  // Production decode-ahead stays workers−1 when the canary override is absent.
+  assert.deepEqual(resolveDecodeAheadCap({ maxNumberOfWebWorkers: 7 }), {
+    cap: 6,
+    source: 'workers-minus-one',
+  });
+  assert.deepEqual(resolveDecodeAheadCap({ maxNumberOfWebWorkers: 16, canaryDecodeAheadCap: 0 }), {
+    cap: 15,
+    source: 'workers-minus-one',
+  });
+  assert.deepEqual(resolveDecodeAheadCap({ maxNumberOfWebWorkers: 7, canaryDecodeAheadCap: 20 }), {
+    cap: 20,
+    source: 'canary-override',
+  });
+  assert.equal(resolveConfiguredDecodeWorkerCount({ hardwareConcurrency: 8, maxNumberOfWebWorkers: 16 }), 7);
+  assert.equal(resolveConfiguredDecodeWorkerCount({ hardwareConcurrency: 32, maxNumberOfWebWorkers: 16 }), 16);
+}
+
+{
+  // Two viewports use multiTabRequests. With canary min 15, a leftover multiTab of 6
+  // is clamped up to 15 and never reaches max 20.
+  const clamped = decidePrefetchConcurrencyTarget({
+    ...base,
+    minRequests: 15,
+    baseRequests: 15,
+    maxRequests: 20,
+    multiTabRequests: 6,
+    stackViewports: 2,
+    fill: 0.2,
+  });
+  assert.equal(clamped.reason, 'multi_viewport');
+  assert.equal(clamped.target, 15);
+
+  const canary = decidePrefetchConcurrencyTarget({
+    ...base,
+    minRequests: 15,
+    baseRequests: 15,
+    maxRequests: 20,
+    multiTabRequests: 20,
+    stackViewports: 2,
+    fill: 0.2,
+  });
+  assert.equal(canary.reason, 'multi_viewport');
+  assert.equal(canary.target, 20);
+
+  const seeded = rampPrefetchConcurrency({
+    current: 15,
+    target: 20,
+    step: 2,
+    minRequests: 15,
+    maxRequests: 20,
+  });
+  assert.equal(seeded, 17);
 }
 
 console.log('skmPrefetchConcurrencyMath.test.ts: all assertions passed');

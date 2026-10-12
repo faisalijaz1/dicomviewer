@@ -816,6 +816,7 @@ lane (8) already had spare capacity.
 - Memory-reclamation canaries remain paused (do not change reactive/idle/budget
   thresholds as part of multi-viewport work).
 - **Still NOT yet proven:** adaptive prefetch concurrency A/B (`60d5317`).
+- **Temporary office canary (2026-10-12), not a new default:** prefetch band 15–20 with pool lane 20 and `canaryDecodeAheadCap: 20`. Decode workers, warmer, interaction lane, and Bulk (still off) are unchanged. Protocol and revert: `docs/SKM_PREFETCH_CONCURRENCY_15_20_CANARY.md`. No measurements yet — revert unless the manual runs show a benefit.
 - **Proven in office:** memory governor (6.2), 2816/4096 profile (16 GB 1-tab &
   2-tab), Preferences UI.
 
@@ -1113,6 +1114,7 @@ skmSetMemoryBudget(base, ceil)  // e.g. skmSetMemoryBudget(5120, 6144) for 32 GB
 skmSetMemoryCeiling(mb)         // set only the ceiling (UI uses this)
 skmResetMemoryBudget()          // Auto / clear override
 skmGetPrefetchConcurrency()     // adaptive concurrency snapshot (__skmPrefetchConcurrency)
+skmPrefetchCanaryReport()       // configured vs effective, inflight, workers; saturation is null
 // OFFICE-TEST pin (requires skmPrefetchConcurrency.allowFixedPrefetchConcurrency:true):
 skmSetFixedPrefetchConcurrency(4)   // hold configured target across adaptive ticks
 skmSetFixedPrefetchConcurrency(6)   // same; 8/10 may be capped — see requested vs effectiveMax

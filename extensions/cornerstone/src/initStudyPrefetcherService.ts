@@ -1,4 +1,5 @@
 import { cache, imageLoadPoolManager, imageLoader, Enums, eventTarget, EVENTS as csEvents } from '@cornerstonejs/core';
+import { resolveDecodeAheadCap } from './skmPrefetchConcurrencyMath';
 import { subscribeStackNewImage } from './utils/skmStackNewImage';
 
 function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager, appConfig?: AppTypes.Config) {
@@ -16,9 +17,17 @@ function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager, a
   // StudyPrefetcherService for why this is needed and what it does and does not
   // affect. If maxNumberOfWebWorkers isn't a valid positive number for any
   // reason, this is skipped and prefetch concurrency behaves exactly as before.
-  const maxWebWorkers = appConfig?.maxNumberOfWebWorkers;
-  if (typeof maxWebWorkers === 'number' && maxWebWorkers > 0) {
-    studyPrefetcherService.maxConcurrentDecodeAheadRequests = Math.max(1, maxWebWorkers - 1);
+  // Production path: cap = maxNumberOfWebWorkers − 1 (one worker left for the
+  // displayed slice). Office canary may set skmPrefetchConcurrency.canaryDecodeAheadCap
+  // to raise ONLY this prefetch dispatch ceiling. That does not change
+  // maxNumberOfWebWorkers or the decode worker pool size.
+  const decodeAhead = resolveDecodeAheadCap({
+    maxNumberOfWebWorkers: appConfig?.maxNumberOfWebWorkers,
+    canaryDecodeAheadCap: (appConfig as any)?.skmPrefetchConcurrency?.canaryDecodeAheadCap,
+  });
+  if (decodeAhead.cap != null) {
+    studyPrefetcherService.maxConcurrentDecodeAheadRequests = decodeAhead.cap;
+    (studyPrefetcherService as any).__skmDecodeAheadSource = decodeAhead.source;
   }
 
   studyPrefetcherService.cache = {
