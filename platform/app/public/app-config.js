@@ -208,13 +208,9 @@ window.config = {
     // ceiling; the controller still throttles the prefetcher's actual inflight cap between
     // 4 and 10 from governor state + cache fill, so raising the lane alone changes nothing
     // until headroom allows. interaction stays 8 (displayed-slice priority preserved).
-    // SKM 2026-10-12 TEMP OFFICE CANARY (prefetch 15–20 test): prefetch lane 10 → 20.
-    // Required or the controller's maxRequests is clamped to this lane and effective
-    // concurrency cannot exceed 10. interaction and thumbnail are unchanged.
-    // REVERT: prefetch: 10
     interaction: 8,
     thumbnail: 2,
-    prefetch: 20
+    prefetch: 10
   },
   // ── SKM-BULK 2026-09-28 (Fix 3) ───────────────────────────────────────────
   // Batch pixel retrieval: one request pulls ~50 slices instead of 50 separate
@@ -560,36 +556,21 @@ window.config = {
   // studyPrefetcherService.config.maxNumPrefetchRequests (read live by the service); it does
   // NOT touch the governor, evictor, warmer, prefetch ordering, or Cornerstone core. The
   // INTERACTION lane (displayed slice) is a separate request-pool lane and is never changed, so
-  // the viewed slice keeps top priority. max is clamped to maxNumRequests.prefetch.
+  // the viewed slice keeps top priority. max is clamped to maxNumRequests.prefetch (10 above).
   // Gated by skmBoundedDecodeCache.enabled (same master switch as the governor).
   // Diagnostics: window.skmGetPrefetchConcurrency() / window.__skmPrefetchConcurrency.
   // TO REVERT to the old fixed cap: set enabled:false (the service then uses
   // studyPrefetcher.maxNumPrefetchRequests, i.e. 6).
-  //
-  // SKM 2026-10-12 TEMP OFFICE CANARY — prefetch concurrency 15–20.
-  // Production code defaults remain min 4 / base 8 / max 10 / multiTab 6.
-  // This block is the office override only. Protocol + revert:
-  // docs/SKM_PREFETCH_CONCURRENCY_15_20_CANARY.md
-  // Two stack viewports select multiTabRequests, not maxRequests, so multiTabRequests
-  // is 20 for this canary or the 2-viewport test would sit at minRequests (15).
-  // canaryDecodeAheadCap replaces workers−1 for prefetch dispatch only. It does NOT
-  // raise maxNumberOfWebWorkers. Decode worker count stays hardwareConcurrency−1
-  // (capped at 16). Implication: prefetch may occupy every decode worker; the
-  // displayed slice can wait on decode even though the interaction lane stays 8.
-  // REVERT this block to: min 4, base 8, max 10, multiTab 6, delete canaryDecodeAheadCap,
-  // and set maxNumRequests.prefetch back to 10.
   skmPrefetchConcurrency: {
     enabled: true,
-    minRequests: 15,      // CANARY (was 4) idle tab / near-cap backoff
-    baseRequests: 15,     // CANARY (was 8) seed / single-tab mid-fill
-    maxRequests: 20,      // CANARY (was 10) single-tab low-fill ceiling (≤ prefetch lane)
-    multiTabRequests: 20, // CANARY (was 6) ≥2 tabs AND ≥2 stack viewports
+    minRequests: 4,       // idle tab / near-cap backoff
+    baseRequests: 8,      // normal single active tab
+    maxRequests: 10,      // headroom-permitting ceiling (≤ maxNumRequests.prefetch)
+    multiTabRequests: 6,  // ≥ 2 live tabs: protect shared HTTP pool + aggregate RAM
     evalMs: 1000,
     raiseFill: 0.55,      // single active tab + fill below this → raise toward max
     backoffFill: 0.88,    // fill at/above this → drop toward min (near the cap)
     stepPerEval: 2,       // ramp ±2 so concurrency never jumps in one burst
-    // OFFICE CANARY: prefetch dispatch ceiling. Production omits this (workers−1).
-    canaryDecodeAheadCap: 20,
     // OFFICE-TEST ONLY (default false in production). When true, Testing Agent may pin
     // maxNumPrefetchRequests across adaptive eval ticks without redeploying this file:
     //   skmSetFixedPrefetchConcurrency(4|6|…) / skmResetFixedPrefetchConcurrency()

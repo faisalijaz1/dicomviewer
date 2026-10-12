@@ -27,50 +27,6 @@ export type FixedPrefetchPinCaps = {
   minAllowed?: number;
 };
 
-export type DecodeAheadCapSource = 'canary-override' | 'workers-minus-one' | 'unset';
-
-/**
- * Prefetch dispatch ceiling used by StudyPrefetcher._effectiveMaxPrefetchRequests.
- * A positive canaryDecodeAheadCap replaces workers−1 for an office test only.
- * Absent/invalid canary keeps the production formula: max(1, maxNumberOfWebWorkers − 1).
- */
-export function resolveDecodeAheadCap(input: {
-  maxNumberOfWebWorkers?: number | null;
-  canaryDecodeAheadCap?: number | null;
-}): { cap: number | null; source: DecodeAheadCapSource } {
-  const canary = input.canaryDecodeAheadCap;
-  if (typeof canary === 'number' && Number.isFinite(canary) && canary > 0) {
-    return { cap: Math.max(1, Math.floor(canary)), source: 'canary-override' };
-  }
-  const workers = input.maxNumberOfWebWorkers;
-  if (typeof workers === 'number' && Number.isFinite(workers) && workers > 0) {
-    return { cap: Math.max(1, Math.floor(workers) - 1), source: 'workers-minus-one' };
-  }
-  return { cap: null, source: 'unset' };
-}
-
-/**
- * Decode-worker count Cornerstone's WADO loader actually starts.
- * Matches initWADOImageLoader.js: min(max(hardwareConcurrency − 1, 1), maxNumberOfWebWorkers).
- * This is NOT the prefetch inflight cap.
- */
-export function resolveConfiguredDecodeWorkerCount(input: {
-  hardwareConcurrency?: number | null;
-  maxNumberOfWebWorkers?: number | null;
-}): number | null {
-  const cap = input.maxNumberOfWebWorkers;
-  if (typeof cap !== 'number' || !Number.isFinite(cap) || cap <= 0) {
-    return null;
-  }
-  const hw =
-    typeof input.hardwareConcurrency === 'number' &&
-    Number.isFinite(input.hardwareConcurrency) &&
-    input.hardwareConcurrency > 0
-      ? Math.floor(input.hardwareConcurrency)
-      : 1;
-  return Math.min(Math.max(hw - 1, 1), Math.floor(cap));
-}
-
 export type FixedPrefetchPinResult = {
   ok: boolean;
   requested: number | null;

@@ -18,8 +18,6 @@
 import { cache } from '@cornerstonejs/core';
 import {
   decidePrefetchConcurrencyEvalWithPin,
-  resolveConfiguredDecodeWorkerCount,
-  resolveDecodeAheadCap,
   resolveFixedPrefetchPin,
   type PrefetchConcDecisionReason,
 } from './skmPrefetchConcurrencyMath';
@@ -52,12 +50,6 @@ export type SkmPrefetchConcurrencyConfig = {
    * enable this — the flag must be true in app-config.
    */
   allowFixedPrefetchConcurrency?: boolean;
-  /**
-   * OFFICE CANARY ONLY. Positive number replaces the workers−1 prefetch dispatch
-   * ceiling (maxConcurrentDecodeAheadRequests). Does not change maxNumberOfWebWorkers
-   * or the decode worker pool. Omit it in production.
-   */
-  canaryDecodeAheadCap?: number;
 };
 
 export type SkmPrefetchConcDecisionRecord = {
@@ -119,17 +111,6 @@ export function initSkmPrefetchConcurrency(
   const STEP = Math.max(1, config.stepPerEval ?? 2);
   const LOG_MAX = Math.max(20, Math.min(500, config.decisionLogMax ?? 120));
   const allowFixedPin = config.allowFixedPrefetchConcurrency === true;
-  const decodeAheadResolved = resolveDecodeAheadCap({
-    maxNumberOfWebWorkers: appConfig?.maxNumberOfWebWorkers,
-    canaryDecodeAheadCap: config.canaryDecodeAheadCap,
-  });
-  const decodeWorkerCount = resolveConfiguredDecodeWorkerCount({
-    hardwareConcurrency:
-      typeof navigator !== 'undefined' ? navigator.hardwareConcurrency : null,
-    maxNumberOfWebWorkers: appConfig?.maxNumberOfWebWorkers,
-  });
-  const WORKER_SATURATION_NOTE =
-    'not measurable: dicom-image-loader does not expose queued decode-task depth';
 
   let conc = BASE;
   /** Session pin: raw tester request; null = adaptive. Only honored when allowFixedPin. */
@@ -328,12 +309,6 @@ export function initSkmPrefetchConcurrency(
         multiTab: MULTITAB,
         poolPrefetchLane,
         decodeAheadCap: aheadCap,
-        decodeAheadSource: (sp as any).__skmDecodeAheadSource || decodeAheadResolved.source,
-        decodeWorkerCount,
-        workerSaturation: null,
-        workerSaturationNote: WORKER_SATURATION_NOTE,
-        canaryDecodeAheadCap:
-          typeof config.canaryDecodeAheadCap === 'number' ? config.canaryDecodeAheadCap : null,
         schedInflight: sched.inflight,
         schedQueue: sched.queue,
         note,
@@ -383,48 +358,6 @@ export function initSkmPrefetchConcurrency(
     // eslint-disable-next-line no-console
     console.log('[SKM-PREFETCH-CONC]', (window as any).__skmPrefetchConcurrency);
     return (window as any).__skmPrefetchConcurrency;
-  };
-
-  (window as any).skmPrefetchCanaryReport = () => {
-    const conc = (window as any).__skmPrefetchConcurrency || null;
-    let warmerInFlightFetches: number | null = null;
-    try {
-      if (typeof (window as any).skmWarmerInFlight === 'function') {
-        warmerInFlightFetches = (window as any).skmWarmerInFlight();
-      }
-    } catch (e) {
-      warmerInFlightFetches = null;
-    }
-    const report = {
-      configuredMin: conc?.min ?? MIN,
-      configuredMax: conc?.max ?? MAX,
-      configuredBaseSeed: conc?.base ?? BASE,
-      configuredMultiTab: conc?.multiTab ?? MULTITAB,
-      adaptiveTarget: conc?.target ?? null,
-      configuredPrefetchLimit: conc?.configured ?? conc?.current ?? null,
-      effectivePrefetchLimit: conc?.effective ?? null,
-      reason: conc?.reason ?? null,
-      prefetchInflight: conc?.schedInflight ?? null,
-      prefetchQueue: conc?.schedQueue ?? null,
-      poolPrefetchLane: conc?.poolPrefetchLane ?? poolPrefetchLane,
-      decodeAheadCap: conc?.decodeAheadCap ?? null,
-      decodeAheadSource: conc?.decodeAheadSource ?? decodeAheadResolved.source,
-      decodeWorkerCount: conc?.decodeWorkerCount ?? decodeWorkerCount,
-      workerSaturation: null,
-      workerSaturationNote: WORKER_SATURATION_NOTE,
-      warmerInFlightFetches,
-      twoViewportNote:
-        'stackViewports>=2 selects multiTabRequests, not maxRequests. Idle selects minRequests.',
-      measureElsewhere: {
-        throughputAndUniqueUrls: 'skmThroughput.reset() then .report() / .lanes()',
-        warmerDetail: 'skmWarmerDiagnostics()',
-        cacheHitHeapErrors: 'skmTelemetry.reset() then .report() — jsHeap is JS heap only, not Task Manager RAM',
-        scrolling: 'separate pass after warm: skmScrollFollowReset() / skmScrollFollowReport()',
-      },
-    };
-    // eslint-disable-next-line no-console
-    console.log('[SKM-PREFETCH-CANARY]', report);
-    return report;
   };
 
   (window as any).skmPrefetchConcDecisionLog = () => {
@@ -570,10 +503,7 @@ export function initSkmPrefetchConcurrency(
     '[SKM-PREFETCH-CONC] adaptive prefetch concurrency active —',
     `min ${MIN}, base ${BASE}, max ${MAX} (pool lane ${poolPrefetchLane}), multiTab ${MULTITAB}` +
       ` | raiseFill ${RAISE_FILL}, backoffFill ${BACKOFF_FILL}, step ${STEP}/${EVAL_MS}ms` +
-      ` | decodeAhead ${decodeAheadResolved.cap ?? 'unset'} (${decodeAheadResolved.source})` +
-      ` workers ${decodeWorkerCount ?? 'unset'}` +
       ' | interaction lane untouched | decisions: skmPrefetchConcDecisionLog()' +
-      ' | canary: skmPrefetchCanaryReport()' +
       (allowFixedPin
         ? ' | OFFICE-TEST pin: skmSetFixedPrefetchConcurrency(n) / skmResetFixedPrefetchConcurrency() / skmGetFixedPrefetchConcurrency()'
         : ' | fixed pin gate OFF (allowFixedPrefetchConcurrency:false)')
