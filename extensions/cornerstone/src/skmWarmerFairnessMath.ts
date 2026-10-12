@@ -86,6 +86,50 @@ export function shouldApplyNearSkip(input: {
 }
 
 /**
+ * Drain-reconcile after fair queues empty.
+ *
+ * Legacy bug (warm 2VP incomplete): when missingUncached ≫ 8 the pump logged
+ * "likely preferred nearSkip" and **stopped forever** (`fairNeedsReconcile=false`),
+ * leaving Ready bars stuck (e.g. 2313/3674) even though series were still open.
+ *
+ * Correct behaviour: never abandon large holes — enqueue a bounded chunk and
+ * continue reconcile until uncached+unwarmed is empty. Cache hits are emitted
+ * separately and do not count toward enqueueCount.
+ */
+export function planFairDrainReconcile(input: {
+  missingUncachedCount: number;
+  chunkSize?: number;
+}): {
+  action: 'done' | 'enqueue-chunk';
+  enqueueCount: number;
+  continueReconcile: boolean;
+} {
+  const missing = Math.max(0, Math.floor(input.missingUncachedCount || 0));
+  const chunk = Math.max(1, Math.floor(input.chunkSize ?? 256));
+  if (missing === 0) {
+    return { action: 'done', enqueueCount: 0, continueReconcile: false };
+  }
+  const enqueueCount = Math.min(missing, chunk);
+  return {
+    action: 'enqueue-chunk',
+    enqueueCount,
+    continueReconcile: missing > chunk,
+  };
+}
+
+/**
+ * nearSkip may omit a slice from the warmer queue only when prefetch/warm already
+ * covers it. "Assumed prefetch owns near band" without cache/warm proof is what
+ * left permanent Ready holes after drain.
+ */
+export function isNearSkipActuallyCovered(input: {
+  alreadyWarmed: boolean;
+  inCornerstoneCache: boolean;
+}): boolean {
+  return !!(input.alreadyWarmed || input.inCornerstoneCache);
+}
+
+/**
  * Split a shared concurrency budget across N open series (at least 1 each when possible).
  */
 export function splitConcurrencyBudget(totalSlots: number, seriesCount: number): number[] {

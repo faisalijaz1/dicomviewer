@@ -4,7 +4,9 @@
  */
 import assert from 'node:assert/strict';
 import {
+  isNearSkipActuallyCovered,
   pickFairSeriesIndex,
+  planFairDrainReconcile,
   shouldApplyNearSkip,
   splitConcurrencyBudget,
 } from './skmWarmerFairnessMath.ts';
@@ -148,6 +150,52 @@ import {
   }
   assert.equal(active, 100);
   assert.equal(other, 100);
+}
+
+{
+  // Warm 2VP failure mode: large nearSkip/uncached hole must NOT be abandoned.
+  const big = planFairDrainReconcile({
+    missingUncachedCount: 1361, // 3674 - 2313
+    chunkSize: 256,
+  });
+  assert.equal(big.action, 'enqueue-chunk');
+  assert.equal(big.enqueueCount, 256);
+  assert.equal(big.continueReconcile, true);
+
+  const small = planFairDrainReconcile({
+    missingUncachedCount: 3,
+    chunkSize: 256,
+  });
+  assert.equal(small.action, 'enqueue-chunk');
+  assert.equal(small.enqueueCount, 3);
+  assert.equal(small.continueReconcile, false);
+
+  const done = planFairDrainReconcile({ missingUncachedCount: 0, chunkSize: 256 });
+  assert.equal(done.action, 'done');
+  assert.equal(done.continueReconcile, false);
+
+  // Legacy abandon threshold (8) must never appear as a stop condition.
+  const justOverLegacy = planFairDrainReconcile({
+    missingUncachedCount: 9,
+    chunkSize: 256,
+  });
+  assert.equal(justOverLegacy.action, 'enqueue-chunk');
+  assert.equal(justOverLegacy.enqueueCount, 9);
+}
+
+{
+  assert.equal(
+    isNearSkipActuallyCovered({ alreadyWarmed: false, inCornerstoneCache: false }),
+    false
+  );
+  assert.equal(
+    isNearSkipActuallyCovered({ alreadyWarmed: true, inCornerstoneCache: false }),
+    true
+  );
+  assert.equal(
+    isNearSkipActuallyCovered({ alreadyWarmed: false, inCornerstoneCache: true }),
+    true
+  );
 }
 
 console.log('skmWarmerFairnessMath.test.ts: all assertions passed');

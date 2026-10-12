@@ -27,7 +27,12 @@
 // eslint-disable-next-line
 import { cache, eventTarget } from '@cornerstonejs/core';
 import { subscribeStackNewImage } from './utils/skmStackNewImage';
-import { pickFairSeriesIndex, shouldApplyNearSkip } from './skmWarmerFairnessMath';
+import {
+  isNearSkipActuallyCovered,
+  pickFairSeriesIndex,
+  planFairDrainReconcile,
+  shouldApplyNearSkip,
+} from './skmWarmerFairnessMath';
 
 export type SkmWarmerConfig = {
   enabled?: boolean;
@@ -514,7 +519,22 @@ export function initSkmWarmer(
         return;
       }
       if ((skipAhead > 0 || skipBehind > 0) && i >= nearLo && i <= nearHi) {
-        return; // prefetcher owns this slice (preferred series only in fair mode)
+        // Only omit when prefetch/warm actually covers the slice — never assume.
+        let inCs = false;
+        try {
+          inCs = !!(cache.getImageLoadObject && cache.getImageLoadObject(imageIds[i]));
+        } catch (e) {
+          inCs = false;
+        }
+        if (
+          isNearSkipActuallyCovered({
+            alreadyWarmed: warmedImageIds.has(imageIds[i]),
+            inCornerstoneCache: inCs,
+          })
+        ) {
+          return;
+        }
+        // Prefetch has not loaded it yet → keep in warmer queue (avoids Ready holes).
       }
       if (warmedImageIds.has(imageIds[i])) {
         return; // already byte-warmed this session — keep the sweep list to UNwarmed only,
@@ -717,10 +737,12 @@ export function initSkmWarmer(
 
   const fairRetryCounts = new Map<string, number>();
   const FAIR_MAX_RETRIES = 2;
-  // After queues drain, only re-enqueue a small gap (true holes / failed fetches).
-  // Large gaps are the preferred nearSkip band still owned by prefetch — do not storm.
-  const FAIR_RECONCILE_MAX_MISSING = 8;
+  // After queues drain, re-enqueue unwarmed+uncached holes in chunks (never abandon
+  // large nearSkip gaps — that froze warm 2VP at e.g. 2313/3674 with pump stopped).
+  const FAIR_RECONCILE_CHUNK = 256;
   let fairNeedsReconcile = true;
+  let fairReconcilePasses = 0;
+  let fairReconcileEnqueued = 0;
 
   type FairFetchResult = 'ok' | 'fail' | 'abort' | 'skip';
 
@@ -841,8 +863,6 @@ export function initSkmWarmer(
       j => !j.controller.signal.aborted && j.queue.length > 0
     );
     if (!hasWork && fairNeedsReconcile) {
-      fairNeedsReconcile = false;
-      let missing = 0;
       let cacheEmitted = 0;
       const toEnqueue: Array<{ job: FairJob; imageId: string }> = [];
       for (const s of mwGetOpenSeries()) {
@@ -865,30 +885,40 @@ export function initSkmWarmer(
             /* enqueue */
           }
           toEnqueue.push({ job, imageId: id });
-          missing++;
         }
       }
-      if (toEnqueue.length > 0 && toEnqueue.length <= FAIR_RECONCILE_MAX_MISSING) {
-        for (const item of toEnqueue) {
+      const plan = planFairDrainReconcile({
+        missingUncachedCount: toEnqueue.length,
+        chunkSize: FAIR_RECONCILE_CHUNK,
+      });
+      if (plan.action === 'enqueue-chunk' && plan.enqueueCount > 0) {
+        const chunk = toEnqueue.slice(0, plan.enqueueCount);
+        for (const item of chunk) {
           item.job.queue.push(item.imageId);
         }
+        fairReconcilePasses++;
+        fairReconcileEnqueued += chunk.length;
+        fairNeedsReconcile = plan.continueReconcile;
+        hasWork = true;
         // eslint-disable-next-line no-console
         console.log(
           '[SKM-WARMER] drain reconcile: enqueued ' +
+            chunk.length +
+            '/' +
             toEnqueue.length +
             ' unwarmed hole(s); cache-emitted ' +
-            cacheEmitted
-        );
-        hasWork = true;
-      } else if (missing > FAIR_RECONCILE_MAX_MISSING) {
-        // eslint-disable-next-line no-console
-        console.log(
-          '[SKM-WARMER] drain reconcile: ' +
-            missing +
-            ' still unwarmed (likely preferred nearSkip / prefetch); cache-emitted ' +
             cacheEmitted +
-            ' — not storming warmer'
+            '; continue=' +
+            plan.continueReconcile
         );
+      } else {
+        fairNeedsReconcile = false;
+        if (cacheEmitted > 0) {
+          // eslint-disable-next-line no-console
+          console.log(
+            '[SKM-WARMER] drain reconcile: done (cache-emitted ' + cacheEmitted + ')'
+          );
+        }
       }
     }
     if (hasWork) {
@@ -1086,6 +1116,9 @@ export function initSkmWarmer(
       fairActiveBias,
       nearSkipPreferredOnly,
       mwFarJumpThreshold,
+      fairReconcilePasses,
+      fairReconcileEnqueued,
+      fairNeedsReconcile,
     };
     // eslint-disable-next-line no-console
     console.log('[SKM-WARMER] diagnostics:', result);
