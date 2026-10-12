@@ -28,10 +28,12 @@
 import { cache, eventTarget } from '@cornerstonejs/core';
 import { subscribeStackNewImage } from './utils/skmStackNewImage';
 import {
+  canDeclareFairWarmComplete,
   isNearSkipActuallyCovered,
   pickFairSeriesIndex,
   planFairDrainReconcile,
   shouldApplyNearSkip,
+  shouldRebuildFairQueue,
 } from './skmWarmerFairnessMath';
 
 export type SkmWarmerConfig = {
@@ -671,6 +673,7 @@ export function initSkmWarmer(
     controller: AbortController;
     center: number;
     direction: number;
+    sourceImageIdCount: number;
   };
   const fairJobs = new Map<string, FairJob>();
   let fairPreferredDsUID: string | null = null;
@@ -685,8 +688,14 @@ export function initSkmWarmer(
     dsUID: string;
     imageIds: string[];
     viewportId: string;
+    imageIdsReady: boolean;
   }> => {
-    const out: Array<{ dsUID: string; imageIds: string[]; viewportId: string }> = [];
+    const out: Array<{
+      dsUID: string;
+      imageIds: string[];
+      viewportId: string;
+      imageIdsReady: boolean;
+    }> = [];
     const seen = new Set<string>();
     try {
       const { viewportGridService, displaySetService, cornerstoneViewportService } =
@@ -700,14 +709,9 @@ export function initSkmWarmer(
       viewports.forEach((vpState: any, viewportId: string) => {
         try {
           const vp = cornerstoneViewportService?.getCornerstoneViewport?.(viewportId);
-          if (
-            vp &&
-            (vp.type === 'orthographic' ||
-              vp.type === 'volume3d' ||
-              (vp as any).type === 'ORTHOGRAPHIC' ||
-              (vp as any).type === 'VOLUME_3D')
-          ) {
-            return; // stack warmer only
+          const type = String(vp?.type || '').toLowerCase();
+          if (type === 'orthographic' || type === 'volume3d' || type === 'volume_3d') {
+            return;
           }
         } catch (e) {
           /* treat as stack candidate */
@@ -716,18 +720,24 @@ export function initSkmWarmer(
         if (!dsUID || seen.has(dsUID)) {
           return;
         }
-        const displaySet = displaySetService
-          .getActiveDisplaySets()
-          .find((ds: any) => ds.displaySetInstanceUID === dsUID);
-        if (!displaySet) {
-          return;
-        }
-        const imageIds: string[] = dataSource.getImageIdsForDisplaySet(displaySet);
-        if (!imageIds || imageIds.length === 0) {
-          return;
-        }
         seen.add(dsUID);
-        out.push({ dsUID, imageIds, viewportId });
+        let imageIds: string[] = [];
+        try {
+          const displaySet = displaySetService
+            .getActiveDisplaySets()
+            .find((ds: any) => ds.displaySetInstanceUID === dsUID);
+          if (displaySet) {
+            imageIds = dataSource.getImageIdsForDisplaySet(displaySet) || [];
+          }
+        } catch (e) {
+          imageIds = [];
+        }
+        out.push({
+          dsUID,
+          imageIds,
+          viewportId,
+          imageIdsReady: imageIds.length > 0,
+        });
       });
     } catch (e) {
       return out;
@@ -743,6 +753,10 @@ export function initSkmWarmer(
   let fairNeedsReconcile = true;
   let fairReconcilePasses = 0;
   let fairReconcileEnqueued = 0;
+  let fairSeriesWaiting = 0;
+  let fairUnwarmedOpenCount = 0;
+  let fairWarmComplete = false;
+  let fairWaitTimer: ReturnType<typeof setTimeout> | null = null;
 
   type FairFetchResult = 'ok' | 'fail' | 'abort' | 'skip';
 
@@ -864,11 +878,26 @@ export function initSkmWarmer(
     );
     if (!hasWork && fairNeedsReconcile) {
       let cacheEmitted = 0;
+      let seriesWaiting = 0;
       const toEnqueue: Array<{ job: FairJob; imageId: string }> = [];
       for (const s of mwGetOpenSeries()) {
-        const job = fairJobs.get(s.dsUID);
-        if (!job || job.controller.signal.aborted) {
+        if (!s.imageIdsReady) {
+          seriesWaiting++;
           continue;
+        }
+        let job = fairJobs.get(s.dsUID);
+        if (!job || job.controller.signal.aborted) {
+          const controller = new AbortController();
+          warmerGenerationStartedCount++;
+          job = {
+            dsUID: s.dsUID,
+            queue: [],
+            controller,
+            center: mwGetCenter(s.viewportId),
+            direction: 1,
+            sourceImageIdCount: s.imageIds.length,
+          };
+          fairJobs.set(s.dsUID, job);
         }
         for (const id of s.imageIds) {
           if (!id || warmedImageIds.has(id)) {
@@ -887,6 +916,13 @@ export function initSkmWarmer(
           toEnqueue.push({ job, imageId: id });
         }
       }
+      fairSeriesWaiting = seriesWaiting;
+      fairUnwarmedOpenCount = toEnqueue.length;
+      const warmComplete = canDeclareFairWarmComplete({
+        seriesWaitingForImageIds: seriesWaiting,
+        missingUncachedCount: toEnqueue.length,
+      });
+      fairWarmComplete = warmComplete;
       const plan = planFairDrainReconcile({
         missingUncachedCount: toEnqueue.length,
         chunkSize: FAIR_RECONCILE_CHUNK,
@@ -898,7 +934,7 @@ export function initSkmWarmer(
         }
         fairReconcilePasses++;
         fairReconcileEnqueued += chunk.length;
-        fairNeedsReconcile = plan.continueReconcile;
+        fairNeedsReconcile = true;
         hasWork = true;
         // eslint-disable-next-line no-console
         console.log(
@@ -911,6 +947,14 @@ export function initSkmWarmer(
             '; continue=' +
             plan.continueReconcile
         );
+      } else if (!warmComplete) {
+        fairNeedsReconcile = true;
+        if (!fairWaitTimer) {
+          fairWaitTimer = setTimeout(() => {
+            fairWaitTimer = null;
+            void fairPumpLoop();
+          }, 500);
+        }
       } else {
         fairNeedsReconcile = false;
         if (cacheEmitted > 0) {
@@ -922,6 +966,10 @@ export function initSkmWarmer(
       }
     }
     if (hasWork) {
+      if (fairWaitTimer) {
+        clearTimeout(fairWaitTimer);
+        fairWaitTimer = null;
+      }
       void fairPumpLoop();
     }
   };
@@ -950,6 +998,9 @@ export function initSkmWarmer(
     });
 
     for (const s of open) {
+      if (!s.imageIdsReady) {
+        continue;
+      }
       const center = mwGetCenter(s.viewportId);
       const existing = fairJobs.get(s.dsUID);
       // Prefetch owns the near band only for the preferred series (sequential panes).
@@ -967,17 +1018,26 @@ export function initSkmWarmer(
           controller,
           center,
           direction: 1,
+          sourceImageIdCount: s.imageIds.length,
         });
         continue;
       }
       const delta = center - existing.center;
-      if (preferredChanged || Math.abs(delta) >= mwFarJumpThreshold) {
+      if (
+        shouldRebuildFairQueue({
+          previousImageIdCount: existing.sourceImageIdCount,
+          currentImageIdCount: s.imageIds.length,
+          preferredChanged,
+          centerDelta: delta,
+          farJumpThreshold: mwFarJumpThreshold,
+        })
+      ) {
         if (Math.abs(delta) >= mwFarJumpThreshold) {
           existing.direction = delta >= 0 ? 1 : -1;
         }
         existing.center = center;
+        existing.sourceImageIdCount = s.imageIds.length;
         // Re-prioritise remaining work; do not abort in-flight (series still open).
-        // Preferred change rebuilds so nearSkip ownership follows focus.
         existing.queue = mwOrderedWindow(s.imageIds, center, existing.direction, {
           applyNearSkip,
         });
@@ -1119,6 +1179,9 @@ export function initSkmWarmer(
       fairReconcilePasses,
       fairReconcileEnqueued,
       fairNeedsReconcile,
+      fairSeriesWaiting,
+      fairUnwarmedOpenCount,
+      fairWarmComplete,
     };
     // eslint-disable-next-line no-console
     console.log('[SKM-WARMER] diagnostics:', result);

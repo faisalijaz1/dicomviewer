@@ -813,6 +813,17 @@ lane (8) already had spare capacity.
   prefetch. Follow-up: series-aware nearSkip + `activeBias:1` (see
   `docs/SKM_MULTI_VIEWPORT_PERF_AUDIT.md`). **Office Scenario A/B vs `2523c72`
   required before production deploy. Incomplete runs are not benchmarks.**
+- **Bounded eviction segments (2026-10-12):** a reactive pass stops after 100 removals
+  or 48 ms of removal time, keeps the remaining candidates, and continues on a
+  timeout rather than `requestIdleCallback`. Wheel, pressed-pointer, and arrow/page
+  keys hold eviction for 620 ms (`idleTimeout` 500 + quiet 120), which the 500 ms
+  idle timeout can no longer outlast. `passOutcome` is `interaction-deferred`,
+  `budget-exhausted`, `completed`, or `no-eligible-candidates`. Emergency removal
+  stays one batch of at most 10, only at fill ≥ prefetch pause + 0.05, then waits
+  out the hold. Two distinct series divide the prefetch window by the open stack
+  count (same divisor as the evictor); the keep clamp stays off. Fair warm-up does
+  not report complete while a visible series is missing imageIds or unwarmed,
+  uncached IDs. Not measured on the office viewer.
 - **Interaction-aware eviction (2026-10-12):** wheel and pressed-pointer input
   share the existing quiet timestamp. While it is fresh, removal batches wait on
   `setTimeout` and the 500 ms idle-callback timeout cannot run them. One batch of at

@@ -4,10 +4,13 @@
  */
 import assert from 'node:assert/strict';
 import {
+  canDeclareFairWarmComplete,
+  countUnwarmedUncached,
   isNearSkipActuallyCovered,
   pickFairSeriesIndex,
   planFairDrainReconcile,
   shouldApplyNearSkip,
+  shouldRebuildFairQueue,
   splitConcurrencyBudget,
 } from './skmWarmerFairnessMath.ts';
 
@@ -194,6 +197,48 @@ import {
   );
   assert.equal(
     isNearSkipActuallyCovered({ alreadyWarmed: false, inCornerstoneCache: true }),
+    true
+  );
+}
+
+{
+  // A partial queue must be rebuilt when the series imageId list grows.
+  assert.equal(
+    shouldRebuildFairQueue({
+      previousImageIdCount: 60,
+      currentImageIdCount: 3674,
+      preferredChanged: false,
+      centerDelta: 0,
+      farJumpThreshold: 120,
+    }),
+    true
+  );
+  assert.equal(
+    shouldRebuildFairQueue({
+      previousImageIdCount: 3674,
+      currentImageIdCount: 3674,
+      preferredChanged: false,
+      centerDelta: 10,
+      farJumpThreshold: 120,
+    }),
+    false
+  );
+
+  const seriesB = ['b0', 'b1', 'b2'];
+  const warmed = new Set(['a0']);
+  const cached = new Set<string>();
+  const missing = countUnwarmedUncached(seriesB, warmed, cached);
+  assert.equal(missing, 3);
+  assert.equal(
+    canDeclareFairWarmComplete({ seriesWaitingForImageIds: 0, missingUncachedCount: missing }),
+    false
+  );
+  assert.equal(
+    canDeclareFairWarmComplete({ seriesWaitingForImageIds: 1, missingUncachedCount: 0 }),
+    false
+  );
+  assert.equal(
+    canDeclareFairWarmComplete({ seriesWaitingForImageIds: 0, missingUncachedCount: 0 }),
     true
   );
 }

@@ -118,6 +118,60 @@ export function planFairDrainReconcile(input: {
 }
 
 /**
+ * A fair job's queue was built from the imageId list at that moment. Rebuild when
+ * focus changes, the centre jumps, or the series list grows (metadata arrived
+ * after a shorter list was captured). A stable centre must not freeze a partial queue.
+ */
+export function shouldRebuildFairQueue(input: {
+  previousImageIdCount: number;
+  currentImageIdCount: number;
+  preferredChanged: boolean;
+  centerDelta: number;
+  farJumpThreshold: number;
+}): boolean {
+  if (input.preferredChanged) {
+    return true;
+  }
+  const threshold = Math.max(1, Math.floor(input.farJumpThreshold) || 1);
+  if (Math.abs(input.centerDelta) >= threshold) {
+    return true;
+  }
+  const previous = Math.max(0, Math.floor(input.previousImageIdCount) || 0);
+  const current = Math.max(0, Math.floor(input.currentImageIdCount) || 0);
+  return current > previous;
+}
+
+/**
+ * Queue-empty is not completion. ImageIds that are not warmed and not in the
+ * decoded cache are still missing, and a series whose imageIds are not ready
+ * yet has not been inspected.
+ */
+export function canDeclareFairWarmComplete(input: {
+  seriesWaitingForImageIds: number;
+  missingUncachedCount: number;
+}): boolean {
+  if (Math.max(0, Math.floor(input.seriesWaitingForImageIds) || 0) > 0) {
+    return false;
+  }
+  return Math.max(0, Math.floor(input.missingUncachedCount) || 0) === 0;
+}
+
+export function countUnwarmedUncached(
+  imageIds: readonly string[],
+  warmed: ReadonlySet<string>,
+  cached: ReadonlySet<string>
+): number {
+  let missing = 0;
+  for (const id of imageIds) {
+    if (!id || warmed.has(id) || cached.has(id)) {
+      continue;
+    }
+    missing++;
+  }
+  return missing;
+}
+
+/**
  * nearSkip may omit a slice from the warmer queue only when prefetch/warm already
  * covers it. "Assumed prefetch owns near band" without cache/warm proof is what
  * left permanent Ready holes after drain.
