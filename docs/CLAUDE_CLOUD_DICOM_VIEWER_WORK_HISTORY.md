@@ -813,13 +813,15 @@ lane (8) already had spare capacity.
   prefetch. Follow-up: series-aware nearSkip + `activeBias:1` (see
   `docs/SKM_MULTI_VIEWPORT_PERF_AUDIT.md`). **Office Scenario A/B vs `2523c72`
   required before production deploy. Incomplete runs are not benchmarks.**
-- **Temporary office A+B+C memory canary (2026-10-12), not a production default:**
-  restored the `cd8c2d1` test set for a comparison against current production memory
-  behavior. `testKeepWindowEnabled: true` (700 MB), `testReactiveHighWaterEnabled: true`
-  (0.50), idle outside-keep cleanup already on (`maxIdleEvictPerTick: 10`), prefetch-keep
-  clamp already on (`navigationLeadSlices: 40`). `allowTestEviction` stays false.
-  Source defaults stay off. No memory improvement is claimed until the two-viewport
-  2×3674 comparison is measured. REVERT: both `*Enabled` flags false.
+- **Office canaries rolled back to the `1bc1058` production config (2026-10-12):**
+  Experiments A/B/C off (`testKeepWindowEnabled`, `testReactiveHighWaterEnabled`,
+  `idleOutsideKeepCleanupEnabled`, `skmPrefetchKeepClamp.enabled` all false).
+  Production `reactiveHighWater` remains 0.85. Read-only telemetry, throughput,
+  scroll-follow, study-switch, and eviction diagnostics are off.
+  `allowFixedPrefetchConcurrency` and `allowTestEviction` are false. Prefetch stays
+  min 4 / base 8 / max 10 / multiTab 6, pool lane 10, decode-ahead workers−1.
+  Bulk stays disabled. Fair-warmer behavior is unchanged. The deployed viewer is
+  not this config until the office host rebuilds and hard-refreshes.
 - **Still NOT yet proven:** adaptive prefetch concurrency A/B (`60d5317`).
 - **Prefetch 15–20 canary rolled back (2026-10-12):** commit `4e2bc4f` raised min/base/max/multiTab to 15/15/20/20, the prefetch pool lane to 20, and set `canaryDecodeAheadCap: 20`. Manual two-viewport scrolling showed more loading spinners and lag. Office config is back to min 4, base 8, max 10, multiTab 6, prefetch lane 10, decode-ahead = workers−1. Scroll behavior after this rollback has not been retested.
 - **Proven in office:** memory governor (6.2), 2816/4096 profile (16 GB 1-tab &

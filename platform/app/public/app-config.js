@@ -577,7 +577,8 @@ window.config = {
     //   / skmGetFixedPrefetchConcurrency()
     // Console alone cannot enable the pin when this flag is false. Does NOT change
     // adaptive defaults, interaction lane, workers, warmer, cache, eviction, or WADO.
-    allowFixedPrefetchConcurrency: true,
+    // Production default false. Office A/B pin was temporary.
+    allowFixedPrefetchConcurrency: false,
   },
 
   // SKM 2026-10-04 (Phase A — skmPurgeableStackImages): THE Cornerstone-level fix.
@@ -676,31 +677,25 @@ window.config = {
     // high-water until a scroll "unstuck" it (the reported pause). Near-free while idle. 0 = off.
     tickMs: 750,
     // ── TEST-ONLY overrides (source default OFF; PRODUCTION = false) ──────────
-    // TEMP OFFICE CANARY 2026-10-12: re-enable the previously tested A+B+C set
-    // (last active in cd8c2d1, disabled by 1bc1058). Source defaults stay false.
+    // Production baseline from 1bc1058. Experiment A/B stay inactive.
     // Experiment A: when true AND testKeepBudgetMB > 0, size keep from test MiB instead
     // of production budgetFraction × cap. Ignored when false.
-    // REVERT: testKeepWindowEnabled: false
-    testKeepWindowEnabled: true,
-    testKeepBudgetMB: 700,
+    testKeepWindowEnabled: false,
+    testKeepBudgetMB: 700, // inactive while testKeepWindowEnabled is false
     // Experiment B: when true, use testReactiveHighWater instead of reactiveHighWater (0.85).
-    // REVERT: testReactiveHighWaterEnabled: false
-    testReactiveHighWaterEnabled: true,
-    testReactiveHighWater: 0.5,
-    // Idle outside-keep cleanup — TEMP OFFICE CANARY (https://192.192.8.173).
-    // Source default remains OFF (=== true). Production reactiveHighWater 0.85 +
-    // normal budgetFraction keep. REVERT false after canary. Not general-prod approved.
-    idleOutsideKeepCleanupEnabled: true,
+    testReactiveHighWaterEnabled: false,
+    testReactiveHighWater: 0.5, // inactive while testReactiveHighWaterEnabled is false
+    // Idle outside-keep cleanup. Production default OFF. reactiveHighWater stays 0.85.
+    idleOutsideKeepCleanupEnabled: false,
     idleOutsideKeepQuietMs: 2500,
     maxIdleEvictPerTick: 10,
   },
 
-  // ── Prefetch→keep clamp — TEMP OFFICE CANARY (https://192.192.8.173) ───────
-  // Experiment C, already on from the prior canary. Source/init inert unless
-  // enabled === true. REVERT enabled:false after this comparison.
-  // NOT global production authorization.
+  // ── Prefetch→keep clamp (Experiment C) — PRODUCTION DEFAULT OFF ────────────
+  // Source/init is inert unless enabled === true. Production reactiveHighWater 0.85
+  // and normal budgetFraction keep. Values below are unused while enabled is false.
   skmPrefetchKeepClamp: {
-    enabled: true,
+    enabled: false,
     navigationLeadSlices: 40,
     alignWarmerNearSkip: true,
     evalMs: 250,
@@ -797,20 +792,15 @@ window.config = {
   //   skmTelemetry.reset()   before a scroll/jump test
   //   skmTelemetry.report()  after → console.table summary
   // Changes NO behaviour. Enable during validation; false for production.
-  // SKM office validation: ON so Testing Agent can trace WADO / decode / scroll.
-  // Console: skmTelemetry.reset() / skmTelemetry.report() / skmTelemetry.wadoReport()
   skmTelemetry: {
-    enabled: true,
+    enabled: false,
   },
 
-  // SKM read-only throughput + adaptive-prefetch decision diagnostics for Testing Agent.
-  // Does NOT change concurrency/cache/warmer policy. Default OFF in code; ON here for
-  // office validation only. Console:
-  //   skmThroughput.reset() / .snapshot() / .report() / .lanes()
-  //   skmGetPrefetchConcurrency() / skmPrefetchConcDecisionLog()
-  // REVERT: enabled:false after validation.
+  // SKM read-only throughput + adaptive-prefetch decision diagnostics.
+  // Does NOT change concurrency/cache/warmer policy. Default OFF.
+  // Console when enabled: skmThroughput.reset() / .snapshot() / .report() / .lanes()
   skmThroughputDiagnostics: {
-    enabled: true,
+    enabled: false,
     sampleIntervalMs: 1000,
     maxLatencySamples: 400,
     maxSamples: 180,
@@ -820,22 +810,20 @@ window.config = {
   // Enable during validation; false for production.
   // Console: skmScrollFollowReset() / skmScrollFollowReport() / skmScrollFollowRawLog()
   skmScrollFollow: {
-    enabled: true,
+    enabled: false,
   },
 
   // SKM 2026-10-09 (QA fix — Priority 2): read-only study/series-switch timing.
   // Enable during validation; false for production.
   // Console: skmStudySwitchReport() — addLoadingStateMs / switchToFirstWadoMs / etc.
   skmStudySwitchTelemetry: {
-    enabled: true,
+    enabled: false,
   },
 
-  // SKM 2026-10-10: READ-ONLY eviction diagnostics — TEMP OFFICE CANARY only
-  // (needed to verify idle outside-keep reclaim via live.* vs lastPass.*).
-  // allowTestEviction MUST stay false. REVERT enabled:false after canary.
-  // Console: skmGetEvictionDiagnostics(), skmReportKeepVsCache(), skmProbeCacheEntry().
+  // SKM 2026-10-10: READ-ONLY eviction diagnostics. Production: fully inert.
+  // allowTestEviction stays false.
   skmEvictionDiagnostics: {
-    enabled: true,
+    enabled: false,
     allowTestEviction: false,
     maxSnapshotAgeMs: 5000,
     maxRemovalHistory: 200,
