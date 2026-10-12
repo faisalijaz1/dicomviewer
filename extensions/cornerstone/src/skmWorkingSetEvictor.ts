@@ -47,7 +47,7 @@
 
 // eslint-disable-next-line
 import { cache, Enums } from '@cornerstonejs/core';
-import { subscribeStackNewImage } from './utils/skmStackNewImage';
+import { subscribeStackNewImage, subscribeViewportElementEvent } from './utils/skmStackNewImage';
 import {
   planEvictionStep,
   resolveInteractionHoldMs,
@@ -1149,6 +1149,15 @@ export function initSkmWorkingSetEvictor(
     schedule();
   };
   subscribeStackNewImage(onInput);
+  // Stack scroll starts before the new image is on screen, and a synthetic wheel
+  // may never reach window. Stamp interaction from the scroll tool itself.
+  try {
+    const scrollEvent =
+      (Enums as any)?.Events?.STACK_VIEWPORT_SCROLL || 'CORNERSTONE_STACK_VIEWPORT_SCROLL';
+    subscribeViewportElementEvent(scrollEvent, markInteraction);
+  } catch (e) {
+    /* best-effort */
+  }
   // Wheel and a pressed pointer (drag, touch, scrollbar) are scrolling even when the
   // displayed index has not changed yet. Hover without a button is not scrolling.
   try {

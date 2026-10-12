@@ -10,6 +10,30 @@ import { useByteArray } from '@ohif/ui-next';
 import { getImageIdFromCacheEvent, getImageIndexFromEvent, isProgressFullMode } from './helpers';
 import { ImageSliceData, ViewportData } from './types';
 
+/** Put the slice thumb on the displayed index without waiting for a React commit. */
+function paintSliceIndicator(
+  element: HTMLElement,
+  imageIndex: number,
+  numberOfSlices: number
+): void {
+  if (!element || !(numberOfSlices > 1)) {
+    return;
+  }
+  const clamped = Math.max(0, Math.min(numberOfSlices - 1, imageIndex));
+  const thumb = element.querySelector('[data-skm-slice-indicator]') as HTMLElement | null;
+  if (thumb) {
+    const fillTop = Number(thumb.dataset.skmFillTop);
+    const maxTop = Number(thumb.dataset.skmMaxTop);
+    if (Number.isFinite(fillTop) && Number.isFinite(maxTop)) {
+      thumb.style.top = `${fillTop + (clamped / (numberOfSlices - 1)) * maxTop}px`;
+    }
+  }
+  const slider = element.querySelector('[aria-label="Image navigation scrollbar"]');
+  if (slider) {
+    slider.setAttribute('aria-valuenow', String(clamped));
+  }
+}
+
 export function useProgressScrollbarMode({
   viewportData,
   viewportId,
@@ -118,6 +142,9 @@ export function useViewportSliceSync({
       (viewportType === Enums.ViewportType.ORTHOGRAPHIC && Enums.Events.VOLUME_NEW_IMAGE) ||
       Enums.Events.IMAGE_RENDERED;
 
+    let pendingSlice: ImageSliceData | null = null;
+    let sliceRaf = 0;
+
     const updateIndex = event => {
       const viewport = cornerstoneViewportService.getCornerstoneViewport(viewportId);
       if (!viewport || viewport instanceof VolumeViewport3D) {
@@ -129,10 +156,22 @@ export function useViewportSliceSync({
         return;
       }
       const nextNumberOfSlices = viewport.getNumberOfSlices();
-
-      setImageSliceData({
+      // Move the thumb in this turn. React state is coalesced to the latest index
+      // once per frame so a fast scroll cannot queue a backlog of overlay renders
+      // that paint the thumb behind the canvas.
+      paintSliceIndicator(element, nextImageIndex, nextNumberOfSlices);
+      pendingSlice = {
         imageIndex: nextImageIndex,
         numberOfSlices: nextNumberOfSlices,
+      };
+      if (sliceRaf) {
+        return;
+      }
+      sliceRaf = requestAnimationFrame(() => {
+        sliceRaf = 0;
+        if (pendingSlice) {
+          setImageSliceData(pendingSlice);
+        }
       });
     };
 
@@ -140,6 +179,9 @@ export function useViewportSliceSync({
 
     return () => {
       element.removeEventListener(eventId, updateIndex);
+      if (sliceRaf) {
+        cancelAnimationFrame(sliceRaf);
+      }
     };
   }, [viewportData, element, viewportId, cornerstoneViewportService, setImageSliceData]);
 }

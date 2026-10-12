@@ -791,9 +791,9 @@ window.config = {
   // the DevTools console — NO PowerShell / host scripting:
   //   skmTelemetry.reset()   before a scroll/jump test
   //   skmTelemetry.report()  after → console.table summary
-  // Changes NO behaviour. Enable during validation; false for production.
+  // Changes NO behaviour. On for scrollbar/scroll-follow validation of this build.
   skmTelemetry: {
-    enabled: false,
+    enabled: true,
   },
 
   // SKM read-only throughput + adaptive-prefetch decision diagnostics.
@@ -810,7 +810,7 @@ window.config = {
   // Enable during validation; false for production.
   // Console: skmScrollFollowReset() / skmScrollFollowReport() / skmScrollFollowRawLog()
   skmScrollFollow: {
-    enabled: false,
+    enabled: true,
   },
 
   // SKM 2026-10-09 (QA fix — Priority 2): read-only study/series-switch timing.

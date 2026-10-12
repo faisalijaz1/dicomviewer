@@ -813,6 +813,14 @@ lane (8) already had spare capacity.
   prefetch. Follow-up: series-aware nearSkip + `activeBias:1` (see
   `docs/SKM_MULTI_VIEWPORT_PERF_AUDIT.md`). **Office Scenario A/B vs `2523c72`
   required before production deploy. Incomplete runs are not benchmarks.**
+- **Slice thumb tracks the displayed index (2026-10-12):** the progress-scrollbar
+  thumb used whole pixel buckets, so it stayed still for several slices, and fast
+  scroll queued a React overlay render behind the canvas. The thumb now moves
+  linearly and is positioned in the `STACK_NEW_IMAGE` turn. `fairWarmComplete` is
+  false while either fair queue, an in-flight warm fetch, or a pending reconcile
+  remains. `skmTelemetry` and `skmScrollFollow` are on for this validation build.
+  Stack scroll stamps the eviction interaction time even when a synthetic wheel
+  does not reach `window`. Not measured on the office viewer until the next rebuild.
 - **Bounded eviction segments (2026-10-12):** a reactive pass stops after 100 removals
   or 48 ms of removal time, keeps the remaining candidates, and continues on a
   timeout rather than `requestIdleCallback`. Wheel, pressed-pointer, and arrow/page

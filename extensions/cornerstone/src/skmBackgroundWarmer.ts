@@ -1181,7 +1181,34 @@ export function initSkmWarmer(
       fairNeedsReconcile,
       fairSeriesWaiting,
       fairUnwarmedOpenCount,
-      fairWarmComplete,
+      fairQueuedSlices: (() => {
+        let queued = 0;
+        fairJobs.forEach(job => {
+          if (!job.controller.signal.aborted) {
+            queued += job.queue.length;
+          }
+        });
+        return queued;
+      })(),
+      fairWarmComplete: (() => {
+        let queued = 0;
+        fairJobs.forEach(job => {
+          if (!job.controller.signal.aborted) {
+            queued += job.queue.length;
+          }
+        });
+        // A sticky flag from an earlier empty reconcile must not read complete
+        // while either series still has a queue, in-flight fetches, or a pending reconcile.
+        return (
+          !fairPumpRunning &&
+          warmerInFlightFetches === 0 &&
+          !fairNeedsReconcile &&
+          canDeclareFairWarmComplete({
+            seriesWaitingForImageIds: fairSeriesWaiting,
+            missingUncachedCount: Math.max(fairUnwarmedOpenCount, queued),
+          })
+        );
+      })(),
     };
     // eslint-disable-next-line no-console
     console.log('[SKM-WARMER] diagnostics:', result);
