@@ -813,6 +813,11 @@ lane (8) already had spare capacity.
   prefetch. Follow-up: series-aware nearSkip + `activeBias:1` (see
   `docs/SKM_MULTI_VIEWPORT_PERF_AUDIT.md`). **Office Scenario A/B vs `2523c72`
   required before production deploy. Incomplete runs are not benchmarks.**
+- **Slice thumb paint target (2026-10-13):** direct paint queried the cornerstone
+  element. The progress scrollbar is a sibling overlay, so `data-skm-slice-index`
+  never appeared and aria kept updating only from React (1–2 slices behind).
+  Paint now uses `.viewport-wrapper`. `dataset.skmSliceIndex` does not put the
+  literal `data-skm-slice-index` in the bundle; the attribute is set explicitly.
 - **Slice thumb and input stamp follow-up (2026-10-12):** fast ArrowDown left
   `aria-valuenow` up to 4 behind the viewport index because React committed an older
   slice over the direct paint, and the thumb only listened for `STACK_NEW_IMAGE`.

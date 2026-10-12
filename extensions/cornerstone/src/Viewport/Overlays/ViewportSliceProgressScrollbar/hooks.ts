@@ -10,6 +10,18 @@ import { useByteArray } from '@ohif/ui-next';
 import { getImageIdFromCacheEvent, getImageIndexFromEvent, isProgressFullMode } from './helpers';
 import { ImageSliceData, ViewportData } from './types';
 
+/**
+ * The scrollbar is a sibling of the cornerstone element, inside `.viewport-wrapper`.
+ * Querying the canvas node never sees the thumb or the slider.
+ */
+function scrollbarRoot(element: HTMLElement): HTMLElement {
+  return (
+    (element.closest('.viewport-wrapper') as HTMLElement | null) ||
+    element.parentElement ||
+    element
+  );
+}
+
 /** Put the slice thumb on the displayed index without waiting for a React commit. */
 function paintSliceIndicator(
   element: HTMLElement,
@@ -20,16 +32,17 @@ function paintSliceIndicator(
     return;
   }
   const clamped = Math.max(0, Math.min(numberOfSlices - 1, imageIndex));
-  const thumb = element.querySelector('[data-skm-slice-indicator]') as HTMLElement | null;
-    if (thumb) {
-      const fillTop = Number(thumb.dataset.skmFillTop);
-      const maxTop = Number(thumb.dataset.skmMaxTop);
-      if (Number.isFinite(fillTop) && Number.isFinite(maxTop)) {
-        thumb.style.top = `${fillTop + (clamped / (numberOfSlices - 1)) * maxTop}px`;
-      }
-      thumb.dataset.skmSliceIndex = String(clamped);
+  const root = scrollbarRoot(element);
+  const thumb = root.querySelector('[data-skm-slice-indicator]') as HTMLElement | null;
+  if (thumb) {
+    const fillTop = Number(thumb.dataset.skmFillTop);
+    const maxTop = Number(thumb.dataset.skmMaxTop);
+    if (Number.isFinite(fillTop) && Number.isFinite(maxTop)) {
+      thumb.style.top = `${fillTop + (clamped / (numberOfSlices - 1)) * maxTop}px`;
     }
-  const slider = element.querySelector('[aria-label="Image navigation scrollbar"]');
+    thumb.setAttribute('data-skm-slice-index', String(clamped));
+  }
+  const slider = root.querySelector('[aria-label="Image navigation scrollbar"]');
   if (slider) {
     slider.setAttribute('aria-valuenow', String(clamped));
   }

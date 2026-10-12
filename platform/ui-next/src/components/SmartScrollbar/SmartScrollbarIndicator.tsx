@@ -47,6 +47,7 @@ export function SmartScrollbarIndicator({ className }: SmartScrollbarIndicatorPr
     <div
       className={`pointer-events-none absolute ${className ?? ''}`}
       data-skm-slice-indicator=""
+      data-skm-slice-index={clampedValue}
       data-skm-fill-top={fillAreaTop}
       data-skm-max-top={maxTopInFill}
       style={{
