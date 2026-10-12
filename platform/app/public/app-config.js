@@ -786,22 +786,24 @@ window.config = {
   //   skmTelemetry.reset()   before a scroll/jump test
   //   skmTelemetry.report()  after → console.table summary
   // Changes NO behaviour. Enable during validation; false for production.
+  // SKM office validation: ON so Testing Agent can trace WADO / decode / scroll.
+  // Console: skmTelemetry.reset() / skmTelemetry.report() / skmTelemetry.wadoReport()
   skmTelemetry: {
-    enabled: false,
+    enabled: true,
   },
 
   // SKM 2026-10-09 (QA fix): read-only scroll-follow instrumentation.
   // Enable during validation; false for production.
   // Console: skmScrollFollowReset() / skmScrollFollowReport() / skmScrollFollowRawLog()
   skmScrollFollow: {
-    enabled: false,
+    enabled: true,
   },
 
   // SKM 2026-10-09 (QA fix — Priority 2): read-only study/series-switch timing.
   // Enable during validation; false for production.
-  // Console: skmStudySwitchReport()
+  // Console: skmStudySwitchReport() — addLoadingStateMs / switchToFirstWadoMs / etc.
   skmStudySwitchTelemetry: {
-    enabled: false,
+    enabled: true,
   },
 
   // SKM 2026-10-10: READ-ONLY eviction diagnostics — TEMP OFFICE CANARY only

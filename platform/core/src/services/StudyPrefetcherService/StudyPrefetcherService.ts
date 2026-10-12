@@ -558,6 +558,10 @@ class StudyPrefetcherService extends PubSubService {
       this._rewindowTimer = null;
     }
     this._stopPrefetching();
+    // Loading-state maps are preserved across in-mode series switches (see
+    // _stopPrefetching); drop them only when leaving the mode.
+    this._displaySetLoadingStates.clear();
+    this._imageIdsToDisplaySetsMap.clear();
   }
 
   private _addImageLoadingEventsListeners() {
@@ -1010,9 +1014,18 @@ class StudyPrefetcherService extends PubSubService {
   }
 
   private _getImageIdsForDisplaySet(displaySet: DisplaySet): string[] {
+    // Reuse memoized IDs (CornerstoneCacheService / prior prefetch pass). Building
+    // thousands of WADO-URI strings on every series switch blocked first WADO.
+    const cached = (displaySet as any)?.imageIds;
+    if (Array.isArray(cached) && cached.length > 0) {
+      return cached;
+    }
     const dataSource = this._extensionManager.getActiveDataSource()[0];
-
-    return dataSource.getImageIdsForDisplaySet(displaySet);
+    const imageIds = dataSource.getImageIdsForDisplaySet(displaySet);
+    if (Array.isArray(imageIds) && imageIds.length > 0) {
+      (displaySet as any).imageIds = imageIds;
+    }
+    return imageIds;
   }
 
   // ── SKM 2026-10-03 (W2-full): windowed decode helpers ─────────────────────
@@ -1731,18 +1744,13 @@ class StudyPrefetcherService extends PubSubService {
       return;
     }
 
+    // SKM: do NOT scan cache.isImageCached for every instance on this synchronous
+    // thumbnail-click path. That O(series) loop (plus rebuilding imageIds after
+    // every _stopPrefetching clear) was the dominant pre-WADO gap (~1.5–2s on
+    // large CTs). Cache hits are still accounted in enqueue (_moveImageIdToLoadedSet)
+    // and IMAGE_LOADED / failed handlers.
     const pendingImageIds = new Set<string>(imageIds);
     const loadedImageIds = new Set<string>();
-
-    // Needs to check which image is already loaded to update the progress properly
-    // because some images may already be loaded (thumbnails and viewports).
-    for (const imageId of imageIds) {
-      if (this.cache.isImageCached(imageId)) {
-        loadedImageIds.add(imageId);
-      } else {
-        pendingImageIds.add(imageId);
-      }
-    }
 
     displaySetLoadingState = {
       displaySetInstanceUID,
@@ -1756,11 +1764,6 @@ class StudyPrefetcherService extends PubSubService {
     this._updateDisplaySetLoadingProgress(displaySetLoadingState);
     this._displaySetLoadingStates.set(displaySetInstanceUID, displaySetLoadingState);
     this._updateImageIdsDisplaySetMap(displaySetInstanceUID, imageIds);
-
-    // Notify the UI that something is already loaded (eg: update StudyBrowser)
-    if (loadedImageIds.size) {
-      this._triggerDisplaySetEvents(displaySetInstanceUID);
-    }
   }
 
   private _loadDisplaySets() {
@@ -2160,8 +2163,10 @@ class StudyPrefetcherService extends PubSubService {
     this._inflightRequests.forEach(inflightRequest => (inflightRequest.aborted = true));
 
     this._pendingRequests = [];
-    this._displaySetLoadingStates.clear();
-    this._imageIdsToDisplaySetsMap.clear();
+    // SKM: keep _displaySetLoadingStates / _imageIdsToDisplaySetsMap across in-mode
+    // switches. Clearing them forced a full-study imageId rebuild + cache scan on
+    // every thumbnail click before the first WADO could leave the browser
+    // (office cold-select ~1.57–2.01s pre-WADO). States are dropped in onModeExit.
     this._inflightRequests.clear();
     // SKM 2026-10-09 (Phase 0 fix): clear per-imageId enqueue counts so memory grows
     // O(study_size) not O(session_lifetime); also reset per-session stats.
