@@ -676,13 +676,17 @@ window.config = {
     // high-water until a scroll "unstuck" it (the reported pause). Near-free while idle. 0 = off.
     tickMs: 750,
     // ── TEST-ONLY overrides (source default OFF; PRODUCTION = false) ──────────
+    // TEMP OFFICE CANARY 2026-10-12: re-enable the previously tested A+B+C set
+    // (last active in cd8c2d1, disabled by 1bc1058). Source defaults stay false.
     // Experiment A: when true AND testKeepBudgetMB > 0, size keep from test MiB instead
     // of production budgetFraction × cap. Ignored when false.
-    testKeepWindowEnabled: false,
-    testKeepBudgetMB: 700, // inactive while testKeepWindowEnabled is false
-    // Experiment B: when true, use testReactiveHighWater instead of reactiveHighWater.
-    testReactiveHighWaterEnabled: false,
-    testReactiveHighWater: 0.5, // inactive while testReactiveHighWaterEnabled is false
+    // REVERT: testKeepWindowEnabled: false
+    testKeepWindowEnabled: true,
+    testKeepBudgetMB: 700,
+    // Experiment B: when true, use testReactiveHighWater instead of reactiveHighWater (0.85).
+    // REVERT: testReactiveHighWaterEnabled: false
+    testReactiveHighWaterEnabled: true,
+    testReactiveHighWater: 0.5,
     // Idle outside-keep cleanup — TEMP OFFICE CANARY (https://192.192.8.173).
     // Source default remains OFF (=== true). Production reactiveHighWater 0.85 +
     // normal budgetFraction keep. REVERT false after canary. Not general-prod approved.
@@ -692,8 +696,8 @@ window.config = {
   },
 
   // ── Prefetch→keep clamp — TEMP OFFICE CANARY (https://192.192.8.173) ───────
-  // Source/init inert unless enabled === true. Production reactiveHighWater 0.85 +
-  // normal keep; testKeep/testReactive OFF. REVERT enabled:false after canary.
+  // Experiment C, already on from the prior canary. Source/init inert unless
+  // enabled === true. REVERT enabled:false after this comparison.
   // NOT global production authorization.
   skmPrefetchKeepClamp: {
     enabled: true,
