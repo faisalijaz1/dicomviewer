@@ -792,6 +792,19 @@ window.config = {
     enabled: true,
   },
 
+  // SKM read-only throughput + adaptive-prefetch decision diagnostics for Testing Agent.
+  // Does NOT change concurrency/cache/warmer policy. Default OFF in code; ON here for
+  // office validation only. Console:
+  //   skmThroughput.reset() / .snapshot() / .report() / .lanes()
+  //   skmGetPrefetchConcurrency() / skmPrefetchConcDecisionLog()
+  // REVERT: enabled:false after validation.
+  skmThroughputDiagnostics: {
+    enabled: true,
+    sampleIntervalMs: 1000,
+    maxLatencySamples: 400,
+    maxSamples: 180,
+  },
+
   // SKM 2026-10-09 (QA fix): read-only scroll-follow instrumentation.
   // Enable during validation; false for production.
   // Console: skmScrollFollowReset() / skmScrollFollowReport() / skmScrollFollowRawLog()

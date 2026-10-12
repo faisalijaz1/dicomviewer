@@ -61,6 +61,9 @@ import { initSkmPrefetchConcurrency } from './skmPrefetchConcurrency';
 import { initSkmPrefetchKeepClamp } from './skmPrefetchKeepClamp';
 // for validating the caching/RAM architecture. No-op unless appConfig.skmTelemetry.enabled.
 import { initSkmTelemetry } from './skmTelemetry';
+// SKM throughput / adaptive-prefetch decision diagnostics (read-only).
+// No-op unless appConfig.skmThroughputDiagnostics.enabled === true.
+import { initSkmThroughputDiagnostics } from './skmThroughputDiagnostics';
 // SKM 2026-10-09 (QA fix — scroll-position → displayed-image follow instrumentation):
 // read-only; measures user-requested index vs actual displayed index per viewport so
 // visible stalls can be measured directly instead of inferred from other metrics.
@@ -811,6 +814,14 @@ export default async function init({
   // phase; call skmTelemetry.report() in the DevTools console. No host scripting.
   if (appConfig?.skmTelemetry?.enabled) {
     initSkmTelemetry();
+  }
+
+  // SKM throughput diagnostics (read-only). Default OFF; enable for office TA runs.
+  if ((appConfig as any)?.skmThroughputDiagnostics?.enabled === true) {
+    initSkmThroughputDiagnostics(
+      servicesManager,
+      (appConfig as any).skmThroughputDiagnostics || {}
+    );
   }
 
   // SKM 2026-10-09 (QA fix): scroll-position → displayed-image follow instrumentation

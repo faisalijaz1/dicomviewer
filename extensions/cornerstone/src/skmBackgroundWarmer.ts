@@ -1130,4 +1130,6 @@ export function initSkmWarmer(
   // byte-warmed set without serializing the whole (possibly thousands-of-entries) Set
   // on every diagnostics call. Read-only; does not affect warmer behaviour.
   (window as any).skmWarmerHasWarmed = (imageId: string): boolean => warmedImageIds.has(imageId);
+  // Silent read for throughput diagnostics (no console spam).
+  (window as any).skmWarmerInFlight = (): number => warmerInFlightFetches;
 }
