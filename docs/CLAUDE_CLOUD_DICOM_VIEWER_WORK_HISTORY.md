@@ -813,6 +813,13 @@ lane (8) already had spare capacity.
   prefetch. Follow-up: series-aware nearSkip + `activeBias:1` (see
   `docs/SKM_MULTI_VIEWPORT_PERF_AUDIT.md`). **Office Scenario A/B vs `2523c72`
   required before production deploy. Incomplete runs are not benchmarks.**
+- **Interaction-aware eviction (2026-10-12):** wheel and pressed-pointer input
+  share the existing quiet timestamp. While it is fresh, removal batches wait on
+  `setTimeout` and the 500 ms idle-callback timeout cannot run them. One batch of at
+  most 10 images is allowed only when fill is at least 0.05 above the prefetcher pause
+  (0.90 → 0.95), so prefetch cannot reload those images in a loop. Prefetch 4/8/10/6,
+  pool lane 10, reactive 0.85, and the keep clamp stay unchanged. Not yet measured
+  on the office viewer.
 - **Office canaries rolled back to the `1bc1058` production config (2026-10-12):**
   Experiments A/B/C off (`testKeepWindowEnabled`, `testReactiveHighWaterEnabled`,
   `idleOutsideKeepCleanupEnabled`, `skmPrefetchKeepClamp.enabled` all false).

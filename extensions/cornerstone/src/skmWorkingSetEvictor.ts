@@ -48,6 +48,7 @@
 // eslint-disable-next-line
 import { cache, Enums } from '@cornerstonejs/core';
 import { subscribeStackNewImage } from './utils/skmStackNewImage';
+import { planInteractionEvictionBatch } from './skmEvictionInteractionMath';
 import {
   evaluateIdleOutsideKeepScanGate,
   isIdleOutsideKeepCleanupActive,
@@ -109,6 +110,10 @@ export type SkmEvictionConfig = {
    * SKM 2026-10-05 (Fix 2): if the last displayed-slice change (STACK_NEW_IMAGE) was within
    * this many ms, the doctor is "actively scrolling" and the pump DEFERS the batch instead of
    * competing with the current image request/render. Default 120.
+   * SKM 2026-10-12: wheel and pressed-pointer input update the same timestamp. While it is
+   * fresh, the next batch is scheduled with setTimeout (not requestIdleCallback), so the
+   * 500 ms idle timeout cannot run removals during the gesture. A single small batch is
+   * allowed only once fill is a margin above the prefetcher's pause, which cannot refill it.
    */
   inputQuietMs?: number;
   /**
@@ -532,6 +537,44 @@ export function initSkmWorkingSetEvictor(
     }
   };
 
+  // Prefetch stops new loads at boundedPrefetchHighWater. 1 means it does not pause,
+  // in which case interaction must not evict (those images would be reloaded).
+  const readPrefetchPauseFill = (): number => {
+    try {
+      const cfg = servicesManager?.services?.studyPrefetcherService?.config;
+      if (cfg && cfg.boundedPrefetch === false) {
+        return 1;
+      }
+      const hw = cfg?.boundedPrefetchHighWater;
+      if (typeof hw === 'number' && Number.isFinite(hw) && hw > 0 && hw < 1) {
+        return hw;
+      }
+    } catch (e) {
+      /* default */
+    }
+    return 0.9;
+  };
+
+  const cacheFill = (): number => {
+    try {
+      const capBytes = (cache as any).getMaxCacheSize?.() || 0;
+      const curBytes = (cache as any).getCacheSize?.() || 0;
+      return capBytes > 0 ? curBytes / capBytes : 0;
+    } catch (e) {
+      return 0;
+    }
+  };
+
+  const interactionActive = (): boolean =>
+    inputQuietMs > 0 && nowMs() - lastInputAt < inputQuietMs;
+
+  // Wait out the quiet interval. Not requestIdleCallback: its timeout would run
+  // this function during a busy scroll even when the guard still wants to defer.
+  const scheduleQuietWait = () => {
+    const wait = Math.max(16, inputQuietMs - (nowMs() - lastInputAt));
+    setTimeout(runBatch, wait);
+  };
+
   // Run ONE small batch of removals from passCandidates, then either schedule the next
   // batch (idle) or finish the pass. Defers if the doctor is actively scrolling; aborts if
   // the centre jumped far since the pass started.
@@ -544,14 +587,6 @@ export function initSkmWorkingSetEvictor(
       return;
     }
 
-    // Yield to the viewport while the doctor is actively scrolling: the current image
-    // request/render path must win the main thread over background eviction.
-    if (inputQuietMs > 0 && nowMs() - lastInputAt < inputQuietMs) {
-      passYields++;
-      scheduleIdle(runBatch, idleTimeoutMs);
-      return;
-    }
-
     // Abort a pass whose keep-set is now stale because the doctor jumped far. The next
     // STACK_NEW_IMAGE already (re)scheduled a pass that will recompute around the new centre.
     if (Math.abs(currentActiveCenter() - passCenterAtStart) > abortMoveThreshold) {
@@ -559,9 +594,25 @@ export function initSkmWorkingSetEvictor(
       return;
     }
 
+    // Recheck immediately before this batch. Wheel/pointer/STACK_NEW_IMAGE all stamp
+    // lastInputAt. While that stamp is fresh, do not remove unless fill is already
+    // above the prefetcher pause by the emergency margin — and then only one small batch.
+    const plan = planInteractionEvictionBatch({
+      interacting: interactionActive(),
+      fill: cacheFill(),
+      prefetchPauseFill: readPrefetchPauseFill(),
+      normalBatchCap: passBatchCap,
+      emergencyBatchCap: 10,
+    });
+    if (plan.removeCap <= 0) {
+      passYields++;
+      scheduleQuietWait();
+      return;
+    }
+
     const t0 = nowMs();
     let removedThisBatch = 0;
-    while (removedThisBatch < passBatchCap && passCandidates.length) {
+    while (removedThisBatch < plan.removeCap && passCandidates.length) {
       const imageId = passCandidates.pop() as string;
       if (!imageId || passKeep.has(imageId)) {
         continue; // protected (keep-set from pass start) — never evict
@@ -624,7 +675,11 @@ export function initSkmWorkingSetEvictor(
     publishLast();
 
     if (passCandidates.length) {
-      scheduleIdle(runBatch, idleTimeoutMs);
+      if (plan.next === 'quiet-wait') {
+        scheduleQuietWait();
+      } else {
+        scheduleIdle(runBatch, idleTimeoutMs);
+      }
     } else {
       finishPass('drained');
     }
@@ -1005,11 +1060,32 @@ export function initSkmWorkingSetEvictor(
   // STACK_NEW_IMAGE is a NON-bubbling element CustomEvent; wire it PER ELEMENT via
   // ELEMENT_ENABLED (the pattern skmTelemetry uses). Each displayed-slice change both
   // records input time (for the actively-scrolling yield) and (re)schedules a pass.
-  const onInput = () => {
+  const markInteraction = () => {
     lastInputAt = nowMs();
+  };
+  const onInput = () => {
+    markInteraction();
     schedule();
   };
   subscribeStackNewImage(onInput);
+  // Wheel and a pressed pointer (drag, touch, scrollbar) are scrolling even when the
+  // displayed index has not changed yet. Hover without a button is not scrolling.
+  try {
+    const listenOpts = { capture: true, passive: true };
+    window.addEventListener('wheel', markInteraction, listenOpts);
+    window.addEventListener('pointerdown', markInteraction, listenOpts);
+    window.addEventListener(
+      'pointermove',
+      (evt: PointerEvent) => {
+        if (evt.buttons) {
+          markInteraction();
+        }
+      },
+      listenOpts
+    );
+  } catch (e) {
+    /* best-effort */
+  }
   try {
     const { viewportGridService } = servicesManager.services;
     const E = viewportGridService.EVENTS;
