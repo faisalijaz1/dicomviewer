@@ -10,6 +10,7 @@ import {
   planInteractionEvictionBatch,
   resolveInteractionHoldMs,
   dataSetUrlFromImageId,
+  dataSetUrlCandidates,
   imageFromCacheEventDetail,
   selectRemovals,
   shouldStopRemovalLoop,
@@ -261,6 +262,10 @@ const limits = {
   assert.equal(typeof wrapped?.loadObject?.decache, 'function');
   assert.equal(dataSetUrlFromImageId(inner.imageId), 'https://pacs/wado?id=1');
   assert.equal(dataSetUrlFromImageId('noscheme'), null);
+  const keys = dataSetUrlCandidates('dicomweb:wadouri:https://pacs/wado?id=1');
+  assert.ok(keys.indexOf('https://pacs/wado?id=1') !== -1);
+  assert.ok(keys.indexOf('wadouri:https://pacs/wado?id=1') !== -1);
+  assert.equal(dataSetUrlCandidates('').length, 0);
 }
 
 {

@@ -287,6 +287,40 @@ export function dataSetUrlFromImageId(imageId: string): string | null {
   return imageId.slice(split + 1);
 }
 
+/**
+ * Every string the dataset manager might have used as a key. Image ids are
+ * `dicomweb:https://…` or sometimes `dicomweb:wadouri:https://…`. The manager
+ * stores `parseImageId().url`, which is only the first scheme stripped, but a
+ * second scheme leaves that key pointing at `wadouri:https://…` while the bytes
+ * were stored under `https://…`.
+ */
+export function dataSetUrlCandidates(imageId: string): string[] {
+  if (typeof imageId !== 'string' || !imageId) {
+    return [];
+  }
+  const out: string[] = [];
+  const push = (value: string | null | undefined) => {
+    if (typeof value === 'string' && value && out.indexOf(value) === -1) {
+      out.push(value);
+    }
+  };
+  push(dataSetUrlFromImageId(imageId));
+  const http = imageId.indexOf('http');
+  if (http > 0) {
+    push(imageId.slice(http));
+  }
+  let rest = imageId;
+  for (let i = 0; i < 3; i++) {
+    const split = rest.indexOf(':');
+    if (split <= 0 || split >= rest.length - 1) {
+      break;
+    }
+    rest = rest.slice(split + 1);
+    push(rest);
+  }
+  return out;
+}
+
 export function shouldStopRemovalLoop(
   removedThisBatch: number,
   elapsedMs: number,

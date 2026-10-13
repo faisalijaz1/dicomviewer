@@ -825,8 +825,15 @@ lane (8) already had spare capacity.
   because that image cost 100–600 ms, so the closed series never finished
   draining and the heap plateaued near 6 GB. `parsedDataSetsReleased` stayed
   at 1 because the cache-add event wraps the image. A closed series is now
-  dropped from the cache entry directly, and the parsed DICOM is released from
-  the inner image. Not office-measured yet.
+  dropped from the cache entry directly. Office retest of `6d7b5e1`
+  (`index.b2eca069.js`): scroll stayed ~3.5–4 s for 30 min, the series you
+  left stayed at 0 MB, and eviction batches were 1 ms. The heap still climbed
+  ~20 MB/min (peak 1,442 MB, cache ≤256 MB), and a 5-minute idle hold stayed at
+  2,089 MB against a 1,001 MB cache with `parsedDataSetsReleased` stuck at 60.
+  That counter only moved when a series was dropped, so prefetch-decoded slices
+  kept their parsed files. The loader now releases the parsed file when the
+  pixels are ready, and a small cache sweep retries any slice that still holds
+  one. Not office-measured yet.
 - **Slice thumb same-turn index (2026-10-13):** fast ArrowDown left aria and
   `data-skm-slice-index` one behind `getCurrentImageIdIndex` because the scroll
   paint read the index before it moved, and the sample ran before `STACK_NEW_IMAGE`.

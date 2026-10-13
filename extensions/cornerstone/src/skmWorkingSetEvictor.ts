@@ -50,7 +50,7 @@ import { cache, Enums, eventTarget } from '@cornerstonejs/core';
 import dicomImageLoader from '@cornerstonejs/dicom-image-loader';
 import { subscribeStackNewImage, subscribeViewportElementEvent } from './utils/skmStackNewImage';
 import {
-  dataSetUrlFromImageId,
+  dataSetUrlCandidates,
   imageFromCacheEventDetail,
   planEvictionStep,
   resolveInteractionHoldMs,
@@ -548,6 +548,7 @@ export function initSkmWorkingSetEvictor(
       lastBatchRemoved,
       batchStoppedForTime: lastBatchStoppedForTime,
       parsedDataSetsReleased,
+      ...readDataSetCacheStats(),
       idleOutsideKeepCleanupEnabled,
       idleOutsideKeepCleanupActive: passIdleOutsideKeepCleanupActive,
       reactivePathReason: passIdleOutsideKeepCleanupActive
@@ -613,47 +614,105 @@ export function initSkmWorkingSetEvictor(
     return 0.9;
   };
 
-  // Drop the parsed DICOM byte array once the pixels exist. The cache-add event
-  // wraps the image, so the previous release looked at the wrapper and ran once.
+  const readDataSetCacheStats = (): { dataSetsCached: number | null; dataSetCacheMB: number | null } => {
+    try {
+      const info = (dicomImageLoader as any)?.wadouri?.dataSetCacheManager?.getInfo?.();
+      if (!info) {
+        return { dataSetsCached: null, dataSetCacheMB: null };
+      }
+      return {
+        dataSetsCached:
+          typeof info.numberOfDataSetsCached === 'number' ? info.numberOfDataSetsCached : null,
+        dataSetCacheMB:
+          typeof info.cacheSizeInBytes === 'number'
+            ? Math.round(info.cacheSizeInBytes / 1048576)
+            : null,
+      };
+    } catch (e) {
+      return { dataSetsCached: null, dataSetCacheMB: null };
+    }
+  };
+
+  // Drop the parsed DICOM byte array once the pixels exist. Office 6d7b5e1: the
+  // cache-add listener did not move this counter while a series was on screen
+  // (idle stayed at 60; scrolling stayed flat until the series was dropped).
+  // The loader hook and the cache sweep below call this for those images.
   const releaseParsedDataSet = (image: any, loadObject: any, imageId: string | null): void => {
-    const frames = Number(image?.numberOfFrames);
+    const frames = Number(image?.numberOfFrames ?? image?.data?.intString?.('x00280008'));
     if (Number.isFinite(frames) && frames > 1) {
       return;
     }
-    let released = false;
+    const urls: string[] = [];
+    const pushUrl = (value: string | null | undefined) => {
+      if (typeof value === 'string' && value && urls.indexOf(value) === -1) {
+        urls.push(value);
+      }
+    };
+    if (imageId) {
+      try {
+        const parsed = (dicomImageLoader as any)?.wadouri?.parseImageId?.(imageId);
+        pushUrl(parsed?.url);
+      } catch (e) {
+        /* parseImageId shape differs */
+      }
+      dataSetUrlCandidates(imageId).forEach(pushUrl);
+    }
+    const mgr = (dicomImageLoader as any)?.wadouri?.dataSetCacheManager;
+    let wasLoaded = false;
+    try {
+      wasLoaded = urls.some(url => typeof mgr?.isLoaded === 'function' && mgr.isLoaded(url));
+    } catch (e) {
+      wasLoaded = false;
+    }
+    // A second call (cache-add, then sweep, then series drop) finds nothing and
+    // must not bump the counter again. decache() alone is not evidence: it is
+    // still present after the bytes are already gone.
+    if (!image?.data && !wasLoaded) {
+      return;
+    }
     try {
       if (typeof loadObject?.decache === 'function') {
         loadObject.decache();
-        released = true;
       }
     } catch (e) {
       /* already released */
     }
-    const url = imageId ? dataSetUrlFromImageId(imageId) : null;
-    if (url) {
+    if (urls.length) {
       try {
-        const mgr = (dicomImageLoader as any)?.wadouri?.dataSetCacheManager;
-        let guard = 0;
-        while (typeof mgr?.unload === 'function' && mgr.isLoaded?.(url) && guard < 4) {
-          mgr.unload(url);
-          released = true;
-          guard++;
-        }
+        urls.forEach(url => {
+          let guard = 0;
+          while (typeof mgr?.unload === 'function' && mgr.isLoaded?.(url) && guard < 256) {
+            mgr.unload(url);
+            guard++;
+          }
+          // cacheCount can stick above the drain. The byte array is the bulk of
+          // the dataset; drop it even when the manager entry itself remains.
+          if (typeof mgr?.isLoaded === 'function' && mgr.isLoaded(url)) {
+            const stuck = mgr.get?.(url);
+            if (stuck?.byteArray?.length) {
+              stuck.byteArray = new Uint8Array(0);
+            }
+          }
+        });
       } catch (e) {
         /* dataset manager shape differs */
       }
     }
     try {
+      if (image?.data?.byteArray?.length) {
+        image.data.byteArray = new Uint8Array(0);
+      }
+    } catch (e) {
+      /* byteArray is not writable */
+    }
+    try {
       if (image?.data) {
         image.data = undefined;
-        released = true;
       }
     } catch (e) {
       /* image.data is not writable */
     }
-    if (released) {
-      parsedDataSetsReleased++;
-    }
+    parsedDataSetsReleased++;
   };
 
   // Closed-series images are not on screen. Delete the cache entry without
@@ -1382,10 +1441,11 @@ export function initSkmWorkingSetEvictor(
     setInterval(schedule, tickMs);
   }
 
-  // The decoded image keeps its pixels. Cornerstone's cache-add event passes
-  // the cache entry, not the image, so the previous release almost never saw
-  // image.data (parsedDataSetsReleased stayed at 1 and the idle heap stayed
-  // ~2× the cache). Single-frame only.
+  // Pixels stay in the image cache. The parsed file beside them does not.
+  // 6d7b5e1 office: this listener did not advance the counter during idle or
+  // during a scroll; it only moved when the series was dropped. The loader
+  // hook (__skmReleaseParsedDataSet) and the sweep cover those paths.
+  (globalThis as any).__skmReleaseParsedDataSet = releaseParsedDataSet;
   try {
     eventTarget.addEventListener(Enums.Events.IMAGE_CACHE_IMAGE_ADDED, (evt: any) => {
       const parsed = imageFromCacheEventDetail(evt?.detail);
@@ -1395,8 +1455,63 @@ export function initSkmWorkingSetEvictor(
       releaseParsedDataSet(parsed.image, parsed.loadObject, parsed.imageId);
     });
   } catch (e) {
-    /* event name differs — eviction still drops datasets on remove */
+    /* event name differs — the sweep still drops datasets */
   }
+
+  const parsedReleaseSweepBatch = 80;
+  const volumeOpen = (): boolean => {
+    if (!skipWhenVolumePresent) {
+      return false;
+    }
+    try {
+      const { viewportGridService, cornerstoneViewportService: csvs } = servicesManager.services;
+      const viewports = viewportGridService?.getState?.()?.viewports;
+      if (!viewports || !csvs) {
+        return false;
+      }
+      return anyVolumePresent(viewports, csvs);
+    } catch (e) {
+      return false;
+    }
+  };
+  const publishParsedRelease = () => {
+    const last = (globalThis as any).__skmEvictorLast || {};
+    last.parsedDataSetsReleased = parsedDataSetsReleased;
+    const stats = readDataSetCacheStats();
+    last.dataSetsCached = stats.dataSetsCached;
+    last.dataSetCacheMB = stats.dataSetCacheMB;
+    (globalThis as any).__skmEvictorLast = last;
+  };
+  // Prefetch fills the cache without a series switch, so nothing else publishes
+  // the counter. Walk a small batch of entries that still hold a parsed file.
+  const sweepParsedDataSets = () => {
+    if (volumeOpen()) {
+      return;
+    }
+    const map = (cache as any)._imageCache;
+    if (!map || typeof map.values !== 'function') {
+      publishParsedRelease();
+      return;
+    }
+    let released = 0;
+    try {
+      for (const entry of map.values()) {
+        const image = entry?.image;
+        if (!image?.data) {
+          continue;
+        }
+        releaseParsedDataSet(image, entry.imageLoadObject, entry.imageId || image.imageId || null);
+        released++;
+        if (released >= parsedReleaseSweepBatch) {
+          break;
+        }
+      }
+    } catch (e) {
+      /* cache shape differs */
+    }
+    publishParsedRelease();
+  };
+  setInterval(sweepParsedDataSets, 400);
 
   // eslint-disable-next-line no-console
   console.log(
@@ -1406,6 +1521,7 @@ export function initSkmWorkingSetEvictor(
       : `[SKM-EVICTOR] active, fixed window: keep ${keepBehind}+${keepAhead} (+${margin}) slices`) +
       ` | Fix 2: segment budget ${maxRemovalsPerPass} removals or ${maxPassEvictMs}ms, ` +
       `batchCap ${maxEvictPerTick}, interactionOrphanBatch ${interactionOrphanBatchCap}, ` +
+      `parsedDataSetSweep ${parsedReleaseSweepBatch}, ` +
       `interactionHold ${interactionHoldMs}ms ` +
       `(quiet ${inputQuietMs} + idle ${idleTimeoutMs}), abortMove ${abortMoveThreshold}` +
       ` | Fix 3: reactive, configured ≥ ${Math.round(reactiveHighWater * 100)}%` +
