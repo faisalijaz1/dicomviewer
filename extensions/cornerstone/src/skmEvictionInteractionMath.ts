@@ -103,8 +103,9 @@ export function planEvictionStep(input: {
   orphanCandidatesRemaining?: number;
   /**
    * Max closed-series images removed in one turn while the user is scrolling.
-   * Default 8. The full normal batch (50) is what made one series switch a
-   * multi-second main-thread stall.
+   * Default 50. The turn still stops inside maxSegmentEvictMs, so a slow
+   * removal cannot run the whole cap. The previous cap of 8 could not finish
+   * a closed series once each removal cost more than the time budget.
    */
   interactionOrphanBatchCap?: number;
 }): {
@@ -163,7 +164,7 @@ export function planEvictionStep(input: {
   // a few images at a time, and do not pop the current series' window.
   const orphansLeft = Math.max(0, Math.floor(input.orphanCandidatesRemaining ?? 0));
   if (orphansLeft > 0) {
-    const orphanCap = Math.max(1, Math.floor(input.interactionOrphanBatchCap ?? 8));
+    const orphanCap = Math.max(1, Math.floor(input.interactionOrphanBatchCap ?? 50));
     return {
       outcome: 'run-batch',
       removeCap: Math.max(0, Math.min(orphanCap, normal, room, orphansLeft)),
@@ -235,6 +236,57 @@ export function selectRemovals(input: {
  * clock that is already over the line; every removal after that waits for the
  * next turn. Call this inside the removal loop, not only before it.
  */
+/**
+ * IMAGE_CACHE_IMAGE_ADDED's detail.image is the cache entry
+ * `{ image, imageId, imageLoadObject }`, not the decoded image. Reading
+ * detail.image.data misses the parsed DICOM that sits beside the pixels.
+ */
+export function imageFromCacheEventDetail(detail: any): {
+  image: any;
+  imageId: string | null;
+  loadObject: any;
+} | null {
+  if (!detail || typeof detail !== 'object') {
+    return null;
+  }
+  const entry = detail.image;
+  if (entry && typeof entry === 'object' && entry.image && typeof entry.image === 'object') {
+    const imageId =
+      typeof entry.imageId === 'string'
+        ? entry.imageId
+        : typeof entry.image.imageId === 'string'
+          ? entry.image.imageId
+          : null;
+    return { image: entry.image, imageId, loadObject: entry.imageLoadObject };
+  }
+  if (
+    entry &&
+    typeof entry === 'object' &&
+    (typeof entry.getPixelData === 'function' || entry.voxelManager || entry.data || entry.imageId)
+  ) {
+    const imageId =
+      typeof detail.imageId === 'string'
+        ? detail.imageId
+        : typeof entry.imageId === 'string'
+          ? entry.imageId
+          : null;
+    return { image: entry, imageId, loadObject: detail.imageLoadObject };
+  }
+  return null;
+}
+
+/** Dataset-cache key: the imageId with its scheme (`dicomweb:` / `wadouri:`) removed. */
+export function dataSetUrlFromImageId(imageId: string): string | null {
+  if (typeof imageId !== 'string') {
+    return null;
+  }
+  const split = imageId.indexOf(':');
+  if (split <= 0 || split >= imageId.length - 1) {
+    return null;
+  }
+  return imageId.slice(split + 1);
+}
+
 export function shouldStopRemovalLoop(
   removedThisBatch: number,
   elapsedMs: number,

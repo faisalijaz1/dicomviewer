@@ -9,6 +9,8 @@ import {
   planEvictionStep,
   planInteractionEvictionBatch,
   resolveInteractionHoldMs,
+  dataSetUrlFromImageId,
+  imageFromCacheEventDetail,
   selectRemovals,
   shouldStopRemovalLoop,
   volumeBlocksStackEviction,
@@ -207,7 +209,7 @@ const limits = {
   assert.equal(orphans.outcome, 'run-batch');
   assert.equal(orphans.orphanOnly, true);
   assert.equal(orphans.emergency, false);
-  assert.equal(orphans.removeCap, 8);
+  assert.equal(orphans.removeCap, 50);
 
   const few = planEvictionStep({
     ...limits,
@@ -246,6 +248,19 @@ const limits = {
   assert.equal(shouldStopRemovalLoop(1, 47, 48), false);
   assert.equal(shouldStopRemovalLoop(1, 48, 48), true);
   assert.equal(shouldStopRemovalLoop(8, 48, 48), true);
+}
+
+// Cache-add events wrap the image. The parsed dataset is on the inner image.
+{
+  const inner = { imageId: 'dicomweb:https://pacs/wado?id=1', data: { byteArray: new Uint8Array(4) } };
+  const wrapped = imageFromCacheEventDetail({
+    image: { imageId: inner.imageId, image: inner, imageLoadObject: { decache() {} } },
+  });
+  assert.equal(wrapped && wrapped.image, inner);
+  assert.equal(wrapped && wrapped.imageId, inner.imageId);
+  assert.equal(typeof wrapped?.loadObject?.decache, 'function');
+  assert.equal(dataSetUrlFromImageId(inner.imageId), 'https://pacs/wado?id=1');
+  assert.equal(dataSetUrlFromImageId('noscheme'), null);
 }
 
 {

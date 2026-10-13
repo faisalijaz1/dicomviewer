@@ -47,8 +47,11 @@
 
 // eslint-disable-next-line
 import { cache, Enums, eventTarget } from '@cornerstonejs/core';
+import dicomImageLoader from '@cornerstonejs/dicom-image-loader';
 import { subscribeStackNewImage, subscribeViewportElementEvent } from './utils/skmStackNewImage';
 import {
+  dataSetUrlFromImageId,
+  imageFromCacheEventDetail,
   planEvictionStep,
   resolveInteractionHoldMs,
   shouldStopRemovalLoop,
@@ -335,9 +338,9 @@ export function initSkmWorkingSetEvictor(
   const maxPassEvictMs = Math.max(1, config?.maxPassEvictMs ?? 48);
   const passYieldGapMs = Math.max(16, config?.passYieldGapMs ?? 50);
   const emergencyBatchCap = 10;
-  // Closed-series images still drain during scroll, but not 50 at a time.
-  // One full batch overran the 48ms budget and locked the screen for seconds.
-  const interactionOrphanBatchCap = 8;
+  // Closed-series drops are map deletes, not removeImageLoadObject, so a turn
+  // can take the normal batch. The in-loop 48ms check still stops a slow turn.
+  const interactionOrphanBatchCap = 50;
   const abortMoveThreshold = Math.max(1, config?.abortMoveThreshold ?? 100);
   // Experiment A (TEST-ONLY): independent keep-budget override. Default OFF.
   const testKeepWindowEnabled = config?.testKeepWindowEnabled === true;
@@ -610,6 +613,91 @@ export function initSkmWorkingSetEvictor(
     return 0.9;
   };
 
+  // Drop the parsed DICOM byte array once the pixels exist. The cache-add event
+  // wraps the image, so the previous release looked at the wrapper and ran once.
+  const releaseParsedDataSet = (image: any, loadObject: any, imageId: string | null): void => {
+    const frames = Number(image?.numberOfFrames);
+    if (Number.isFinite(frames) && frames > 1) {
+      return;
+    }
+    let released = false;
+    try {
+      if (typeof loadObject?.decache === 'function') {
+        loadObject.decache();
+        released = true;
+      }
+    } catch (e) {
+      /* already released */
+    }
+    const url = imageId ? dataSetUrlFromImageId(imageId) : null;
+    if (url) {
+      try {
+        const mgr = (dicomImageLoader as any)?.wadouri?.dataSetCacheManager;
+        let guard = 0;
+        while (typeof mgr?.unload === 'function' && mgr.isLoaded?.(url) && guard < 4) {
+          mgr.unload(url);
+          released = true;
+          guard++;
+        }
+      } catch (e) {
+        /* dataset manager shape differs */
+      }
+    }
+    try {
+      if (image?.data) {
+        image.data = undefined;
+        released = true;
+      }
+    } catch (e) {
+      /* image.data is not writable */
+    }
+    if (released) {
+      parsedDataSetsReleased++;
+    }
+  };
+
+  // Closed-series images are not on screen. Delete the cache entry without
+  // removeImageLoadObject, which was costing 100–600ms per image once the heap
+  // was large and so never finished the series inside the 48ms budget.
+  const dropClosedSeriesEntry = (imageId: string): boolean => {
+    const map = (cache as any)._imageCache;
+    if (!map || typeof map.get !== 'function' || typeof map.delete !== 'function') {
+      return false;
+    }
+    const entry = map.get(imageId);
+    if (!entry) {
+      return false;
+    }
+    const image = entry.image;
+    const loadObject = entry.imageLoadObject;
+    releaseParsedDataSet(image, loadObject, imageId);
+    const size = typeof entry.sizeInBytes === 'number' ? entry.sizeInBytes : 0;
+    try {
+      if (typeof loadObject?.cancelFn === 'function') {
+        loadObject.cancelFn();
+      }
+    } catch (e) {
+      /* already cancelled */
+    }
+    try {
+      const ref = image?.referencedImageId;
+      if (ref) {
+        (cache as any)._referencedImageIdToImageIdCache?.delete?.(ref);
+      }
+    } catch (e) {
+      /* best-effort */
+    }
+    map.delete(imageId);
+    try {
+      if (typeof (cache as any).incrementImageCacheSize === 'function') {
+        (cache as any).incrementImageCacheSize(-size);
+      }
+    } catch (e) {
+      /* size accounting is best-effort; the entry is already gone */
+    }
+    return true;
+  };
+
   const cacheFill = (): number => {
     try {
       const capBytes = (cache as any).getMaxCacheSize?.() || 0;
@@ -722,14 +810,15 @@ export function initSkmWorkingSetEvictor(
       }
       const t1 = nowMs();
       try {
-        (cache as any).removeImageLoadObject(imageId);
-        if (typeof loadObject.decache === 'function') {
-          try {
-            loadObject.decache();
-            parsedDataSetsReleased++;
-          } catch (e) {
-            /* parsed dataset already released */
-          }
+        // A closed series is not on screen. removeImageLoadObject runs every
+        // listener and, once the heap is large, one call costs 100–600ms, so
+        // the 48ms budget never finishes the series. Drop the cache entry
+        // directly. The series on screen still uses removeImageLoadObject.
+        const dropped = fromOrphan ? dropClosedSeriesEntry(imageId) : false;
+        if (!dropped) {
+          const entry = (cache as any)._imageCache?.get?.(imageId);
+          releaseParsedDataSet(entry?.image, entry?.imageLoadObject || loadObject, imageId);
+          (cache as any).removeImageLoadObject(imageId);
         }
         removedThisBatch++;
       } catch (e) {
@@ -804,7 +893,9 @@ export function initSkmWorkingSetEvictor(
 
     passOutcome = 'running';
     publishLast();
-    scheduleResume(passYieldGapMs, false);
+    // A cheap closed-series drop should finish during this stay, not 50ms
+    // after every handful of images.
+    scheduleResume(plan.orphanOnly && !stoppedForTime ? 16 : passYieldGapMs, false);
   };
 
   // Build the keep-set + candidate list for a new pass (the cheap scan), then start the
@@ -1291,39 +1382,17 @@ export function initSkmWorkingSetEvictor(
     setInterval(schedule, tickMs);
   }
 
-  // The decoded image keeps its pixels. The parsed DICOM (image.data plus the
-  // loader dataset cache) is a second copy — idle heap sat at about 2× the
-  // cornerstone cache while the evictor removed nothing. Drop that copy once
-  // the pixels are on the image. Single-frame only: a multi-frame instance
-  // shares one dataset across frames. Tag overlays read the metadata provider,
-  // not image.data.
+  // The decoded image keeps its pixels. Cornerstone's cache-add event passes
+  // the cache entry, not the image, so the previous release almost never saw
+  // image.data (parsedDataSetsReleased stayed at 1 and the idle heap stayed
+  // ~2× the cache). Single-frame only.
   try {
     eventTarget.addEventListener(Enums.Events.IMAGE_CACHE_IMAGE_ADDED, (evt: any) => {
-      const image = evt?.detail?.image;
-      const frames = Number(image?.numberOfFrames);
-      if (!image || (Number.isFinite(frames) && frames > 1)) {
+      const parsed = imageFromCacheEventDetail(evt?.detail);
+      if (!parsed?.image) {
         return;
       }
-      if (typeof image.getPixelData !== 'function' && !image.voxelManager) {
-        return;
-      }
-      const imageId = image.imageId || evt?.detail?.imageId;
-      try {
-        const loadObject = imageId ? (cache as any).getImageLoadObject?.(imageId) : undefined;
-        if (typeof loadObject?.decache === 'function') {
-          loadObject.decache();
-        }
-      } catch (e) {
-        /* loader has no decache */
-      }
-      try {
-        if (image.data) {
-          image.data = undefined;
-          parsedDataSetsReleased++;
-        }
-      } catch (e) {
-        /* image.data is not writable */
-      }
+      releaseParsedDataSet(parsed.image, parsed.loadObject, parsed.imageId);
     });
   } catch (e) {
     /* event name differs — eviction still drops datasets on remove */

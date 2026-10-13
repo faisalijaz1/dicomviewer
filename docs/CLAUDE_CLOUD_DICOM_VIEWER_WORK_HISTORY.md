@@ -820,10 +820,13 @@ lane (8) already had spare capacity.
   at `tabDecodedCapMB` 3072. Office retest of `af01f8b` (`index.c8d70366.js`):
   heap peaked at 680 MB and levelled off. The same run made scrolling ~10× slower
   once eviction stayed on `budget-exhausted`, because one batch of up to 50
-  removals ran past the 48 ms budget. A scroll turn now removes at most 8
-  closed-series images and stops as soon as that time budget is used. Parsed
-  DICOM datasets are released once the pixels are cached, so the idle heap is
-  not a second copy of the decoded cache. Not office-measured yet.
+  removals ran past the 48 ms budget. Office retest of `cf17a8d`
+  (`index.1adc0132.js`): the time limit stopped each turn after one image
+  because that image cost 100–600 ms, so the closed series never finished
+  draining and the heap plateaued near 6 GB. `parsedDataSetsReleased` stayed
+  at 1 because the cache-add event wraps the image. A closed series is now
+  dropped from the cache entry directly, and the parsed DICOM is released from
+  the inner image. Not office-measured yet.
 - **Slice thumb same-turn index (2026-10-13):** fast ArrowDown left aria and
   `data-skm-slice-index` one behind `getCurrentImageIdIndex` because the scroll
   paint read the index before it moved, and the sample ran before `STACK_NEW_IMAGE`.
