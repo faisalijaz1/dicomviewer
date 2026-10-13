@@ -833,7 +833,12 @@ lane (8) already had spare capacity.
   That counter only moved when a series was dropped, so prefetch-decoded slices
   kept their parsed files. The loader now releases the parsed file when the
   pixels are ready, and a small cache sweep retries any slice that still holds
-  one. Not office-measured yet.
+  one. Office retest of that build (`index.5c932257.js`): idle heap settled at
+  1.08× the cache and the dataset cache stayed at 0, but the heap still climbed
+  about 15 MB/min after a forced garbage collection. The loader promise keeps
+  the parsed element table after the file bytes are dropped. That table is now
+  cleared too, and the cache sweep waits until scrolling has been quiet.
+  Not office-measured yet.
 - **Slice thumb same-turn index (2026-10-13):** fast ArrowDown left aria and
   `data-skm-slice-index` one behind `getCurrentImageIdIndex` because the scroll
   paint read the index before it moved, and the sample ran before `STACK_NEW_IMAGE`.

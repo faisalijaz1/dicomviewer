@@ -52,6 +52,7 @@ import { subscribeStackNewImage, subscribeViewportElementEvent } from './utils/s
 import {
   dataSetUrlCandidates,
   imageFromCacheEventDetail,
+  stripParsedDataSet,
   planEvictionStep,
   resolveInteractionHoldMs,
   shouldStopRemovalLoop,
@@ -688,23 +689,16 @@ export function initSkmWorkingSetEvictor(
           // cacheCount can stick above the drain. The byte array is the bulk of
           // the dataset; drop it even when the manager entry itself remains.
           if (typeof mgr?.isLoaded === 'function' && mgr.isLoaded(url)) {
-            const stuck = mgr.get?.(url);
-            if (stuck?.byteArray?.length) {
-              stuck.byteArray = new Uint8Array(0);
-            }
+            stripParsedDataSet(mgr.get?.(url));
           }
         });
       } catch (e) {
         /* dataset manager shape differs */
       }
     }
-    try {
-      if (image?.data?.byteArray?.length) {
-        image.data.byteArray = new Uint8Array(0);
-      }
-    } catch (e) {
-      /* byteArray is not writable */
-    }
+    // Same object the loader promise still closes over. Drop the element
+    // table before forgetting our own reference.
+    stripParsedDataSet(image?.data);
     try {
       if (image?.data) {
         image.data = undefined;
@@ -1482,11 +1476,26 @@ export function initSkmWorkingSetEvictor(
     last.dataSetCacheMB = stats.dataSetCacheMB;
     (globalThis as any).__skmEvictorLast = last;
   };
+  let lastResourceTimingClear = 0;
   // Prefetch fills the cache without a series switch, so nothing else publishes
   // the counter. Walk a small batch of entries that still hold a parsed file.
   const sweepParsedDataSets = () => {
     if (volumeOpen()) {
       return;
+    }
+    // Scrolling already releases each slice from the loader hook. Walking the
+    // cache during a wheel burst is the work that can stretch a scroll cycle.
+    if (lastInputAt > 0 && nowMs() - lastInputAt < interactionHoldMs) {
+      return;
+    }
+    const sweepNow = nowMs();
+    if (sweepNow - lastResourceTimingClear > 5000) {
+      lastResourceTimingClear = sweepNow;
+      try {
+        performance.clearResourceTimings?.();
+      } catch (e) {
+        /* resource timing unavailable */
+      }
     }
     const map = (cache as any)._imageCache;
     if (!map || typeof map.values !== 'function') {
@@ -1521,7 +1530,7 @@ export function initSkmWorkingSetEvictor(
       : `[SKM-EVICTOR] active, fixed window: keep ${keepBehind}+${keepAhead} (+${margin}) slices`) +
       ` | Fix 2: segment budget ${maxRemovalsPerPass} removals or ${maxPassEvictMs}ms, ` +
       `batchCap ${maxEvictPerTick}, interactionOrphanBatch ${interactionOrphanBatchCap}, ` +
-      `parsedDataSetSweep ${parsedReleaseSweepBatch}, ` +
+      `parsedDataSetSweep ${parsedReleaseSweepBatch}, parsedShellStrip 1, ` +
       `interactionHold ${interactionHoldMs}ms ` +
       `(quiet ${inputQuietMs} + idle ${idleTimeoutMs}), abortMove ${abortMoveThreshold}` +
       ` | Fix 3: reactive, configured ≥ ${Math.round(reactiveHighWater * 100)}%` +

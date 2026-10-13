@@ -12,6 +12,7 @@ import {
   dataSetUrlFromImageId,
   dataSetUrlCandidates,
   imageFromCacheEventDetail,
+  stripParsedDataSet,
   selectRemovals,
   shouldStopRemovalLoop,
   volumeBlocksStackEviction,
@@ -266,6 +267,20 @@ const limits = {
   assert.ok(keys.indexOf('https://pacs/wado?id=1') !== -1);
   assert.ok(keys.indexOf('wadouri:https://pacs/wado?id=1') !== -1);
   assert.equal(dataSetUrlCandidates('').length, 0);
+}
+
+{
+  const dataSet = {
+    byteArray: new Uint8Array(32),
+    elements: { x7fe00010: { length: 32 } },
+    warnings: ['partial'],
+  };
+  assert.equal(stripParsedDataSet(dataSet), true);
+  assert.equal(dataSet.byteArray.length, 0);
+  assert.equal(Object.keys(dataSet.elements).length, 0);
+  assert.equal(dataSet.warnings.length, 0);
+  assert.equal(stripParsedDataSet(dataSet), false);
+  assert.equal(stripParsedDataSet(null), false);
 }
 
 {

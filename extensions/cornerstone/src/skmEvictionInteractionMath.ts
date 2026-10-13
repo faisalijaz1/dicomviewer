@@ -321,6 +321,44 @@ export function dataSetUrlCandidates(imageId: string): string[] {
   return out;
 }
 
+/**
+ * The loader promise keeps the parsed dataset after the pixel bytes are copied
+ * out. Zeroing the file buffer is not enough: the element table is still a few
+ * KB per slice and is what survives garbage collection. Clear that table too.
+ */
+export function stripParsedDataSet(dataSet: any): boolean {
+  if (!dataSet || typeof dataSet !== 'object') {
+    return false;
+  }
+  let stripped = false;
+  try {
+    if (dataSet.byteArray && dataSet.byteArray.length > 0) {
+      dataSet.byteArray = new Uint8Array(0);
+      stripped = true;
+    }
+  } catch (e) {
+    /* byteArray is not writable */
+  }
+  try {
+    const elements = dataSet.elements;
+    if (elements && typeof elements === 'object' && Object.keys(elements).length > 0) {
+      dataSet.elements = {};
+      stripped = true;
+    }
+  } catch (e) {
+    /* elements is not writable */
+  }
+  try {
+    if (Array.isArray(dataSet.warnings) && dataSet.warnings.length > 0) {
+      dataSet.warnings.length = 0;
+      stripped = true;
+    }
+  } catch (e) {
+    /* warnings is not writable */
+  }
+  return stripped;
+}
+
 export function shouldStopRemovalLoop(
   removedThisBatch: number,
   elapsedMs: number,
