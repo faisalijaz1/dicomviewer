@@ -471,6 +471,8 @@ export function initSkmWorkingSetEvictor(
   let resumeTimer: ReturnType<typeof setTimeout> | null = null;
   let passAborted = 0;
   let passOrphans = 0; // orphan (closed-series) images queued for eviction this pass (Fix 3b)
+  let passOrphanRemaining = 0; // suffix of passCandidates that is still the closed series
+  let passStackIdentity = '';
   let passStartT = 0;
   let passEvictMs = 0; // cumulative time spent in removeImageLoadObject loops this pass
   let passKeepLo = 0;
@@ -561,6 +563,7 @@ export function initSkmWorkingSetEvictor(
     const last = publishLast();
     passActive = false;
     passCandidates = [];
+    passOrphanRemaining = 0;
     passKeep = new Set();
     passCsvs = null;
     passActiveViewportId = null;
@@ -650,6 +653,7 @@ export function initSkmWorkingSetEvictor(
       maxRemovalsPerSegment: maxRemovalsPerPass,
       maxSegmentEvictMs: maxPassEvictMs,
       yieldGapMs: passYieldGapMs,
+      orphanCandidatesRemaining: passOrphanRemaining,
     });
 
     if (plan.outcome === 'completed' || plan.outcome === 'no-eligible-candidates') {
@@ -672,8 +676,17 @@ export function initSkmWorkingSetEvictor(
     }
 
     const t0 = nowMs();
+    // During scroll, pop only the closed-series suffix. The current series stays
+    // until the hold ends, so the slice on screen is not removed mid-scroll.
+    let pool = passCandidates;
+    let lockedPrefix: string[] | null = null;
+    if (plan.orphanOnly) {
+      const n = Math.min(passOrphanRemaining, passCandidates.length);
+      lockedPrefix = passCandidates.slice(0, passCandidates.length - n);
+      pool = passCandidates.slice(passCandidates.length - n);
+    }
     const selected = selectRemovals({
-      candidates: passCandidates,
+      candidates: pool,
       isProtected: imageId => passKeep.has(imageId),
       isPresent: imageId => {
         try {
@@ -685,6 +698,12 @@ export function initSkmWorkingSetEvictor(
       removeCap: plan.removeCap,
       maxExaminations: 400,
     });
+    if (lockedPrefix) {
+      passCandidates = lockedPrefix.concat(pool);
+      passOrphanRemaining = pool.length;
+    } else {
+      passOrphanRemaining = Math.max(0, passOrphanRemaining - selected.examined);
+    }
     let removedThisBatch = 0;
     for (const imageId of selected.removed) {
       try {
@@ -767,9 +786,6 @@ export function initSkmWorkingSetEvictor(
   // imageId, so a slice kept by ANY viewport is never evicted (safe for comparison panes).
   const startPass = () => {
     try {
-      if (passActive) {
-        return; // a pass is already draining; a new STACK_NEW_IMAGE will re-schedule after it
-      }
       const { viewportGridService, cornerstoneViewportService: csvs } = servicesManager.services;
       if (!viewportGridService || !csvs) {
         return;
@@ -799,8 +815,25 @@ export function initSkmWorkingSetEvictor(
       });
 
       if (!stackVps.length) {
+        if (passActive) {
+          finishPass('aborted');
+        }
         return;
       }
+
+      // Series switch changes the open image list. The in-flight pass still treats the
+      // old series as "on screen", so abort it and rebuild: the series just left becomes
+      // the orphan suffix and can drain during the next scroll.
+      const stackIdentity = stackVps
+        .map(s => `${s.viewportId}:${s.imageIds.length}:${s.imageIds[0] || ''}`)
+        .join('|');
+      if (passActive) {
+        if (stackIdentity === passStackIdentity) {
+          return;
+        }
+        finishPass('aborted');
+      }
+      passStackIdentity = stackIdentity;
 
       const activeIdx = stackVps[0].idx;
       if (lastCenter !== null && activeIdx !== lastCenter) {
@@ -1087,6 +1120,7 @@ export function initSkmWorkingSetEvictor(
       passSeq++;
       passActive = true;
       passOrphans = orphans.length;
+      passOrphanRemaining = orphans.length;
       if (orphans.length) {
         orphanSweeps++;
         orphanQueuedTotal += orphans.length;

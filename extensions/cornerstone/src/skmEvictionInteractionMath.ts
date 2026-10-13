@@ -11,6 +11,8 @@
  * elapsed removal-time budget and keeps the remaining candidates for a later
  * continuation. Emergency removals (fill at least prefetchPause + margin) are
  * one small batch, then the same hold, and cannot exceed the segment budget.
+ * Images from a series that is no longer open are not part of that hold: they
+ * keep draining in the same small batches while the current series is scrolling.
  */
 
 export type EvictionStepOutcome =
@@ -94,11 +96,15 @@ export function planEvictionStep(input: {
   maxRemovalsPerSegment: number;
   maxSegmentEvictMs: number;
   yieldGapMs: number;
+  /** Closed-series images at the end of the candidate list. Omitted = 0. */
+  orphanCandidatesRemaining?: number;
 }): {
   outcome: EvictionStepOutcome;
   removeCap: number;
   waitMs: number;
   emergency: boolean;
+  /** When true, the caller may pop only the orphan suffix (closed series). */
+  orphanOnly: boolean;
 } {
   const remainingCandidates = Math.max(0, Math.floor(input.candidatesRemaining));
   const removedThisPass = Math.max(0, Math.floor(input.removedThisPass));
@@ -108,6 +114,7 @@ export function planEvictionStep(input: {
       removeCap: 0,
       waitMs: 0,
       emergency: false,
+      orphanOnly: false,
     };
   }
 
@@ -122,6 +129,7 @@ export function planEvictionStep(input: {
       removeCap: 0,
       waitMs: yieldGap,
       emergency: false,
+      orphanOnly: false,
     };
   }
 
@@ -138,6 +146,20 @@ export function planEvictionStep(input: {
       removeCap: Math.max(0, Math.min(normal, room)),
       waitMs: 0,
       emergency: false,
+      orphanOnly: false,
+    };
+  }
+
+  // A closed series is not the slice on screen. Keep draining it during scroll,
+  // still inside the segment budget, and do not pop the current series' window.
+  const orphansLeft = Math.max(0, Math.floor(input.orphanCandidatesRemaining ?? 0));
+  if (orphansLeft > 0) {
+    return {
+      outcome: 'run-batch',
+      removeCap: Math.max(0, Math.min(normal, room, orphansLeft)),
+      waitMs: 0,
+      emergency: false,
+      orphanOnly: true,
     };
   }
 
@@ -157,6 +179,7 @@ export function planEvictionStep(input: {
       removeCap: 0,
       waitMs: remain,
       emergency: false,
+      orphanOnly: false,
     };
   }
   return {
@@ -164,6 +187,7 @@ export function planEvictionStep(input: {
     removeCap: Math.max(0, Math.min(emergencyPlan.removeCap, room)),
     waitMs: 0,
     emergency: true,
+    orphanOnly: false,
   };
 }
 

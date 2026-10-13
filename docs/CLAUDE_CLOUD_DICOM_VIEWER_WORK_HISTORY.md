@@ -813,6 +813,12 @@ lane (8) already had spare capacity.
   prefetch. Follow-up: series-aware nearSkip + `activeBias:1` (see
   `docs/SKM_MULTI_VIEWPORT_PERF_AUDIT.md`). **Office Scenario A/B vs `2523c72`
   required before production deploy. Incomplete runs are not benchmarks.**
+- **Closed-series memory (2026-10-13):** a long scroll-and-switch on the 2001+4403
+  CT ratcheted the tab heap to ~4 GB because the interaction hold froze orphan
+  eviction and decoded growth could reach the 4096 MB machine ceiling inside one
+  tab. Orphan images now keep draining in the existing small batches during scroll.
+  One tab's decoded growth stops at `tabDecodedCapMB` 3072. The on-screen keep
+  window still waits for the hold. Not office-measured yet.
 - **Slice thumb same-turn index (2026-10-13):** fast ArrowDown left aria and
   `data-skm-slice-index` one behind `getCurrentImageIdIndex` because the scroll
   paint read the index before it moved, and the sample ran before `STACK_NEW_IMAGE`.

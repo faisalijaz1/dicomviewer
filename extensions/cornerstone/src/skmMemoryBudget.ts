@@ -51,6 +51,13 @@ export type SkmMemoryBudgetConfig = {
   baselineMB?: number;
   /** Max aggregate decoded budget across ALL tabs on this machine (MB). Default 4096. */
   hardCeilingMB?: number;
+  /**
+   * Per-tab decoded growth cap (MB). The machine ceiling can be 4096 (or a 6 GB
+   * preference), but one tab's pixel buffers live in a heap that dies near 4 GB.
+   * Growth stops here so the current series can stay decoded without the tab
+   * climbing to that limit. Default 3072. Ignored when the machine ceiling is lower.
+   */
+  tabDecodedCapMB?: number;
   /** Clamp bounds for any baseline/ceiling (override or default). Default 1024 / 8192. */
   minBudgetMB?: number;
   maxBudgetMB?: number;
@@ -131,6 +138,10 @@ export function initSkmMemoryBudget(
 
   const DEF_BASELINE = Math.max(256, config.baselineMB ?? 2816);
   const DEF_CEILING = Math.max(DEF_BASELINE, config.hardCeilingMB ?? 4096);
+  // One tab must not grow its decoded cache up to the machine ceiling: that ceiling
+  // matches the browser tab heap limit, and pixel data lives inside the heap.
+  const TAB_DECODED_CAP = Math.max(256, config.tabDecodedCapMB ?? 3072);
+  const tabDecodedCap = (): number => Math.min(getCeiling(), TAB_DECODED_CAP);
   const MIN_MB = config.minBudgetMB ?? 1024;
   const MAX_MB = config.maxBudgetMB ?? 8192;
   const STEP = Math.max(64, config.stepMB ?? 256);
@@ -447,8 +458,8 @@ export function initSkmMemoryBudget(
       alloc.set(
         t2.id,
         t2.active
-          ? Math.min(ceiling, Math.max(ACTIVE_MIN, t2.desiredMB))
-          : Math.min(t2.desiredMB, Math.max(IDLE_FLOOR, fairShare))
+          ? Math.min(tabDecodedCap(), Math.max(ACTIVE_MIN, t2.desiredMB))
+          : Math.min(t2.desiredMB, tabDecodedCap(), Math.max(IDLE_FLOOR, fairShare))
       )
     );
 
@@ -535,6 +546,7 @@ export function initSkmMemoryBudget(
       (globalThis as any).__skmBudget = {
         machineBaselineMB: getBaseline(),
         machineHardCeilingMB: getCeiling(),
+        tabDecodedCapMB: tabDecodedCap(),
         source: readNum(LS_BASE) != null ? 'override' : 'default',
         liveTabs,
         activeTab: amActive(),
@@ -661,7 +673,9 @@ export function initSkmMemoryBudget(
         .filter(tb => tb.id !== myId)
         .reduce((s, tb) => s + (typeof tb.allocationMB === 'number' ? tb.allocationMB : tb.desiredMB), 0);
       const availableForMe = Math.max(ACTIVE_MIN, ceiling - othersAllocationMB);
-      const growthCeilingForMe = Math.min(ceiling, availableForMe);
+      // Machine ceiling still caps the sum across tabs. This tab's own decoded
+      // growth stops at tabDecodedCap (default 3072) so the heap is not the crash line.
+      const growthCeilingForMe = Math.min(tabDecodedCap(), availableForMe);
       lastOthersAllocationMB = othersAllocationMB;
       lastAvailableForMe = availableForMe;
 
@@ -698,10 +712,10 @@ export function initSkmMemoryBudget(
       // what's actually available once other known tabs' current allocations are subtracted.
       if (
         pressure >= PRESSURE_THRESHOLD &&
-        desiredMB < ceiling &&
+        desiredMB < growthCeilingForMe &&
         t - lastIncreaseAt >= INC_DWELL
       ) {
-        const requestedMB = Math.min(ceiling, desiredMB + STEP);
+        const requestedMB = Math.min(growthCeilingForMe, desiredMB + STEP);
         const grantedMB = Math.min(requestedMB, growthCeilingForMe);
         lastGrowthRequestedMB = requestedMB;
         lastGrowthGrantedMB = grantedMB;

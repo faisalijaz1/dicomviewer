@@ -74,6 +74,7 @@ const limits = {
   assert.equal(deferred.outcome, 'interaction-deferred');
   assert.equal(deferred.removeCap, 0);
   assert.equal(deferred.emergency, false);
+  assert.equal(deferred.orphanOnly, false);
   const candidates = ['a', 'b', 'c'];
   const before = candidates.slice();
   assert.equal(deferred.removeCap, 0);
@@ -186,7 +187,44 @@ const limits = {
     fill: 0.94,
   });
   assert.equal(underLine.outcome, 'interaction-deferred');
+  assert.equal(underLine.orphanOnly, false);
+}
 
+// A closed series still drains during the hold, and only up to the orphan suffix.
+{
+  const orphans = planEvictionStep({
+    ...limits,
+    candidatesRemaining: 2400,
+    orphanCandidatesRemaining: 2000,
+    removedThisPass: 0,
+    segmentRemoved: 0,
+    segmentEvictMs: 0,
+    now: 500,
+    lastInputAt: 100,
+    fill: 0.5,
+  });
+  assert.equal(orphans.outcome, 'run-batch');
+  assert.equal(orphans.orphanOnly, true);
+  assert.equal(orphans.emergency, false);
+  assert.equal(orphans.removeCap, 50);
+
+  const few = planEvictionStep({
+    ...limits,
+    candidatesRemaining: 30,
+    orphanCandidatesRemaining: 10,
+    removedThisPass: 0,
+    segmentRemoved: 0,
+    segmentEvictMs: 0,
+    now: 500,
+    lastInputAt: 100,
+    fill: 0.99,
+  });
+  assert.equal(few.orphanOnly, true);
+  assert.equal(few.removeCap, 10);
+  assert.equal(few.emergency, false);
+}
+
+{
   const noPause = planInteractionEvictionBatch({
     interacting: true,
     fill: 0.99,

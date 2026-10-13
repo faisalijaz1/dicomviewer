@@ -524,6 +524,10 @@ window.config = {
   skmMemoryBudget: {
     baselineMB: 2816,       // 16 GB-safe starting budget (validated smooth on the 4403 series: displayP95 1ms, decodedHit 100%, spinner 0, cacheSizeExceeded 0)
     hardCeilingMB: 4096,    // max AGGREGATE decoded across all tabs on a 16 GB machine
+    // One tab stops growing here. 4096 of decoded pixels sits on the same heap that
+    // crashes the tab. 3072 leaves about 1 GB for the viewer while a 4403-slice series
+    // (about 2.2 GB) still fits. A lower preference ceiling still wins.
+    tabDecodedCapMB: 3072,
     minBudgetMB: 1024,
     maxBudgetMB: 8192,
     stepMB: 256,            // gradual adaptation step
