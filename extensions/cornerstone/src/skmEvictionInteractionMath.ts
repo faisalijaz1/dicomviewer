@@ -12,7 +12,10 @@
  * continuation. Emergency removals (fill at least prefetchPause + margin) are
  * one small batch, then the same hold, and cannot exceed the segment budget.
  * Images from a series that is no longer open are not part of that hold: they
- * keep draining in the same small batches while the current series is scrolling.
+ * keep draining while the current series is scrolling, but only a few per turn.
+ * The caller must also stop mid-batch once removal time hits maxSegmentEvictMs,
+ * because that check used to run only before the batch. One batch of 50 then
+ * blocked the screen for seconds (budget-exhausted during scroll).
  */
 
 export type EvictionStepOutcome =
@@ -98,6 +101,12 @@ export function planEvictionStep(input: {
   yieldGapMs: number;
   /** Closed-series images at the end of the candidate list. Omitted = 0. */
   orphanCandidatesRemaining?: number;
+  /**
+   * Max closed-series images removed in one turn while the user is scrolling.
+   * Default 8. The full normal batch (50) is what made one series switch a
+   * multi-second main-thread stall.
+   */
+  interactionOrphanBatchCap?: number;
 }): {
   outcome: EvictionStepOutcome;
   removeCap: number;
@@ -151,12 +160,13 @@ export function planEvictionStep(input: {
   }
 
   // A closed series is not the slice on screen. Keep draining it during scroll,
-  // still inside the segment budget, and do not pop the current series' window.
+  // a few images at a time, and do not pop the current series' window.
   const orphansLeft = Math.max(0, Math.floor(input.orphanCandidatesRemaining ?? 0));
   if (orphansLeft > 0) {
+    const orphanCap = Math.max(1, Math.floor(input.interactionOrphanBatchCap ?? 8));
     return {
       outcome: 'run-batch',
-      removeCap: Math.max(0, Math.min(normal, room, orphansLeft)),
+      removeCap: Math.max(0, Math.min(orphanCap, normal, room, orphansLeft)),
       waitMs: 0,
       emergency: false,
       orphanOnly: true,
@@ -217,6 +227,20 @@ export function selectRemovals(input: {
     removed.push(imageId);
   }
   return { removed, examined };
+}
+
+/**
+ * True once this turn has already removed something and the removal-time budget
+ * is used. The first removal is always allowed so a pass cannot stall on a
+ * clock that is already over the line; every removal after that waits for the
+ * next turn. Call this inside the removal loop, not only before it.
+ */
+export function shouldStopRemovalLoop(
+  removedThisBatch: number,
+  elapsedMs: number,
+  maxMs: number
+): boolean {
+  return removedThisBatch > 0 && elapsedMs >= Math.max(1, maxMs);
 }
 
 export function volumeBlocksStackEviction(

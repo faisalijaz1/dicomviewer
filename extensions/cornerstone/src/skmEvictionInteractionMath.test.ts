@@ -10,6 +10,7 @@ import {
   planInteractionEvictionBatch,
   resolveInteractionHoldMs,
   selectRemovals,
+  shouldStopRemovalLoop,
   volumeBlocksStackEviction,
 } from './skmEvictionInteractionMath.ts';
 
@@ -206,12 +207,12 @@ const limits = {
   assert.equal(orphans.outcome, 'run-batch');
   assert.equal(orphans.orphanOnly, true);
   assert.equal(orphans.emergency, false);
-  assert.equal(orphans.removeCap, 50);
+  assert.equal(orphans.removeCap, 8);
 
   const few = planEvictionStep({
     ...limits,
     candidatesRemaining: 30,
-    orphanCandidatesRemaining: 10,
+    orphanCandidatesRemaining: 5,
     removedThisPass: 0,
     segmentRemoved: 0,
     segmentEvictMs: 0,
@@ -220,8 +221,31 @@ const limits = {
     fill: 0.99,
   });
   assert.equal(few.orphanOnly, true);
-  assert.equal(few.removeCap, 10);
+  assert.equal(few.removeCap, 5);
   assert.equal(few.emergency, false);
+
+  const tighter = planEvictionStep({
+    ...limits,
+    interactionOrphanBatchCap: 4,
+    candidatesRemaining: 400,
+    orphanCandidatesRemaining: 400,
+    removedThisPass: 0,
+    segmentRemoved: 0,
+    segmentEvictMs: 0,
+    now: 500,
+    lastInputAt: 100,
+    fill: 0.5,
+  });
+  assert.equal(tighter.removeCap, 4);
+  assert.equal(tighter.orphanOnly, true);
+}
+
+// A removal loop stops after the budget is used, including mid-batch.
+{
+  assert.equal(shouldStopRemovalLoop(0, 80, 48), false);
+  assert.equal(shouldStopRemovalLoop(1, 47, 48), false);
+  assert.equal(shouldStopRemovalLoop(1, 48, 48), true);
+  assert.equal(shouldStopRemovalLoop(8, 48, 48), true);
 }
 
 {

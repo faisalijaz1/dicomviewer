@@ -46,12 +46,12 @@
  */
 
 // eslint-disable-next-line
-import { cache, Enums } from '@cornerstonejs/core';
+import { cache, Enums, eventTarget } from '@cornerstonejs/core';
 import { subscribeStackNewImage, subscribeViewportElementEvent } from './utils/skmStackNewImage';
 import {
   planEvictionStep,
   resolveInteractionHoldMs,
-  selectRemovals,
+  shouldStopRemovalLoop,
 } from './skmEvictionInteractionMath';
 import {
   evaluateIdleOutsideKeepScanGate,
@@ -335,6 +335,9 @@ export function initSkmWorkingSetEvictor(
   const maxPassEvictMs = Math.max(1, config?.maxPassEvictMs ?? 48);
   const passYieldGapMs = Math.max(16, config?.passYieldGapMs ?? 50);
   const emergencyBatchCap = 10;
+  // Closed-series images still drain during scroll, but not 50 at a time.
+  // One full batch overran the 48ms budget and locked the screen for seconds.
+  const interactionOrphanBatchCap = 8;
   const abortMoveThreshold = Math.max(1, config?.abortMoveThreshold ?? 100);
   // Experiment A (TEST-ONLY): independent keep-budget override. Default OFF.
   const testKeepWindowEnabled = config?.testKeepWindowEnabled === true;
@@ -483,6 +486,10 @@ export function initSkmWorkingSetEvictor(
   let passStackVps = 0;
   let passBatchCap = maxEvictPerTick; // per-pass: maxEvictPerTick or maxIdleEvictPerTick
   let passIdleOutsideKeepCleanupActive = false;
+  let lastBatchMs = 0;
+  let lastBatchRemoved = 0;
+  let lastBatchStoppedForTime = false;
+  let parsedDataSetsReleased = 0;
 
   // Current centre of the active viewport (best-effort; 0 if unknown).
   const currentActiveCenter = (): number => {
@@ -531,8 +538,13 @@ export function initSkmWorkingSetEvictor(
       reactiveSkip: false, // this snapshot is from a real eviction pass
       reactiveSkips,
       orphans: passOrphans, // orphan (closed-series) images queued this pass (Fix 3b)
+      orphanRemaining: passOrphanRemaining,
       orphanSweeps, // cumulative passes that queued ≥1 orphan
       orphanQueuedTotal, // cumulative orphan images queued (Fix 3b)
+      lastBatchMs,
+      lastBatchRemoved,
+      batchStoppedForTime: lastBatchStoppedForTime,
+      parsedDataSetsReleased,
       idleOutsideKeepCleanupEnabled,
       idleOutsideKeepCleanupActive: passIdleOutsideKeepCleanupActive,
       reactivePathReason: passIdleOutsideKeepCleanupActive
@@ -654,6 +666,7 @@ export function initSkmWorkingSetEvictor(
       maxSegmentEvictMs: maxPassEvictMs,
       yieldGapMs: passYieldGapMs,
       orphanCandidatesRemaining: passOrphanRemaining,
+      interactionOrphanBatchCap,
     });
 
     if (plan.outcome === 'completed' || plan.outcome === 'no-eligible-candidates') {
@@ -675,47 +688,60 @@ export function initSkmWorkingSetEvictor(
       return;
     }
 
-    const t0 = nowMs();
-    // During scroll, pop only the closed-series suffix. The current series stays
-    // until the hold ends, so the slice on screen is not removed mid-scroll.
-    let pool = passCandidates;
-    let lockedPrefix: string[] | null = null;
-    if (plan.orphanOnly) {
-      const n = Math.min(passOrphanRemaining, passCandidates.length);
-      lockedPrefix = passCandidates.slice(0, passCandidates.length - n);
-      pool = passCandidates.slice(passCandidates.length - n);
-    }
-    const selected = selectRemovals({
-      candidates: pool,
-      isProtected: imageId => passKeep.has(imageId),
-      isPresent: imageId => {
-        try {
-          return !!(cache as any).getImageLoadObject?.(imageId);
-        } catch (e) {
-          return false;
-        }
-      },
-      removeCap: plan.removeCap,
-      maxExaminations: 400,
-    });
-    if (lockedPrefix) {
-      passCandidates = lockedPrefix.concat(pool);
-      passOrphanRemaining = pool.length;
-    } else {
-      passOrphanRemaining = Math.max(0, passOrphanRemaining - selected.examined);
-    }
+    const batchT0 = nowMs();
+    // Pop from the end. Orphans sit at the end, so they go first. During scroll,
+    // stop when the orphan suffix is gone — the series on screen stays in the prefix.
     let removedThisBatch = 0;
-    for (const imageId of selected.removed) {
+    let examinations = 0;
+    let stoppedForTime = false;
+    while (removedThisBatch < plan.removeCap && passCandidates.length && examinations < 400) {
+      if (shouldStopRemovalLoop(removedThisBatch, segmentEvictMs, maxPassEvictMs)) {
+        stoppedForTime = true;
+        break;
+      }
+      const fromOrphan = passOrphanRemaining > 0;
+      if (plan.orphanOnly && !fromOrphan) {
+        break;
+      }
+      const imageId = passCandidates.pop();
+      examinations++;
+      if (fromOrphan) {
+        passOrphanRemaining--;
+      }
+      if (!imageId || passKeep.has(imageId)) {
+        continue;
+      }
+      let loadObject: any;
+      try {
+        loadObject = (cache as any).getImageLoadObject?.(imageId);
+      } catch (e) {
+        loadObject = undefined;
+      }
+      if (!loadObject) {
+        continue;
+      }
+      const t1 = nowMs();
       try {
         (cache as any).removeImageLoadObject(imageId);
+        if (typeof loadObject.decache === 'function') {
+          try {
+            loadObject.decache();
+            parsedDataSetsReleased++;
+          } catch (e) {
+            /* parsed dataset already released */
+          }
+        }
         removedThisBatch++;
       } catch (e) {
         /* image in use / already gone — skip */
       }
+      const stepMs = nowMs() - t1;
+      passEvictMs += stepMs;
+      segmentEvictMs += stepMs;
     }
-    const dt = nowMs() - t0;
-    passEvictMs += dt;
-    segmentEvictMs += dt;
+    lastBatchMs = Math.round(nowMs() - batchT0);
+    lastBatchRemoved = removedThisBatch;
+    lastBatchStoppedForTime = stoppedForTime;
     segmentRemoved += removedThisBatch;
 
     if (removedThisBatch > 0) {
@@ -729,7 +755,7 @@ export function initSkmWorkingSetEvictor(
       recentBatches.push({
         t: Date.now(),
         size: removedThisBatch,
-        ms: Math.round(dt),
+        ms: lastBatchMs,
         pass: passSeq,
       });
       if (recentBatches.length > 60) {
@@ -1265,6 +1291,44 @@ export function initSkmWorkingSetEvictor(
     setInterval(schedule, tickMs);
   }
 
+  // The decoded image keeps its pixels. The parsed DICOM (image.data plus the
+  // loader dataset cache) is a second copy — idle heap sat at about 2× the
+  // cornerstone cache while the evictor removed nothing. Drop that copy once
+  // the pixels are on the image. Single-frame only: a multi-frame instance
+  // shares one dataset across frames. Tag overlays read the metadata provider,
+  // not image.data.
+  try {
+    eventTarget.addEventListener(Enums.Events.IMAGE_CACHE_IMAGE_ADDED, (evt: any) => {
+      const image = evt?.detail?.image;
+      const frames = Number(image?.numberOfFrames);
+      if (!image || (Number.isFinite(frames) && frames > 1)) {
+        return;
+      }
+      if (typeof image.getPixelData !== 'function' && !image.voxelManager) {
+        return;
+      }
+      const imageId = image.imageId || evt?.detail?.imageId;
+      try {
+        const loadObject = imageId ? (cache as any).getImageLoadObject?.(imageId) : undefined;
+        if (typeof loadObject?.decache === 'function') {
+          loadObject.decache();
+        }
+      } catch (e) {
+        /* loader has no decache */
+      }
+      try {
+        if (image.data) {
+          image.data = undefined;
+          parsedDataSetsReleased++;
+        }
+      } catch (e) {
+        /* image.data is not writable */
+      }
+    });
+  } catch (e) {
+    /* event name differs — eviction still drops datasets on remove */
+  }
+
   // eslint-disable-next-line no-console
   console.log(
     (budgetBased
@@ -1272,7 +1336,8 @@ export function initSkmWorkingSetEvictor(
         `aheadBias ${aheadBias}, margin ${margin} (keep window sized live from avg slice bytes)`
       : `[SKM-EVICTOR] active, fixed window: keep ${keepBehind}+${keepAhead} (+${margin}) slices`) +
       ` | Fix 2: segment budget ${maxRemovalsPerPass} removals or ${maxPassEvictMs}ms, ` +
-      `batchCap ${maxEvictPerTick}, interactionHold ${interactionHoldMs}ms ` +
+      `batchCap ${maxEvictPerTick}, interactionOrphanBatch ${interactionOrphanBatchCap}, ` +
+      `interactionHold ${interactionHoldMs}ms ` +
       `(quiet ${inputQuietMs} + idle ${idleTimeoutMs}), abortMove ${abortMoveThreshold}` +
       ` | Fix 3: reactive, configured ≥ ${Math.round(reactiveHighWater * 100)}%` +
       `, effective ≥ ${Math.round(effectiveReactiveHighWater * 100)}% of cap` +

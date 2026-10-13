@@ -816,9 +816,14 @@ lane (8) already had spare capacity.
 - **Closed-series memory (2026-10-13):** a long scroll-and-switch on the 2001+4403
   CT ratcheted the tab heap to ~4 GB because the interaction hold froze orphan
   eviction and decoded growth could reach the 4096 MB machine ceiling inside one
-  tab. Orphan images now keep draining in the existing small batches during scroll.
-  One tab's decoded growth stops at `tabDecodedCapMB` 3072. The on-screen keep
-  window still waits for the hold. Not office-measured yet.
+  tab. Orphan images keep draining during scroll. One tab's decoded growth stops
+  at `tabDecodedCapMB` 3072. Office retest of `af01f8b` (`index.c8d70366.js`):
+  heap peaked at 680 MB and levelled off. The same run made scrolling ~10× slower
+  once eviction stayed on `budget-exhausted`, because one batch of up to 50
+  removals ran past the 48 ms budget. A scroll turn now removes at most 8
+  closed-series images and stops as soon as that time budget is used. Parsed
+  DICOM datasets are released once the pixels are cached, so the idle heap is
+  not a second copy of the decoded cache. Not office-measured yet.
 - **Slice thumb same-turn index (2026-10-13):** fast ArrowDown left aria and
   `data-skm-slice-index` one behind `getCurrentImageIdIndex` because the scroll
   paint read the index before it moved, and the sample ran before `STACK_NEW_IMAGE`.
