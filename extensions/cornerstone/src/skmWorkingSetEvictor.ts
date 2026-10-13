@@ -494,6 +494,10 @@ export function initSkmWorkingSetEvictor(
   let lastBatchRemoved = 0;
   let lastBatchStoppedForTime = false;
   let parsedDataSetsReleased = 0;
+  // Who released the parsed file. Office 9b057598 could not tell whether the
+  // loader hook runs per decode or whether the sweep was doing that work.
+  const parsedReleasedBy = { hook: 0, cacheAdd: 0, sweep: 0, drop: 0, onScreen: 0 };
+  type ParsedReleaseSource = keyof typeof parsedReleasedBy;
 
   // Current centre of the active viewport (best-effort; 0 if unknown).
   const currentActiveCenter = (): number => {
@@ -549,6 +553,8 @@ export function initSkmWorkingSetEvictor(
       lastBatchRemoved,
       batchStoppedForTime: lastBatchStoppedForTime,
       parsedDataSetsReleased,
+      parsedReleasedBy: { ...parsedReleasedBy },
+      loaderWrapperCalls: readLoaderWrapperCalls(),
       ...readDataSetCacheStats(),
       idleOutsideKeepCleanupEnabled,
       idleOutsideKeepCleanupActive: passIdleOutsideKeepCleanupActive,
@@ -634,11 +640,23 @@ export function initSkmWorkingSetEvictor(
     }
   };
 
+  // skmPurgeableStackImages counts every call into the wrapped loader. If this
+  // stays at 0 the per-decode release hook never runs and the sweep is doing it.
+  const readLoaderWrapperCalls = (): number | null => {
+    const calls = (globalThis as any).__skmPurgeStats?.calls;
+    return typeof calls === 'number' ? calls : null;
+  };
+
   // Drop the parsed DICOM byte array once the pixels exist. Office 6d7b5e1: the
   // cache-add listener did not move this counter while a series was on screen
   // (idle stayed at 60; scrolling stayed flat until the series was dropped).
   // The loader hook and the cache sweep below call this for those images.
-  const releaseParsedDataSet = (image: any, loadObject: any, imageId: string | null): void => {
+  const releaseParsedDataSet = (
+    image: any,
+    loadObject: any,
+    imageId: string | null,
+    source: ParsedReleaseSource = 'onScreen'
+  ): void => {
     const frames = Number(image?.numberOfFrames ?? image?.data?.intString?.('x00280008'));
     if (Number.isFinite(frames) && frames > 1) {
       return;
@@ -707,6 +725,7 @@ export function initSkmWorkingSetEvictor(
       /* image.data is not writable */
     }
     parsedDataSetsReleased++;
+    parsedReleasedBy[source]++;
   };
 
   // Closed-series images are not on screen. Delete the cache entry without
@@ -723,7 +742,7 @@ export function initSkmWorkingSetEvictor(
     }
     const image = entry.image;
     const loadObject = entry.imageLoadObject;
-    releaseParsedDataSet(image, loadObject, imageId);
+    releaseParsedDataSet(image, loadObject, imageId, 'drop');
     const size = typeof entry.sizeInBytes === 'number' ? entry.sizeInBytes : 0;
     try {
       if (typeof loadObject?.cancelFn === 'function') {
@@ -1439,14 +1458,18 @@ export function initSkmWorkingSetEvictor(
   // 6d7b5e1 office: this listener did not advance the counter during idle or
   // during a scroll; it only moved when the series was dropped. The loader
   // hook (__skmReleaseParsedDataSet) and the sweep cover those paths.
-  (globalThis as any).__skmReleaseParsedDataSet = releaseParsedDataSet;
+  (globalThis as any).__skmReleaseParsedDataSet = (
+    image: any,
+    loadObject: any,
+    imageId: string | null
+  ) => releaseParsedDataSet(image, loadObject, imageId, 'hook');
   try {
     eventTarget.addEventListener(Enums.Events.IMAGE_CACHE_IMAGE_ADDED, (evt: any) => {
       const parsed = imageFromCacheEventDetail(evt?.detail);
       if (!parsed?.image) {
         return;
       }
-      releaseParsedDataSet(parsed.image, parsed.loadObject, parsed.imageId);
+      releaseParsedDataSet(parsed.image, parsed.loadObject, parsed.imageId, 'cacheAdd');
     });
   } catch (e) {
     /* event name differs — the sweep still drops datasets */
@@ -1468,38 +1491,31 @@ export function initSkmWorkingSetEvictor(
       return false;
     }
   };
+  // Office 9b057598: these fields were only refreshed when the sweep ran, and
+  // the sweep was held during a scroll, so every scroll sample showed the
+  // previous switch's values. Publish on every tick, before any early return.
   const publishParsedRelease = () => {
     const last = (globalThis as any).__skmEvictorLast || {};
     last.parsedDataSetsReleased = parsedDataSetsReleased;
+    last.parsedReleasedBy = { ...parsedReleasedBy };
+    last.loaderWrapperCalls = readLoaderWrapperCalls();
     const stats = readDataSetCacheStats();
     last.dataSetsCached = stats.dataSetsCached;
     last.dataSetCacheMB = stats.dataSetCacheMB;
     (globalThis as any).__skmEvictorLast = last;
   };
-  let lastResourceTimingClear = 0;
   // Prefetch fills the cache without a series switch, so nothing else publishes
   // the counter. Walk a small batch of entries that still hold a parsed file.
+  // Runs during a scroll too: 5c932257 scrolled at 3.67 s with this sweep
+  // unconditional; 9b057598 held it during input and scrolled at 6.07 s. When
+  // the loader hook has already released a slice the walk finds nothing.
   const sweepParsedDataSets = () => {
+    publishParsedRelease();
     if (volumeOpen()) {
       return;
     }
-    // Scrolling already releases each slice from the loader hook. Walking the
-    // cache during a wheel burst is the work that can stretch a scroll cycle.
-    if (lastInputAt > 0 && nowMs() - lastInputAt < interactionHoldMs) {
-      return;
-    }
-    const sweepNow = nowMs();
-    if (sweepNow - lastResourceTimingClear > 5000) {
-      lastResourceTimingClear = sweepNow;
-      try {
-        performance.clearResourceTimings?.();
-      } catch (e) {
-        /* resource timing unavailable */
-      }
-    }
     const map = (cache as any)._imageCache;
     if (!map || typeof map.values !== 'function') {
-      publishParsedRelease();
       return;
     }
     let released = 0;
@@ -1509,7 +1525,12 @@ export function initSkmWorkingSetEvictor(
         if (!image?.data) {
           continue;
         }
-        releaseParsedDataSet(image, entry.imageLoadObject, entry.imageId || image.imageId || null);
+        releaseParsedDataSet(
+          image,
+          entry.imageLoadObject,
+          entry.imageId || image.imageId || null,
+          'sweep'
+        );
         released++;
         if (released >= parsedReleaseSweepBatch) {
           break;
@@ -1518,7 +1539,9 @@ export function initSkmWorkingSetEvictor(
     } catch (e) {
       /* cache shape differs */
     }
-    publishParsedRelease();
+    if (released > 0) {
+      publishParsedRelease();
+    }
   };
   setInterval(sweepParsedDataSets, 400);
 
@@ -1530,7 +1553,7 @@ export function initSkmWorkingSetEvictor(
       : `[SKM-EVICTOR] active, fixed window: keep ${keepBehind}+${keepAhead} (+${margin}) slices`) +
       ` | Fix 2: segment budget ${maxRemovalsPerPass} removals or ${maxPassEvictMs}ms, ` +
       `batchCap ${maxEvictPerTick}, interactionOrphanBatch ${interactionOrphanBatchCap}, ` +
-      `parsedDataSetSweep ${parsedReleaseSweepBatch}, parsedShellStrip 1, ` +
+      `parsedDataSetSweep ${parsedReleaseSweepBatch}, parsedShellStrip 1, parsedReleaseSources 1, ` +
       `interactionHold ${interactionHoldMs}ms ` +
       `(quiet ${inputQuietMs} + idle ${idleTimeoutMs}), abortMove ${abortMoveThreshold}` +
       ` | Fix 3: reactive, configured ≥ ${Math.round(reactiveHighWater * 100)}%` +

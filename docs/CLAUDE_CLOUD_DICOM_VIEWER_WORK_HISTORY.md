@@ -838,7 +838,17 @@ lane (8) already had spare capacity.
   about 15 MB/min after a forced garbage collection. The loader promise keeps
   the parsed element table after the file bytes are dropped. That table is now
   cleared too, and the cache sweep waits until scrolling has been quiet.
-  Not office-measured yet.
+  Office retest of that build (`index.9b057598.js`): idle heap 1.07× the cache,
+  the series you left 0 MB, switch 10 ms, heap +12.9 MB/min (+11.3 after forced
+  GC), but every 80-wheel cycle took 6.07 s instead of 3.67 s from the first
+  minute, in two attempts. That build held the sweep during input and cleared
+  the browser resource-timing buffer every 5 s; the diagnostics it published
+  were refreshed only by the sweep, so scroll samples showed the previous
+  switch's values and could not say whether the per-decode hook runs. The sweep
+  is unconditional again (as in `5c932257`), the buffer clear is gone, the
+  element-table clear stays, and `__skmEvictorLast` now publishes on every
+  tick with `parsedReleasedBy` (hook / cacheAdd / sweep / drop / onScreen) and
+  `loaderWrapperCalls`. Not office-measured yet.
 - **Slice thumb same-turn index (2026-10-13):** fast ArrowDown left aria and
   `data-skm-slice-index` one behind `getCurrentImageIdIndex` because the scroll
   paint read the index before it moved, and the sample ran before `STACK_NEW_IMAGE`.
