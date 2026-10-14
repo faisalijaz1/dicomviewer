@@ -907,15 +907,20 @@ export default async function init({
     const { viewport } = getEnabledElement(element);
     initViewTiming({ element });
 
-    element.addEventListener(EVENTS.CAMERA_RESET, evt => {
-      const { element } = evt.detail;
-      const enabledElement = getEnabledElement(element);
-      if (!enabledElement) {
-        return;
-      }
-      const { viewportId } = enabledElement;
-      commandsManager.runCommand('resetCrosshairs', { viewportId });
-    });
+    // enableElement used to fire this on every series switch, stacking a new
+    // listener on the same element each time.
+    if (!(element as any).__skmCameraResetWired) {
+      (element as any).__skmCameraResetWired = true;
+      element.addEventListener(EVENTS.CAMERA_RESET, evt => {
+        const { element } = evt.detail;
+        const enabledElement = getEnabledElement(element);
+        if (!enabledElement) {
+          return;
+        }
+        const { viewportId } = enabledElement;
+        commandsManager.runCommand('resetCrosshairs', { viewportId });
+      });
+    }
 
     // limitation: currently supporting only volume viewports with fusion
     if (viewport.type !== cornerstone.Enums.ViewportType.ORTHOGRAPHIC) {

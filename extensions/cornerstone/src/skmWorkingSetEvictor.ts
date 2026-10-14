@@ -1553,7 +1553,7 @@ export function initSkmWorkingSetEvictor(
       : `[SKM-EVICTOR] active, fixed window: keep ${keepBehind}+${keepAhead} (+${margin}) slices`) +
       ` | Fix 2: segment budget ${maxRemovalsPerPass} removals or ${maxPassEvictMs}ms, ` +
       `batchCap ${maxEvictPerTick}, interactionOrphanBatch ${interactionOrphanBatchCap}, ` +
-      `parsedDataSetSweep ${parsedReleaseSweepBatch}, parsedShellStrip 1, parsedReleaseSources 1, ` +
+      `parsedDataSetSweep ${parsedReleaseSweepBatch}, parsedShellStrip 1, parsedReleaseSources 1, retiredViewportRelease 1, ` +
       `interactionHold ${interactionHoldMs}ms ` +
       `(quiet ${inputQuietMs} + idle ${idleTimeoutMs}), abortMove ${abortMoveThreshold}` +
       ` | Fix 3: reactive, configured ≥ ${Math.round(reactiveHighWater * 100)}%` +

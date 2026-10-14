@@ -848,7 +848,18 @@ lane (8) already had spare capacity.
   is unconditional again (as in `5c932257`), the buffer clear is gone, the
   element-table clear stays, and `__skmEvictorLast` now publishes on every
   tick with `parsedReleasedBy` (hook / cacheAdd / sweep / drop / onScreen) and
-  `loaderWrapperCalls`. Not office-measured yet.
+  `loaderWrapperCalls`. Office retest of that build (`index.278a36fd.js`):
+  idle heap 1.07× the cache, dataset release during scroll is the loader hook,
+  the series you left stayed at 0 MB, and a clean-host scroll was about 3.9 s.
+  The heap still climbed about 11 MB/min after a forced garbage collection.
+  Heap snapshots at minute 5 and minute 25 showed one new StackViewport per
+  series switch (178 switches, +178 instances), each keeping its last image
+  (~1.2 MB). `setViewportData` called `enableElement` on every switch, and the
+  `VIEWPORT_NEW_IMAGE_SET` listener closed over that viewport and was never
+  removed. A stack series change now keeps the viewport and calls `setStack`.
+  A type change still uses `enableElement`, then drops the disabled viewport's
+  image. Console: `[SKM-VIEWPORT] … retiredViewportRelease 1`. Not
+  office-measured yet.
 - **Slice thumb same-turn index (2026-10-13):** fast ArrowDown left aria and
   `data-skm-slice-index` one behind `getCurrentImageIdIndex` because the scroll
   paint read the index before it moved, and the sample ran before `STACK_NEW_IMAGE`.
