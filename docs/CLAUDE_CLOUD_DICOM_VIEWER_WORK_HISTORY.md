@@ -858,7 +858,16 @@ lane (8) already had spare capacity.
   `VIEWPORT_NEW_IMAGE_SET` listener closed over that viewport and was never
   removed. A stack series change now keeps the viewport and calls `setStack`.
   A type change still uses `enableElement`, then drops the disabled viewport's
-  image. Console: `[SKM-VIEWPORT] … retiredViewportRelease 1`. Not
+  image. Console: `[SKM-VIEWPORT] … retiredViewportRelease 1`. Office retest of
+  that build (`index.97b9a615.js`) stopped at the build check: the markers
+  were present, but a thumbnail switch threw `t.cancelFn is not a function`
+  inside `cancelLoadImages` and `setStack` never ran, so the viewport stayed
+  on the first series. Reusing the viewport means `getImageIds()` still lists
+  the series on screen, and Cornerstone calls `cancelFn` on load objects that
+  no longer have one. Only ids with no load object, or with a real `cancelFn`,
+  are passed to `cancelLoadImages`, and a cancel failure cannot abort the
+  switch. The production error title no longer stringifies `false` into
+  "Something went wrongfalse". Console token `cancelLoadGuard 1`. Not
   office-measured yet.
 - **Slice thumb same-turn index (2026-10-13):** fast ArrowDown left aria and
   `data-skm-slice-index` one behind `getCurrentImageIdIndex` because the scroll

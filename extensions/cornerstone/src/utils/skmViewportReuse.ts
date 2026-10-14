@@ -26,6 +26,29 @@ export function shouldReuseStackViewport(
   return type === STACK_VIEWPORT_TYPE;
 }
 
+/**
+ * Cornerstone's cancelLoadImages calls loadObject.cancelFn() whenever a load
+ * object exists. cancelFn is absent once the image has loaded, and that throw
+ * aborted the series switch (office index.97b9a615.js) before setStack ran.
+ * Ids with no load object are still passed through so a queued request is
+ * dequeued. Ids whose load object has no cancelFn are left out.
+ */
+export function imageIdsSafeToCancel(
+  imageIds: string[],
+  getLoadObject: (imageId: string) => { cancelFn?: unknown } | null | undefined
+): string[] {
+  return imageIds.filter(imageId => {
+    try {
+      const loadObject = getLoadObject(imageId);
+      return !loadObject || typeof loadObject.cancelFn === 'function';
+    } catch (e) {
+      // The lookup itself failed. Still try to cancel: cancelLoadImages dequeues
+      // a pooled request before it touches cancelFn, and the caller catches.
+      return true;
+    }
+  });
+}
+
 /** Drop the last image and the id maps on a viewport that enableElement just disabled. */
 export function releaseRetiredViewport(viewport: any): void {
   if (!viewport) {

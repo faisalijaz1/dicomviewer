@@ -34,7 +34,11 @@ import {
 } from '../../types/Presentation';
 
 import JumpPresets from '../../utils/JumpPresets';
-import { releaseRetiredViewport, shouldReuseStackViewport } from '../../utils/skmViewportReuse';
+import {
+  imageIdsSafeToCancel,
+  releaseRetiredViewport,
+  shouldReuseStackViewport,
+} from '../../utils/skmViewportReuse';
 import { ViewportProperties } from '@cornerstonejs/core/types';
 import { useLutPresentationStore } from '../../stores/useLutPresentationStore';
 import { usePositionPresentationStore } from '../../stores/usePositionPresentationStore';
@@ -136,7 +140,7 @@ class CornerstoneViewportService extends PubSubService implements IViewportServi
       (globalThis as any).__skmViewportReuseLogged = true;
       // eslint-disable-next-line no-console
       console.log(
-        '[SKM-VIEWPORT] series switch reuses the stack viewport, retiredViewportRelease 1'
+        '[SKM-VIEWPORT] series switch reuses the stack viewport, retiredViewportRelease 1, cancelLoadGuard 1'
       );
     }
   }
@@ -994,7 +998,24 @@ class CornerstoneViewportService extends PubSubService implements IViewportServi
       const newImageIdSet = new Set(imageIds);
       const staleImageIds = previousImageIds.filter(id => !newImageIdSet.has(id));
       if (staleImageIds.length) {
-        imageLoader.cancelLoadImages(staleImageIds);
+        // Already-loaded images have a load object and no cancelFn. Cornerstone
+        // calls cancelFn unconditionally, which threw and aborted the switch
+        // (office index.97b9a615.js) before setStack. A cancel failure must
+        // not keep the previous series on screen.
+        try {
+          const cancellable = imageIdsSafeToCancel(staleImageIds, imageId =>
+            imageLoader.getImageLoadObject?.(imageId)
+          );
+          cancellable.forEach(imageId => {
+            try {
+              imageLoader.cancelLoadImages([imageId]);
+            } catch (e) {
+              /* this id must not stop the rest of the cancel, or the switch */
+            }
+          });
+        } catch (e) {
+          /* leave the switch to proceed */
+        }
       }
     }
 

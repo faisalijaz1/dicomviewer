@@ -3,7 +3,11 @@
  *   node --experimental-strip-types extensions/cornerstone/src/utils/skmViewportReuse.test.ts
  */
 import assert from 'node:assert/strict';
-import { releaseRetiredViewport, shouldReuseStackViewport } from './skmViewportReuse.ts';
+import {
+  imageIdsSafeToCancel,
+  releaseRetiredViewport,
+  shouldReuseStackViewport,
+} from './skmViewportReuse.ts';
 
 const element = { id: 'viewport-div' };
 const otherElement = { id: 'other' };
@@ -59,5 +63,19 @@ assert.equal(defaults.size, 0);
 assert.equal(retired._actors.size, 0);
 assert.equal(retired._cpuFallbackEnabledElement.image, undefined);
 releaseRetiredViewport(null);
+
+const loads: Record<string, { cancelFn?: unknown } | null> = {
+  queued: null,
+  inflight: { cancelFn() {} },
+  loaded: {},
+  bad: { cancelFn: 'nope' },
+};
+const safe = imageIdsSafeToCancel(['queued', 'inflight', 'loaded', 'missing', 'bad'], id => {
+  if (id === 'missing') {
+    throw new Error('not in cache');
+  }
+  return loads[id];
+});
+assert.deepEqual(safe, ['queued', 'inflight', 'missing']);
 
 console.log('skmViewportReuse.test.ts: all assertions passed');
