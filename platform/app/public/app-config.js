@@ -60,8 +60,36 @@ const dataSourceConfiguration = {
 };
  
 const urlParams = new URLSearchParams(window.location.search);
-const storagePath = urlParams.get('storagePath');
+var storagePath = urlParams.get('storagePath');
 const studyUIDs = urlParams.get('StudyInstanceUIDs');
+var requestId = urlParams.get('requestId');
+
+// ─── SKM REMOTE-OPEN: resolve storagePath from requestId ────────────────────
+// When the backend omits storagePath from the URL (omit-storage-path-in-url=true),
+// the viewer is opened with ?requestId=... instead. Fetch the open-context once —
+// synchronously, so the interceptor below has storagePath ready before any WADO call —
+// and use its storagePath. If storagePath is already in the URL this is skipped, so it
+// is fully backward-compatible (revert = backend keeps storagePath in the URL).
+if (!storagePath && requestId) {
+  try {
+    var _ctxXhr = new XMLHttpRequest();
+    _ctxXhr.open('GET', window.location.origin + '/api/viewer/open-requests/' + encodeURIComponent(requestId), false);
+    _ctxXhr.send();
+    if (_ctxXhr.status === 200) {
+      var _ctx = JSON.parse(_ctxXhr.responseText);
+      if (_ctx && _ctx.data && _ctx.data.storagePath) {
+        storagePath = _ctx.data.storagePath;
+        console.log('SKM remote-open: storagePath resolved from requestId');
+      } else {
+        console.error('SKM remote-open: context has no storagePath for requestId ' + requestId);
+      }
+    } else {
+      console.error('SKM remote-open: context fetch returned HTTP ' + _ctxXhr.status);
+    }
+  } catch (e) {
+    console.error('SKM remote-open: failed to fetch context for requestId', e);
+  }
+}
  
 // ─── STORAGEPATH INTERCEPTOR ────────────────────────────────────────────────
 // OHIF's DICOMweb client makes many internal calls (series list, metadata,
