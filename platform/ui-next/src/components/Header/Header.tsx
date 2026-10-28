@@ -31,6 +31,7 @@ interface HeaderProps {
   Secondary?: ReactNode;
   UndoRedo?: ReactNode;
   UserBadge?: ReactNode;
+  FullscreenToggle?: ReactNode;
 }
 
 const SCROLL_STEP_PX = 220;
@@ -121,6 +122,7 @@ function Header({
   UndoRedo,
   Secondary,
   UserBadge,
+  FullscreenToggle,
   ...props
 }: HeaderProps): ReactNode {
   const onClickReturn = () => {
@@ -172,6 +174,7 @@ function Header({
           <ScrollableToolbar>{children}</ScrollableToolbar>
           <div className="flex min-w-0 flex-shrink-0 select-none items-center">
             <div className="flex-shrink-0">{UndoRedo}</div>
+            {FullscreenToggle && <div className="flex-shrink-0">{FullscreenToggle}</div>}
             {UserBadge && (
               <>
                 <div className="border-muted mx-1.5 h-[25px] border-r"></div>

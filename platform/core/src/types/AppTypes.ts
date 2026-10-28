@@ -100,6 +100,11 @@ declare global {
       max3DTextureSize?: number;
       showWarningMessageForCrossOrigin?: boolean;
       showCPUFallbackMessage?: boolean;
+      // Feature: chromeless / full-screen viewer (Fullscreen API). Master
+      // kill switch - defaults to enabled (true unless explicitly false).
+      // The actual per-link trigger is the ?chromeless=1 URL query param.
+      // See extensions/default/src/hooks/useChromelessFullscreen.tsx.
+      chromelessFullscreen?: boolean;
       maxNumRequests?: {
         interaction?: number;
         prefetch?: number;

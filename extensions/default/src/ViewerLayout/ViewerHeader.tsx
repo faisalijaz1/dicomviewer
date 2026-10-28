@@ -8,10 +8,21 @@ import { Toolbar } from '../Toolbar/Toolbar';
 import { preserveQueryParameters } from '@ohif/app';
 import { Types } from '@ohif/core';
 import UserSessionBadge from './UserSessionBadge';
+import FullscreenToggleButton from './FullscreenToggleButton';
+import { useChromelessAutoFullscreen } from '../hooks/useChromelessFullscreen';
 
 function ViewerHeader({ appConfig }: withAppTypes<{ appConfig: AppTypes.Config }>) {
   const { servicesManager, extensionManager, commandsManager } = useSystem();
   const { customizationService } = servicesManager.services;
+
+  // Feature: chromeless / full-screen viewer (pure web - Fullscreen API).
+  // appConfig.chromelessFullscreen defaults to enabled (true unless explicitly
+  // set to false) - this flag is the "no-op if needed" kill switch; the
+  // ?chromeless=1 URL param (checked inside the hook) is the actual per-link
+  // trigger. When either is off, this is a complete no-op: no listener is
+  // attached and no button renders below.
+  const chromelessFullscreenEnabled = appConfig?.chromelessFullscreen !== false;
+  useChromelessAutoFullscreen(chromelessFullscreenEnabled);
 
   const navigate = useNavigate();
   const location = useLocation();
@@ -96,6 +107,7 @@ function ViewerHeader({ appConfig }: withAppTypes<{ appConfig: AppTypes.Config }
       WhiteLabeling={appConfig.whiteLabeling}
       Secondary={<Toolbar buttonSection="secondary" />}
       UserBadge={<UserSessionBadge />}
+      FullscreenToggle={chromelessFullscreenEnabled ? <FullscreenToggleButton /> : null}
       UndoRedo={
         <div className="text-primary flex cursor-pointer items-center">
           <Button

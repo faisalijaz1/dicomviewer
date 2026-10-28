@@ -773,7 +773,20 @@ window.config = {
   showLoadingIndicator: true,
   showWarningMessageForCrossOrigin: false,
   showCPUFallbackMessage: true,
- 
+
+  // Feature: chromeless / full-screen viewer (pure web - Fullscreen API).
+  // When the launching app appends ?chromeless=1 to the viewer URL, the
+  // doctor's first click/keypress anywhere on the page enters fullscreen
+  // (browsers refuse requestFullscreen() without a user gesture, so this
+  // can't fire on load - it waits for that first interaction). A persistent
+  // "Full screen" toggle also appears in the header so the doctor can
+  // re-enter after pressing Esc (which always exits fullscreen). Additive:
+  // does nothing unless ?chromeless=1 is present in the URL, and never
+  // touches any other query parameter. Set to false to disable the whole
+  // feature (no-op) regardless of the URL.
+  // See extensions/default/src/hooks/useChromelessFullscreen.tsx.
+  chromelessFullscreen: true,
+
   // RadiAnt-style: a mouse action (scroll/drag/click) on an unselected pane
   // acts immediately AND makes that pane active, in one step - instead of
   // the OHIF default, where the first interaction on an unselected pane is
