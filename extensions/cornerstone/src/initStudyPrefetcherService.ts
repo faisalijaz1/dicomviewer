@@ -99,7 +99,8 @@ function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager, a
   // SKM 2026-10-09 (Phase 0 diagnostics — READ-ONLY): console reporter proving the
   // two-viewport scheduler-center / far-jump / cancel behaviour. Changes NO behaviour.
   //   skmSchedulerReport()  → per-viewport indices + recent far-jumps (center before/after,
-  //                           delta, requests cancelled) + duplicate-request stats.
+  //                           delta, requests cancelled) + duplicate-request stats +
+  //                           topEnqueueCounts (series/SOP only, top 20, read-only).
   //   window.__skmSchedulerLog → raw ring buffer of events.
   try {
     (window as any).skmSchedulerReport = () => {
@@ -112,7 +113,18 @@ function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager, a
       /* eslint-disable no-console */
       console.log('[SKM-SCHED] stats', diag.stats);
       console.log('[SKM-SCHED] activeDisplaySetUIDs', diag.activeDisplaySetUIDs, 'lastCenter', diag.lastCenter, 'pending', diag.pending, 'inflight', diag.inflight);
+      console.log(
+        '[SKM-SCHED] enqueueCounts',
+        'distinct',
+        diag.distinctImageIdsTracked,
+        'totalIncrements',
+        diag.totalEnqueueIncrements,
+        'limit',
+        diag.topEnqueueCountLimit,
+        diag.enqueueCountSemantics
+      );
       if (console.table) {
+        console.table(diag.topEnqueueCounts);
         console.table(diag.perViewport);
         console.table(
           (diag.recentEvents || []).map((e: any) => ({
@@ -126,6 +138,7 @@ function initStudyPrefetcherService(servicesManager: AppTypes.ServicesManager, a
           }))
         );
       } else {
+        console.log('[SKM-SCHED] topEnqueueCounts', diag.topEnqueueCounts);
         console.log('[SKM-SCHED] perViewport', diag.perViewport);
         console.log('[SKM-SCHED] recentEvents', diag.recentEvents);
       }

@@ -60,8 +60,36 @@ const dataSourceConfiguration = {
 };
  
 const urlParams = new URLSearchParams(window.location.search);
-const storagePath = urlParams.get('storagePath');
+var storagePath = urlParams.get('storagePath');
 const studyUIDs = urlParams.get('StudyInstanceUIDs');
+var requestId = urlParams.get('requestId');
+
+// ─── SKM REMOTE-OPEN: resolve storagePath from requestId ────────────────────
+// When the backend omits storagePath from the URL (omit-storage-path-in-url=true),
+// the viewer is opened with ?requestId=... instead. Fetch the open-context once —
+// synchronously, so the interceptor below has storagePath ready before any WADO call —
+// and use its storagePath. If storagePath is already in the URL this is skipped, so it
+// is fully backward-compatible (revert = backend keeps storagePath in the URL).
+if (!storagePath && requestId) {
+  try {
+    var _ctxXhr = new XMLHttpRequest();
+    _ctxXhr.open('GET', window.location.origin + '/api/viewer/open-requests/' + encodeURIComponent(requestId), false);
+    _ctxXhr.send();
+    if (_ctxXhr.status === 200) {
+      var _ctx = JSON.parse(_ctxXhr.responseText);
+      if (_ctx && _ctx.data && _ctx.data.storagePath) {
+        storagePath = _ctx.data.storagePath;
+        console.log('SKM remote-open: storagePath resolved from requestId');
+      } else {
+        console.error('SKM remote-open: context has no storagePath for requestId ' + requestId);
+      }
+    } else {
+      console.error('SKM remote-open: context fetch returned HTTP ' + _ctxXhr.status);
+    }
+  } catch (e) {
+    console.error('SKM remote-open: failed to fetch context for requestId', e);
+  }
+}
  
 // ─── STORAGEPATH INTERCEPTOR ────────────────────────────────────────────────
 // OHIF's DICOMweb client makes many internal calls (series list, metadata,
@@ -524,6 +552,10 @@ window.config = {
   skmMemoryBudget: {
     baselineMB: 2816,       // 16 GB-safe starting budget (validated smooth on the 4403 series: displayP95 1ms, decodedHit 100%, spinner 0, cacheSizeExceeded 0)
     hardCeilingMB: 4096,    // max AGGREGATE decoded across all tabs on a 16 GB machine
+    // One tab stops growing here. 4096 of decoded pixels sits on the same heap that
+    // crashes the tab. 3072 leaves about 1 GB for the viewer while a 4403-slice series
+    // (about 2.2 GB) still fits. A lower preference ceiling still wins.
+    tabDecodedCapMB: 3072,
     minBudgetMB: 1024,
     maxBudgetMB: 8192,
     stepMB: 256,            // gradual adaptation step
@@ -531,7 +563,7 @@ window.config = {
     idleMinMB: 320,         // hard floor an idle tab can be squeezed to under ceiling pressure
     idleMaxCeilingFraction: 0.3, // idle tabs collectively ≤ 30% of the ceiling
     activeMinMB: 1024,      // minimum allocation for an active (scrolling) tab
-    workingSetFraction: 0.82, // decode window fills 82% of the per-tab cap (< 0.85 evict high-water)
+    workingSetFraction: 0.82, // decode window fills 82% of the per-tab cap (< 0.85 evict high-water). TEST-ONLY runtime override (does NOT change this default or the cache cap): window.skmSetWorkingSetFraction(0.45) / skmResetWorkingSetFraction() / skmGetWorkingSetFraction()
     aheadBias: 0.65,
     minWindowSlices: 300,
     maxWindowSlices: 8000,
@@ -571,6 +603,14 @@ window.config = {
     raiseFill: 0.55,      // single active tab + fill below this → raise toward max
     backoffFill: 0.88,    // fill at/above this → drop toward min (near the cap)
     stepPerEval: 2,       // ramp ±2 so concurrency never jumps in one burst
+    // OFFICE-TEST ONLY (default false in production). When true, Testing Agent may pin
+    // maxNumPrefetchRequests across adaptive eval ticks without redeploying this file:
+    //   skmSetFixedPrefetchConcurrency(4|6|…) / skmResetFixedPrefetchConcurrency()
+    //   / skmGetFixedPrefetchConcurrency()
+    // Console alone cannot enable the pin when this flag is false. Does NOT change
+    // adaptive defaults, interaction lane, workers, warmer, cache, eviction, or WADO.
+    // Production default false. Office A/B pin was temporary.
+    allowFixedPrefetchConcurrency: false,
   },
 
   // SKM 2026-10-04 (Phase A — skmPurgeableStackImages): THE Cornerstone-level fix.
@@ -668,6 +708,31 @@ window.config = {
     // Without it, switching 2001→4403 left the old series pinned and the prefetcher paused at its
     // high-water until a scroll "unstuck" it (the reported pause). Near-free while idle. 0 = off.
     tickMs: 750,
+    // ── TEST-ONLY overrides (source default OFF; PRODUCTION = false) ──────────
+    // Production baseline from 1bc1058. Experiment A/B stay inactive.
+    // Experiment A: when true AND testKeepBudgetMB > 0, size keep from test MiB instead
+    // of production budgetFraction × cap. Ignored when false.
+    testKeepWindowEnabled: false,
+    testKeepBudgetMB: 700, // inactive while testKeepWindowEnabled is false
+    // Experiment B: when true, use testReactiveHighWater instead of reactiveHighWater (0.85).
+    testReactiveHighWaterEnabled: false,
+    testReactiveHighWater: 0.5, // inactive while testReactiveHighWaterEnabled is false
+    // Idle outside-keep cleanup. Production default OFF. reactiveHighWater stays 0.85.
+    idleOutsideKeepCleanupEnabled: false,
+    idleOutsideKeepQuietMs: 2500,
+    maxIdleEvictPerTick: 10,
+  },
+
+  // ── Prefetch→keep clamp (Experiment C) — PRODUCTION DEFAULT OFF ────────────
+  // Source/init is inert unless enabled === true. Production reactiveHighWater 0.85
+  // and normal budgetFraction keep. Values below are unused while enabled is false.
+  skmPrefetchKeepClamp: {
+    enabled: false,
+    navigationLeadSlices: 40,
+    alignWarmerNearSkip: true,
+    evalMs: 250,
+    velocityLookAheadMs: 500,
+    maxVelocityLeadSlices: 200,
   },
 
   // SKM 2026-10-03 (W3 "indicator" warmer): background-download the ACTIVE series
@@ -679,7 +744,10 @@ window.config = {
   //                         on-screen slice). Default 3.
   //   globalConcurrency   : absolute cap across ALL tabs (BroadcastChannel) — the
   //                         NAS-burst guard. Default 6.
-  //   activeSeriesOnly    : warm only the active series (true) vs all open (false).
+  //   activeSeriesOnly    : true = warm ONLY the active viewport series and ABORT the
+  //                         previous job on switch (starves inactive Ready bars). false =
+  //                         fair multi-viewport: all open stack series share concurrency
+  //                         (~2:1 active bias); abort only when a series leaves the grid.
   //   startDelayMs        : wait after a series opens before warming, so first image
   //                         + initial window win the network first. Default 1500.
   // TO REVERT: enabled:false (whole module dormant; identical to the W2 build).
@@ -734,8 +802,18 @@ window.config = {
     concurrency: 4,
     globalConcurrency: 8,
     rethrottleMs: 250,
+    // Wired into fairSync / mwRecenter (was inert / hard-coded 50 before).
     farJumpThreshold: 120,
-    activeSeriesOnly: true,
+    // SKM multi-viewport fairness: inactive panes were starved (2×3674: one bar ~100%
+    // while the other stalled; WADO showed one SeriesInstanceUID). Keep concurrency
+    // unchanged; schedule fairly across open series instead.
+    activeSeriesOnly: false,
+    // 1 = ~1:1 preferred:other warmer picks (2 was still too biased for equal CTs).
+    activeBias: 1,
+    // nearSkip only on the focused series — sequential prefetch does not own inactive
+    // near bands, so skipping them left a keep-sized hole (~10% of 3674) on the inactive bar.
+    nearSkipPreferredOnly: true,
+    // Honored on the first fairSync (was inert for moving-window / fair paths).
     startDelayMs: 1500,
   },
 
@@ -745,28 +823,43 @@ window.config = {
   // the DevTools console — NO PowerShell / host scripting:
   //   skmTelemetry.reset()   before a scroll/jump test
   //   skmTelemetry.report()  after → console.table summary
-  // Changes NO behaviour. Enable during validation; set false for production.
+  // Changes NO behaviour. On for scrollbar/scroll-follow validation of this build.
   skmTelemetry: {
     enabled: true,
   },
 
-  // SKM 2026-10-09 (QA fix): read-only scroll-position → displayed-image follow
-  // instrumentation (see skmScrollFollowTelemetry.ts). Surfaced via DevTools console:
-  //   skmScrollFollowReset()                         before a scroll test
-  //   skmScrollFollowReport()                         after → per-viewport summary
-  //   skmScrollFollowReport(viewportId, {stallThresholdMs}) for a specific viewport/threshold
-  //   skmScrollFollowRawLog(viewportId)                raw requested/displayed timeline
-  // Changes NO behaviour. Enable during validation; set false for production.
+  // SKM read-only throughput + adaptive-prefetch decision diagnostics.
+  // Does NOT change concurrency/cache/warmer policy. Default OFF.
+  // Console when enabled: skmThroughput.reset() / .snapshot() / .report() / .lanes()
+  skmThroughputDiagnostics: {
+    enabled: false,
+    sampleIntervalMs: 1000,
+    maxLatencySamples: 400,
+    maxSamples: 180,
+  },
+
+  // SKM 2026-10-09 (QA fix): read-only scroll-follow instrumentation.
+  // Enable during validation; false for production.
+  // Console: skmScrollFollowReset() / skmScrollFollowReport() / skmScrollFollowRawLog()
   skmScrollFollow: {
     enabled: true,
   },
 
-  // SKM 2026-10-09 (QA fix — Priority 2): read-only study/series-switch timing
-  // breakdown (see skmStudySwitchTelemetry.ts). Surfaced via DevTools console:
-  //   skmStudySwitchReport()   after switching studies/series → stage breakdown
-  // Changes NO behaviour. Enable during validation; set false for production.
+  // SKM 2026-10-09 (QA fix — Priority 2): read-only study/series-switch timing.
+  // Enable during validation; false for production.
+  // Console: skmStudySwitchReport() — addLoadingStateMs / switchToFirstWadoMs / etc.
   skmStudySwitchTelemetry: {
-    enabled: true,
+    enabled: false,
+  },
+
+  // SKM 2026-10-10: READ-ONLY eviction diagnostics. Production: fully inert.
+  // allowTestEviction stays false.
+  skmEvictionDiagnostics: {
+    enabled: false,
+    allowTestEviction: false,
+    maxSnapshotAgeMs: 5000,
+    maxRemovalHistory: 200,
+    maxProbeListCount: 50,
   },
 
   showStudyList: true,

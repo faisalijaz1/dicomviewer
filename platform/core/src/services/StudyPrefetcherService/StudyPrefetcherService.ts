@@ -1,3 +1,4 @@
+import { alignedPrefetchWindow } from './skmWorkingSetAlignmentMath';
 import { PubSubService } from '../_shared/pubSubServiceInterface';
 import { ExtensionManager } from '../../extensions';
 import ServicesManager from '../ServicesManager';
@@ -210,6 +211,110 @@ interface IImageLoadEventsManager {
     onImageLoaded: (evt: any) => void,
     onImageLoadFailed: (evt: any) => void
   ): EventSubscription[];
+}
+
+// SKM 2026-10-09 (WADO-URI Priority 1 — read-only enqueue diagnostics).
+// Cap for the diagnostic top list only. Not a scheduler, cache, or queue limit.
+const TOP_ENQUEUE_COUNT_LIMIT = 20;
+const DICOM_UID_RE = /^[0-9]+(?:\.[0-9]+)+$/;
+
+type EnqueueImageScheme = 'wadouri' | 'wadors' | 'dicomweb' | 'other';
+
+type EnqueueCountDiagnosticEntry = {
+  seriesInstanceUID: string | null;
+  sopInstanceUID: string | null;
+  frame: string | null;
+  scheme: EnqueueImageScheme;
+  count: number;
+  opaqueKey?: string;
+};
+
+function dicomUidOrNull(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > 64 || !DICOM_UID_RE.test(trimmed)) {
+    return null;
+  }
+  return trimmed;
+}
+
+function enqueueImageScheme(imageId: string): EnqueueImageScheme {
+  const colon = imageId.indexOf(':');
+  if (colon <= 0 || colon > 16) {
+    return 'other';
+  }
+  const scheme = imageId.slice(0, colon).toLowerCase();
+  if (scheme === 'wadouri' || scheme === 'wadors' || scheme === 'dicomweb') {
+    return scheme;
+  }
+  return 'other';
+}
+
+/** Session-stable distinguisher used only when series/SOP cannot be parsed. Not reversible to a path. */
+function opaqueEnqueueKey(imageId: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < imageId.length; i++) {
+    hash ^= imageId.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
+ * Series UID + SOP UID (+ frame, scheme) from a Cornerstone imageId.
+ * Drops study UID, patient identifiers, hosts, and filesystem/storage paths.
+ */
+function safeEnqueueImageRef(imageId: string): Omit<EnqueueCountDiagnosticEntry, 'count'> {
+  let seriesInstanceUID: string | null = null;
+  let sopInstanceUID: string | null = null;
+  let frame: string | null = null;
+
+  const queryAt = imageId.indexOf('?');
+  if (queryAt >= 0) {
+    try {
+      const params = new URLSearchParams(imageId.slice(queryAt + 1));
+      seriesInstanceUID =
+        dicomUidOrNull(params.get('seriesUID')) || dicomUidOrNull(params.get('SeriesInstanceUID'));
+      sopInstanceUID =
+        dicomUidOrNull(params.get('objectUID')) ||
+        dicomUidOrNull(params.get('SOPInstanceUID')) ||
+        dicomUidOrNull(params.get('sopInstanceUID'));
+      const frameParam = params.get('frame');
+      if (frameParam && /^[0-9]+$/.test(frameParam)) {
+        frame = frameParam;
+      }
+    } catch {
+      /* query parse is best-effort; path form is tried next */
+    }
+  }
+
+  if (!seriesInstanceUID || !sopInstanceUID || frame === null) {
+    const seriesMatch = /\/series\/([0-9.]+)(?=\/|[?#]|$)/i.exec(imageId);
+    const instanceMatch = /\/instances\/([0-9.]+)(?=\/|[?#]|$)/i.exec(imageId);
+    const frameMatch = /\/frames\/([0-9]+)(?=\/|[?#]|$)/i.exec(imageId);
+    if (!seriesInstanceUID && seriesMatch) {
+      seriesInstanceUID = dicomUidOrNull(seriesMatch[1]);
+    }
+    if (!sopInstanceUID && instanceMatch) {
+      sopInstanceUID = dicomUidOrNull(instanceMatch[1]);
+    }
+    if (frame === null && frameMatch) {
+      frame = frameMatch[1];
+    }
+  }
+
+  const ref: Omit<EnqueueCountDiagnosticEntry, 'count'> = {
+    seriesInstanceUID,
+    sopInstanceUID,
+    frame,
+    scheme: enqueueImageScheme(imageId),
+  };
+  if (!seriesInstanceUID || !sopInstanceUID) {
+    ref.opaqueKey = opaqueEnqueueKey(imageId);
+  }
+  return ref;
 }
 
 class StudyPrefetcherService extends PubSubService {
@@ -454,6 +559,10 @@ class StudyPrefetcherService extends PubSubService {
       this._rewindowTimer = null;
     }
     this._stopPrefetching();
+    // Loading-state maps are preserved across in-mode series switches (see
+    // _stopPrefetching); drop them only when leaving the mode.
+    this._displaySetLoadingStates.clear();
+    this._imageIdsToDisplaySetsMap.clear();
   }
 
   private _addImageLoadingEventsListeners() {
@@ -906,9 +1015,18 @@ class StudyPrefetcherService extends PubSubService {
   }
 
   private _getImageIdsForDisplaySet(displaySet: DisplaySet): string[] {
+    // Reuse memoized IDs (CornerstoneCacheService / prior prefetch pass). Building
+    // thousands of WADO-URI strings on every series switch blocked first WADO.
+    const cached = (displaySet as any)?.imageIds;
+    if (Array.isArray(cached) && cached.length > 0) {
+      return cached;
+    }
     const dataSource = this._extensionManager.getActiveDataSource()[0];
-
-    return dataSource.getImageIdsForDisplaySet(displaySet);
+    const imageIds = dataSource.getImageIdsForDisplaySet(displaySet);
+    if (Array.isArray(imageIds) && imageIds.length > 0) {
+      (displaySet as any).imageIds = imageIds;
+    }
+    return imageIds;
   }
 
   // ── SKM 2026-10-03 (W2-full): windowed decode helpers ─────────────────────
@@ -1055,8 +1173,52 @@ class StudyPrefetcherService extends PubSubService {
     }
   }
 
+  /**
+   * Read-only view of `_requestCounts`. Does not sort or otherwise mutate the map,
+   * the queue, the cache, or the counters. Built only when diagnostics are requested.
+   */
+  private _readEnqueueCountDiagnostics(): {
+    distinctImageIdsTracked: number;
+    totalEnqueueIncrements: number;
+    topEnqueueCounts: EnqueueCountDiagnosticEntry[];
+  } {
+    const top: Array<{ imageId: string; count: number }> = [];
+    let totalEnqueueIncrements = 0;
+
+    this._requestCounts.forEach((count, imageId) => {
+      if (typeof count !== 'number' || !Number.isFinite(count)) {
+        return;
+      }
+      totalEnqueueIncrements += count;
+      let insertAt = 0;
+      while (insertAt < top.length && top[insertAt].count >= count) {
+        insertAt++;
+      }
+      if (insertAt >= TOP_ENQUEUE_COUNT_LIMIT) {
+        return;
+      }
+      top.splice(insertAt, 0, { imageId, count });
+      if (top.length > TOP_ENQUEUE_COUNT_LIMIT) {
+        top.pop();
+      }
+    });
+
+    const topEnqueueCounts = top.map(({ imageId, count }) => ({
+      ...safeEnqueueImageRef(imageId),
+      count,
+    }));
+    topEnqueueCounts.sort((a, b) => b.count - a.count);
+
+    return {
+      distinctImageIdsTracked: this._requestCounts.size,
+      totalEnqueueIncrements,
+      topEnqueueCounts,
+    };
+  }
+
   /** Read-only diagnostics for skmTelemetry / console (Phase 0). */
   public getSchedulerDiagnostics(): Record<string, unknown> {
+    const enqueueCounts = this._readEnqueueCountDiagnostics();
     return {
       stats: { ...this._schedulerStats },
       perViewport: this._perViewportSnapshot(),
@@ -1065,6 +1227,12 @@ class StudyPrefetcherService extends PubSubService {
       pending: this._pendingRequests.length,
       inflight: this._inflightRequests.size,
       recentEvents: this._schedulerEventLog.slice(-40),
+      distinctImageIdsTracked: enqueueCounts.distinctImageIdsTracked,
+      totalEnqueueIncrements: enqueueCounts.totalEnqueueIncrements,
+      topEnqueueCountLimit: TOP_ENQUEUE_COUNT_LIMIT,
+      topEnqueueCounts: enqueueCounts.topEnqueueCounts,
+      enqueueCountSemantics:
+        'count is the number of times that imageId was pushed onto _pendingRequests in _enqueueDisplaySetImagesRequests since the last _stopPrefetching, which clears _requestCounts. It is not a network-request count. stats.reEnqueues counts imageIds whose count first reached 2. stats.maxEnqueuesPerImage is the highest of these counts in the current prefetch session and is reset when the map is cleared. scheme dicomweb is this viewer\'s prefix for WADO-URI imageIds; scheme wadors is WADO-RS. Identifiers are series UID and SOP UID only.',
     };
   }
 
@@ -1175,6 +1343,39 @@ class StudyPrefetcherService extends PubSubService {
       /* best-effort */
     }
     return centers;
+  }
+
+  // Open stack viewports, including ones showing a different series. The evictor
+  // splits the keep budget by this count; prefetch must use the same divisor or
+  // each series prefetches a window the evictor treats as expendable.
+  private _countOpenStackViewports(): number {
+    try {
+      const services: any = this._servicesManager.services;
+      const vgs = services?.viewportGridService;
+      const csvs = services?.cornerstoneViewportService;
+      const viewports = vgs?.getState()?.viewports;
+      if (!viewports || typeof viewports.forEach !== 'function') {
+        return 1;
+      }
+      let n = 0;
+      viewports.forEach((_vp: any, viewportId: string) => {
+        const csVp = csvs?.getCornerstoneViewport?.(viewportId);
+        if (!csVp || typeof csVp.getImageIds !== 'function') {
+          return;
+        }
+        const type = String(csVp.type || '').toLowerCase();
+        if (type === 'orthographic' || type === 'volume3d' || type === 'volume_3d') {
+          return;
+        }
+        const ids = csVp.getImageIds() || [];
+        if (ids.length) {
+          n++;
+        }
+      });
+      return Math.max(1, n);
+    } catch (e) {
+      return 1;
+    }
   }
 
   // The centre index of the ACTIVE (focused) viewport; falls back to the per-series
@@ -1495,11 +1696,10 @@ class StudyPrefetcherService extends PubSubService {
     const dir = this._direction >= 0 ? 1 : -1;
     const last = imageIds.length - 1;
 
-    // Phase 1: prioritise the UNION of every pane showing this series (active pane first), not a
-    // single last-writer centre. Phase 2: divide the decode window by the number of panes so the
-    // prefetch window per pane matches the evictor's per-viewport keep (budget ÷ nStack) — this
-    // removes the prefetch>evict mismatch that caused the decode→evict→re-decode treadmill. Also
-    // intrinsically clamps the per-series window to the series length (Req 1).
+    // Phase 1: prioritise the UNION of every pane showing this series (active pane first).
+    // Phase 2: divide by max(panes of this series, open stack viewports) so two different
+    // series share the governor window the same way the evictor shares the keep budget.
+    // Same series in both panes is unchanged (both counts match). Not a second clamp.
     let centers = this._getViewportCentersForDisplaySet(displaySet.displaySetInstanceUID);
     if (!centers.length) {
       centers = [this._getCenterIndexForDisplaySet(displaySet.displaySetInstanceUID)];
@@ -1514,8 +1714,16 @@ class StudyPrefetcherService extends PubSubService {
       centers = [activeInfo.idx, ...centers.filter(c => c !== activeInfo.idx)];
     }
     const nPanes = Math.max(1, centers.length);
-    const effAhead = Math.max(immediate + 1, Math.floor(cfgAhead / nPanes));
-    const effBehind = Math.max(immediate + 1, Math.floor(cfgBehind / nPanes));
+    const openStacks = this._countOpenStackViewports();
+    const aligned = alignedPrefetchWindow({
+      configuredAhead: cfgAhead,
+      configuredBehind: cfgBehind,
+      panesShowingThisSeries: nPanes,
+      openStackViewports: openStacks,
+      immediateRadius: immediate,
+    });
+    const effAhead = aligned.ahead;
+    const effBehind = aligned.behind;
 
     // Build each pane's ordered window, then round-robin merge so no pane starves the other.
     const perCenter = centers.map(c =>
@@ -1577,18 +1785,13 @@ class StudyPrefetcherService extends PubSubService {
       return;
     }
 
+    // SKM: do NOT scan cache.isImageCached for every instance on this synchronous
+    // thumbnail-click path. That O(series) loop (plus rebuilding imageIds after
+    // every _stopPrefetching clear) was the dominant pre-WADO gap (~1.5–2s on
+    // large CTs). Cache hits are still accounted in enqueue (_moveImageIdToLoadedSet)
+    // and IMAGE_LOADED / failed handlers.
     const pendingImageIds = new Set<string>(imageIds);
     const loadedImageIds = new Set<string>();
-
-    // Needs to check which image is already loaded to update the progress properly
-    // because some images may already be loaded (thumbnails and viewports).
-    for (const imageId of imageIds) {
-      if (this.cache.isImageCached(imageId)) {
-        loadedImageIds.add(imageId);
-      } else {
-        pendingImageIds.add(imageId);
-      }
-    }
 
     displaySetLoadingState = {
       displaySetInstanceUID,
@@ -1602,11 +1805,6 @@ class StudyPrefetcherService extends PubSubService {
     this._updateDisplaySetLoadingProgress(displaySetLoadingState);
     this._displaySetLoadingStates.set(displaySetInstanceUID, displaySetLoadingState);
     this._updateImageIdsDisplaySetMap(displaySetInstanceUID, imageIds);
-
-    // Notify the UI that something is already loaded (eg: update StudyBrowser)
-    if (loadedImageIds.size) {
-      this._triggerDisplaySetEvents(displaySetInstanceUID);
-    }
   }
 
   private _loadDisplaySets() {
@@ -2006,8 +2204,10 @@ class StudyPrefetcherService extends PubSubService {
     this._inflightRequests.forEach(inflightRequest => (inflightRequest.aborted = true));
 
     this._pendingRequests = [];
-    this._displaySetLoadingStates.clear();
-    this._imageIdsToDisplaySetsMap.clear();
+    // SKM: keep _displaySetLoadingStates / _imageIdsToDisplaySetsMap across in-mode
+    // switches. Clearing them forced a full-study imageId rebuild + cache scan on
+    // every thumbnail click before the first WADO could leave the browser
+    // (office cold-select ~1.57–2.01s pre-WADO). States are dropped in onModeExit.
     this._inflightRequests.clear();
     // SKM 2026-10-09 (Phase 0 fix): clear per-imageId enqueue counts so memory grows
     // O(study_size) not O(session_lifetime); also reset per-session stats.

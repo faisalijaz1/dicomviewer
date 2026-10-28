@@ -99,6 +99,17 @@ export function initSkmPurgeableStackImages(): void {
             } catch (e) {
               /* non-fatal */
             }
+            // Pixels are already decoded. Drop the parsed file now, including
+            // images the prefetcher decoded while the study is idle. The evictor
+            // publishes __skmReleaseParsedDataSet; a cache sweep is the backup.
+            try {
+              const release = (globalThis as any).__skmReleaseParsedDataSet;
+              if (typeof release === 'function') {
+                release(image, imageLoadObject, imageId);
+              }
+            } catch (e) {
+              /* parsed-file release is best-effort */
+            }
           }
           return image;
         });

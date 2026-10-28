@@ -166,3 +166,24 @@ export function computeIndicatorTopOffsetInFill(
     return clamp(topOffset);
   }
 }
+
+/**
+ * Thumb position for the current slice. Linear across the fill strip so each
+ * index moves, including when many slices share one pixel row. The coverage
+ * fill stays bucketed; only the thumb tracks the displayed slice.
+ */
+export function computeIndicatorTopLinear(
+  itemIndex: number,
+  total: number,
+  pixelCount: number,
+  indicatorHeight: number
+): number {
+  const pixelRowCount = Math.max(0, Math.floor(pixelCount));
+  const indicatorHeightPx = Math.max(0, Math.floor(indicatorHeight));
+  const maxTopInFill = Math.max(0, pixelRowCount - indicatorHeightPx);
+  if (pixelRowCount === 0 || total <= 1) {
+    return 0;
+  }
+  const clamped = Math.max(0, Math.min(total - 1, Math.floor(itemIndex)));
+  return (clamped / (total - 1)) * maxTopInFill;
+}

@@ -251,6 +251,12 @@ function budgetSnapshot(): Record<string, number | string> {
       budget_windowBehind: b.windowBehind ?? 0,
       budget_nearSkip: b.nearSkip ?? 0,
       budget_avgSliceKB: b.avgSliceBytes ? Math.round(b.avgSliceBytes / 1024) : 0,
+      // SKM 2026-10-09 (test-only): working-set fraction override (window A/B vs cache cap).
+      budget_workingSetFraction: b.workingSetFraction ?? 0,
+      budget_workingSetFractionDefault: b.workingSetFractionDefault ?? 0,
+      budget_workingSetFractionOverride:
+        b.workingSetFractionOverride == null ? 'none' : b.workingSetFractionOverride,
+      budget_workingSetFractionOverrideActive: b.workingSetFractionOverrideActive ? 1 : 0,
     };
   } catch (e) {
     return {};
@@ -275,6 +281,12 @@ export function initSkmTelemetry(): void {
         c.wadoTotal++;
         // First-vs-repeat: has this EXACT url been requested before in this window?
         const seen = c.wadoUrlSeen.get(e.name) || 0;
+        if (!seen && c.wadoUrlSeen.size >= 8000) {
+          const oldest = c.wadoUrlSeen.keys().next().value;
+          if (oldest) {
+            c.wadoUrlSeen.delete(oldest);
+          }
+        }
         c.wadoUrlSeen.set(e.name, seen + 1);
         const isRepeat = seen > 0;
         if (isRepeat) {
@@ -304,6 +316,9 @@ export function initSkmTelemetry(): void {
           c.wadoFromNetwork++;
           c.wadoMissBytes += e.transferSize || 0;
           c.wadoMissDurations.push(e.duration || 0);
+          if (c.wadoMissDurations.length > 4096) {
+            c.wadoMissDurations.splice(0, c.wadoMissDurations.length - 4096);
+          }
         }
       }
     });
@@ -403,6 +418,9 @@ export function initSkmTelemetry(): void {
       const dt = performance.now() - scrollT0;
       if (dt >= 0 && dt < 60000) {
         c.scrollToDisplayMs.push(dt);
+        if (c.scrollToDisplayMs.length > 4096) {
+          c.scrollToDisplayMs.splice(0, c.scrollToDisplayMs.length - 4096);
+        }
         // SKM Phase B: classify whether the scrolled-to slice was ALREADY decoded (instant,
         // dt ≤ 8 ms) vs required a re-decode/network (dt > 8 ms). This directly measures the
         // fast-scroll UX: high decodedHitRatio = lands on decoded images = smooth.
@@ -434,10 +452,16 @@ export function initSkmTelemetry(): void {
       const mem = (performance as any).memory;
       if (mem && typeof mem.usedJSHeapSize === 'number') {
         c.jsHeapSamplesMB.push(Math.round(mem.usedJSHeapSize / 1048576));
+        if (c.jsHeapSamplesMB.length > 2000) {
+          c.jsHeapSamplesMB.splice(0, c.jsHeapSamplesMB.length - 2000);
+        }
       }
       const sz = (cache as any).getCacheSize?.();
       if (typeof sz === 'number') {
         c.cacheSizeSamplesMB.push(Math.round(sz / 1048576));
+        if (c.cacheSizeSamplesMB.length > 2000) {
+          c.cacheSizeSamplesMB.splice(0, c.cacheSizeSamplesMB.length - 2000);
+        }
       }
     } catch (e) {
       /* noop */

@@ -32,6 +32,8 @@
  *  Publishes window.__skmBudget and console helpers:
  *    skmSetMemoryBudget(baselineMB, ceilingMB?)   // Consultant: skmSetMemoryBudget(5120, 6144)
  *    skmGetMemoryBudget()
+ *    skmSetWorkingSetFraction(0.45)               // TEST-ONLY: shrink/grow derived window only
+ *    skmResetWorkingSetFraction()                 // TEST-ONLY: restore config default fraction
  *
  *  Gated by appConfig.skmBoundedDecodeCache.enabled (default on). Only calls the public
  *  cache.setMaxCacheSize and mutates the prefetcher's own config object — no Cornerstone
@@ -49,6 +51,13 @@ export type SkmMemoryBudgetConfig = {
   baselineMB?: number;
   /** Max aggregate decoded budget across ALL tabs on this machine (MB). Default 4096. */
   hardCeilingMB?: number;
+  /**
+   * Per-tab decoded growth cap (MB). The machine ceiling can be 4096 (or a 6 GB
+   * preference), but one tab's pixel buffers live in a heap that dies near 4 GB.
+   * Growth stops here so the current series can stay decoded without the tab
+   * climbing to that limit. Default 3072. Ignored when the machine ceiling is lower.
+   */
+  tabDecodedCapMB?: number;
   /** Clamp bounds for any baseline/ceiling (override or default). Default 1024 / 8192. */
   minBudgetMB?: number;
   maxBudgetMB?: number;
@@ -129,6 +138,10 @@ export function initSkmMemoryBudget(
 
   const DEF_BASELINE = Math.max(256, config.baselineMB ?? 2816);
   const DEF_CEILING = Math.max(DEF_BASELINE, config.hardCeilingMB ?? 4096);
+  // One tab must not grow its decoded cache up to the machine ceiling: that ceiling
+  // matches the browser tab heap limit, and pixel data lives inside the heap.
+  const TAB_DECODED_CAP = Math.max(256, config.tabDecodedCapMB ?? 3072);
+  const tabDecodedCap = (): number => Math.min(getCeiling(), TAB_DECODED_CAP);
   const MIN_MB = config.minBudgetMB ?? 1024;
   const MAX_MB = config.maxBudgetMB ?? 8192;
   const STEP = Math.max(64, config.stepMB ?? 256);
@@ -136,11 +149,24 @@ export function initSkmMemoryBudget(
   const IDLE_MIN = Math.max(128, config.idleMinMB ?? 320);
   const IDLE_MAX_FRAC = Math.min(0.6, Math.max(0.05, config.idleMaxCeilingFraction ?? 0.3));
   const ACTIVE_MIN = Math.max(256, config.activeMinMB ?? 1024);
+  // Production default fraction (unchanged). TEST-ONLY session override below can replace
+  // this for window derivation only — never persists, never changes the decoded-cache cap.
   const WS_FRACTION = Math.min(0.95, Math.max(0.3, config.workingSetFraction ?? 0.82));
+  // SKM 2026-10-09 (test-only): session override for working-set fraction. null = inactive
+  // (production path). Isolates window size from cache-cap A/B (skmSetMemoryBudget /
+  // skmSetCacheCap cannot). Not written to localStorage / app-config.
+  let workingSetFractionOverride: number | null = null;
+  // Allow A/B fractions below the config clamp floor (0.3) so reduced-window experiments
+  // can run; still reject non-positive / non-finite and cap at 0.95. Final windowSlices
+  // remain gated by existing MIN_WIN / MAX_WIN.
+  const WS_OVERRIDE_MIN = 0.05;
+  const WS_OVERRIDE_MAX = 0.95;
   const AHEAD_BIAS = Math.min(0.9, Math.max(0.1, config.aheadBias ?? 0.65));
   const AVG_FALLBACK = Math.max(1, config.avgSliceBytesFallback ?? 600 * 1024);
   const MIN_WIN = Math.max(1, config.minWindowSlices ?? 300);
   const MAX_WIN = Math.max(MIN_WIN, config.maxWindowSlices ?? 8000);
+  const effectiveWorkingSetFraction = (): number =>
+    workingSetFractionOverride != null ? workingSetFractionOverride : WS_FRACTION;
   const EVAL_MS = Math.max(500, config.evalMs ?? 1500);
   const INC_DWELL = Math.max(1000, config.increaseDwellMs ?? 4000);
   const DEC_DWELL = Math.max(1000, config.decreaseDwellMs ?? 8000);
@@ -432,8 +458,8 @@ export function initSkmMemoryBudget(
       alloc.set(
         t2.id,
         t2.active
-          ? Math.min(ceiling, Math.max(ACTIVE_MIN, t2.desiredMB))
-          : Math.min(t2.desiredMB, Math.max(IDLE_FLOOR, fairShare))
+          ? Math.min(tabDecodedCap(), Math.max(ACTIVE_MIN, t2.desiredMB))
+          : Math.min(t2.desiredMB, tabDecodedCap(), Math.max(IDLE_FLOOR, fairShare))
       )
     );
 
@@ -504,7 +530,10 @@ export function initSkmMemoryBudget(
         /* noop */
       }
       const avgSliceBytes = measureAvgSliceBytes();
-      const workingSetBytes = WS_FRACTION * perTabCapMB * 1048576;
+      // TEST-ONLY: effectiveWorkingSetFraction() may differ from WS_FRACTION; the cache cap
+      // path above (setMaxCacheSize(perTabCapMB)) is intentionally unchanged.
+      const wsFractionEffective = effectiveWorkingSetFraction();
+      const workingSetBytes = wsFractionEffective * perTabCapMB * 1048576;
       let windowSlices = Math.floor(workingSetBytes / avgSliceBytes);
       windowSlices = Math.min(MAX_WIN, Math.max(MIN_WIN, windowSlices));
       const windowAhead = Math.max(1, Math.round(windowSlices * AHEAD_BIAS));
@@ -517,6 +546,7 @@ export function initSkmMemoryBudget(
       (globalThis as any).__skmBudget = {
         machineBaselineMB: getBaseline(),
         machineHardCeilingMB: getCeiling(),
+        tabDecodedCapMB: tabDecodedCap(),
         source: readNum(LS_BASE) != null ? 'override' : 'default',
         liveTabs,
         activeTab: amActive(),
@@ -525,6 +555,13 @@ export function initSkmMemoryBudget(
         perTabCapMB, // alias (back-compat)
         machineMB: getCeiling(), // alias (back-compat: the machine aggregate ceiling)
         avgSliceBytes: Math.round(avgSliceBytes),
+        // SKM 2026-10-09 (test-only diagnostics): prove window A/B without touching the cap.
+        workingSetFractionDefault: WS_FRACTION,
+        workingSetFractionOverride,
+        workingSetFraction: wsFractionEffective,
+        workingSetFractionOverrideActive: workingSetFractionOverride != null,
+        minWindowSlices: MIN_WIN,
+        maxWindowSlices: MAX_WIN,
         windowSlices,
         windowAhead,
         windowBehind,
@@ -636,7 +673,9 @@ export function initSkmMemoryBudget(
         .filter(tb => tb.id !== myId)
         .reduce((s, tb) => s + (typeof tb.allocationMB === 'number' ? tb.allocationMB : tb.desiredMB), 0);
       const availableForMe = Math.max(ACTIVE_MIN, ceiling - othersAllocationMB);
-      const growthCeilingForMe = Math.min(ceiling, availableForMe);
+      // Machine ceiling still caps the sum across tabs. This tab's own decoded
+      // growth stops at tabDecodedCap (default 3072) so the heap is not the crash line.
+      const growthCeilingForMe = Math.min(tabDecodedCap(), availableForMe);
       lastOthersAllocationMB = othersAllocationMB;
       lastAvailableForMe = availableForMe;
 
@@ -673,10 +712,10 @@ export function initSkmMemoryBudget(
       // what's actually available once other known tabs' current allocations are subtracted.
       if (
         pressure >= PRESSURE_THRESHOLD &&
-        desiredMB < ceiling &&
+        desiredMB < growthCeilingForMe &&
         t - lastIncreaseAt >= INC_DWELL
       ) {
-        const requestedMB = Math.min(ceiling, desiredMB + STEP);
+        const requestedMB = Math.min(growthCeilingForMe, desiredMB + STEP);
         const grantedMB = Math.min(requestedMB, growthCeilingForMe);
         lastGrowthRequestedMB = requestedMB;
         lastGrowthGrantedMB = grantedMB;
@@ -792,6 +831,121 @@ export function initSkmMemoryBudget(
     console.log('[SKM-BUDGET]', (globalThis as any).__skmBudget);
     return (globalThis as any).__skmBudget;
   };
+
+  // SKM 2026-10-09 (TEST-ONLY): change the derived decode/prefetch WINDOW independently of
+  // the Cornerstone decoded-cache cap. Does NOT persist, does NOT change baseline/ceiling,
+  // allocation, eviction, concurrency, WADO loading, or desiredMB. Pass null/undefined to
+  // clear (same as skmResetWorkingSetFraction). Invalid values are rejected; previous
+  // override (if any) is left untouched.
+  const readDecodeCacheCapMB = (): number => {
+    try {
+      return Math.round(((cache as any).getMaxCacheSize?.() || 0) / 1048576);
+    } catch (e) {
+      return 0;
+    }
+  };
+  const publishWorkingSetOverrideResult = (action: string) => {
+    // Recompute window from the EXISTING per-tab allocation; setMaxCacheSize is called with
+    // the same perTabCapMB the governor already owns (idempotent — same as every eval tick).
+    applyAllocation();
+    // Soft-rewindow the prefetcher queue around the current centre so the new window takes
+    // effect without a full stop/start (no cache clear, no series reload).
+    try {
+      servicesManager?.services?.studyPrefetcherService?.onActiveSliceChanged?.();
+    } catch (e) {
+      /* best-effort; diagnostics already reflect the new window */
+    }
+    const budget = (globalThis as any).__skmBudget;
+    const result = {
+      action,
+      decodeCacheCapMB: readDecodeCacheCapMB(),
+      tabAllocationMB: budget?.tabAllocationMB ?? budget?.perTabCapMB ?? null,
+      workingSetFractionDefault: WS_FRACTION,
+      workingSetFractionOverride,
+      workingSetFraction: budget?.workingSetFraction ?? effectiveWorkingSetFraction(),
+      windowSlices: budget?.windowSlices ?? null,
+      windowAhead: budget?.windowAhead ?? null,
+      windowBehind: budget?.windowBehind ?? null,
+      minWindowSlices: MIN_WIN,
+      maxWindowSlices: MAX_WIN,
+      overrideActive: workingSetFractionOverride != null,
+    };
+    // eslint-disable-next-line no-console
+    console.log('[SKM-BUDGET][TEST] working-set fraction:', result);
+    return result;
+  };
+  const snapshotWorkingSetOverride = (action: string) => {
+    const budget = (globalThis as any).__skmBudget;
+    return {
+      action,
+      decodeCacheCapMB: readDecodeCacheCapMB(),
+      tabAllocationMB: budget?.tabAllocationMB ?? budget?.perTabCapMB ?? null,
+      workingSetFractionDefault: WS_FRACTION,
+      workingSetFractionOverride,
+      workingSetFraction: budget?.workingSetFraction ?? effectiveWorkingSetFraction(),
+      windowSlices: budget?.windowSlices ?? null,
+      windowAhead: budget?.windowAhead ?? null,
+      windowBehind: budget?.windowBehind ?? null,
+      minWindowSlices: MIN_WIN,
+      maxWindowSlices: MAX_WIN,
+      overrideActive: workingSetFractionOverride != null,
+    };
+  };
+  (window as any).skmSetWorkingSetFraction = (fraction: number | null | undefined) => {
+    if (fraction === null || fraction === undefined) {
+      workingSetFractionOverride = null;
+      return publishWorkingSetOverrideResult('reset');
+    }
+    if (typeof fraction !== 'number' || !Number.isFinite(fraction)) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[SKM-BUDGET][TEST] skmSetWorkingSetFraction rejected: expected a finite number in',
+        `[${WS_OVERRIDE_MIN}, ${WS_OVERRIDE_MAX}], or null to reset. Got:`,
+        fraction
+      );
+      const rejected = snapshotWorkingSetOverride('rejected-nonfinite');
+      // eslint-disable-next-line no-console
+      console.log('[SKM-BUDGET][TEST] working-set fraction:', rejected);
+      return rejected;
+    }
+    if (fraction <= 0 || fraction > WS_OVERRIDE_MAX || fraction < WS_OVERRIDE_MIN) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[SKM-BUDGET][TEST] skmSetWorkingSetFraction rejected: fraction must be in',
+        `[${WS_OVERRIDE_MIN}, ${WS_OVERRIDE_MAX}] (got ${fraction}). Cache cap unchanged.`
+      );
+      const rejected = snapshotWorkingSetOverride('rejected-range');
+      // eslint-disable-next-line no-console
+      console.log('[SKM-BUDGET][TEST] working-set fraction:', rejected);
+      return rejected;
+    }
+    workingSetFractionOverride = fraction;
+    return publishWorkingSetOverrideResult('set');
+  };
+  (window as any).skmResetWorkingSetFraction = () => {
+    workingSetFractionOverride = null;
+    return publishWorkingSetOverrideResult('reset');
+  };
+  (window as any).skmGetWorkingSetFraction = () => {
+    const budget = (globalThis as any).__skmBudget;
+    const result = {
+      workingSetFractionDefault: WS_FRACTION,
+      workingSetFractionOverride,
+      workingSetFraction: budget?.workingSetFraction ?? effectiveWorkingSetFraction(),
+      windowSlices: budget?.windowSlices ?? null,
+      windowAhead: budget?.windowAhead ?? null,
+      windowBehind: budget?.windowBehind ?? null,
+      decodeCacheCapMB: readDecodeCacheCapMB(),
+      tabAllocationMB: budget?.tabAllocationMB ?? budget?.perTabCapMB ?? null,
+      minWindowSlices: MIN_WIN,
+      maxWindowSlices: MAX_WIN,
+      overrideActive: workingSetFractionOverride != null,
+    };
+    // eslint-disable-next-line no-console
+    console.log('[SKM-BUDGET][TEST] working-set fraction:', result);
+    return result;
+  };
+
   // SKM 2026-10-09 (QA fix — Priority 1 round 2): dump every tab currently known to the
   // registry (id, active, desiredMB ask, last-published allocationMB) plus the SUM of their
   // allocationMB — so QA can directly verify Σ(known allocations) <= hardCeiling from this
@@ -856,6 +1010,7 @@ export function initSkmMemoryBudget(
     '[SKM-BUDGET] ADAPTIVE governor active —',
     `baseline ${getBaseline()}MB, hardCeiling ${getCeiling()}MB, step ${STEP}MB` +
       ` | increase≥${PRESSURE_THRESHOLD} dwell ${INC_DWELL}ms, decrease idle ${IDLE_BEFORE_DEC}ms/${DEC_DWELL}ms` +
-      ' | override: skmSetMemoryBudget(5120, 6144) for 32 GB'
+      ' | override: skmSetMemoryBudget(5120, 6144) for 32 GB' +
+      ` | TEST-ONLY window: skmSetWorkingSetFraction(${WS_FRACTION}) / skmResetWorkingSetFraction()`
   );
 }

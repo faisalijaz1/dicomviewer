@@ -40,6 +40,10 @@ import { initSkmWarmer } from './skmBackgroundWarmer';
 // purges decoded slices outside a window around the doctor to bound RAM and prevent the
 // throw. Stack-only, skips MPR/volume. No-op unless appConfig.skmActiveEviction.enabled.
 import { initSkmWorkingSetEvictor } from './skmWorkingSetEvictor';
+// SKM 2026-10-10: READ-ONLY eviction/cache-reclamation diagnostics (probes, bounded
+// cache-removal history, optional guarded test-only eviction helper). No-op unless
+// appConfig.skmEvictionDiagnostics.enabled. See skmEvictionDiagnostics.ts.
+import { initSkmEvictionDiagnostics } from './skmEvictionDiagnostics';
 // SKM 2026-10-04 (Phase A): make WADO-URI stack images purgeable by clearing the loader's
 // legacy per-URL sharedCacheKey (which CS3D 4.22.10 treats as non-evictable). Lets the
 // native LRU bound decoded RAM and eliminates CACHE_SIZE_EXCEEDED. No-op unless
@@ -52,8 +56,14 @@ import { initSkmWadoRsTranscodedLoader } from './skmWadoRsTranscodedLoader';
 // Cornerstone cache cap, the per-tab budget split, and the derived decode window.
 import { initSkmMemoryBudget } from './skmMemoryBudget';
 import { initSkmPrefetchConcurrency } from './skmPrefetchConcurrency';
+// SKM Experiment C (TEST-ONLY): clamp prefetch decode window to the effective keep
+// window. No-op unless appConfig.skmPrefetchKeepClamp.enabled.
+import { initSkmPrefetchKeepClamp } from './skmPrefetchKeepClamp';
 // for validating the caching/RAM architecture. No-op unless appConfig.skmTelemetry.enabled.
 import { initSkmTelemetry } from './skmTelemetry';
+// SKM throughput / adaptive-prefetch decision diagnostics (read-only).
+// No-op unless appConfig.skmThroughputDiagnostics.enabled === true.
+import { initSkmThroughputDiagnostics } from './skmThroughputDiagnostics';
 // SKM 2026-10-09 (QA fix — scroll-position → displayed-image follow instrumentation):
 // read-only; measures user-requested index vs actual displayed index per viewport so
 // visible stalls can be measured directly instead of inferred from other metrics.
@@ -778,18 +788,40 @@ export default async function init({
     initSkmWarmer(servicesManager, extensionManager, appConfig.skmWarmer);
   }
 
+  // SKM 2026-10-10: READ-ONLY eviction/cache diagnostics. Returns `undefined` (no-op)
+  // unless appConfig.skmEvictionDiagnostics.enabled — in which case initSkmWorkingSetEvictor
+  // below receives optional hooks that let it publish a fresh pass/eviction snapshot. The
+  // evictor's own eviction decisions, thresholds, and scheduling are IDENTICAL either way.
+  const skmEvictionDiagnosticsHooks = initSkmEvictionDiagnostics(
+    servicesManager,
+    appConfig,
+    (appConfig as any)?.skmEvictionDiagnostics || {}
+  );
+
   // SKM 2026-10-04 (Option B correction): start the active working-set evictor. It keeps
   // decoded RAM ≈ a window around the doctor and prevents CACHE_SIZE_EXCEEDED on big
   // single-series stacks (CS3D 4.22.10 won't evict active-stack images itself). Skips
   // MPR/volume sessions entirely. No-op when the flag is off.
   if (appConfig?.skmActiveEviction?.enabled !== false) {
-    initSkmWorkingSetEvictor(servicesManager, appConfig.skmActiveEviction || {});
+    initSkmWorkingSetEvictor(servicesManager, appConfig.skmActiveEviction || {}, skmEvictionDiagnosticsHooks);
   }
+
+  // SKM Experiment C: clamp prefetch to keep (after evictor so __skmKeepWindow exists).
+  // Fully inert unless skmPrefetchKeepClamp.enabled:true.
+  initSkmPrefetchKeepClamp(servicesManager, (appConfig as any)?.skmPrefetchKeepClamp || {});
 
   // SKM 2026-10: in-app telemetry harness (read-only). Enable during the validation
   // phase; call skmTelemetry.report() in the DevTools console. No host scripting.
   if (appConfig?.skmTelemetry?.enabled) {
     initSkmTelemetry();
+  }
+
+  // SKM throughput diagnostics (read-only). Default OFF; enable for office TA runs.
+  if ((appConfig as any)?.skmThroughputDiagnostics?.enabled === true) {
+    initSkmThroughputDiagnostics(
+      servicesManager,
+      (appConfig as any).skmThroughputDiagnostics || {}
+    );
   }
 
   // SKM 2026-10-09 (QA fix): scroll-position → displayed-image follow instrumentation
@@ -875,15 +907,20 @@ export default async function init({
     const { viewport } = getEnabledElement(element);
     initViewTiming({ element });
 
-    element.addEventListener(EVENTS.CAMERA_RESET, evt => {
-      const { element } = evt.detail;
-      const enabledElement = getEnabledElement(element);
-      if (!enabledElement) {
-        return;
-      }
-      const { viewportId } = enabledElement;
-      commandsManager.runCommand('resetCrosshairs', { viewportId });
-    });
+    // enableElement used to fire this on every series switch, stacking a new
+    // listener on the same element each time.
+    if (!(element as any).__skmCameraResetWired) {
+      (element as any).__skmCameraResetWired = true;
+      element.addEventListener(EVENTS.CAMERA_RESET, evt => {
+        const { element } = evt.detail;
+        const enabledElement = getEnabledElement(element);
+        if (!enabledElement) {
+          return;
+        }
+        const { viewportId } = enabledElement;
+        commandsManager.runCommand('resetCrosshairs', { viewportId });
+      });
+    }
 
     // limitation: currently supporting only volume viewports with fusion
     if (viewport.type !== cornerstone.Enums.ViewportType.ORTHOGRAPHIC) {

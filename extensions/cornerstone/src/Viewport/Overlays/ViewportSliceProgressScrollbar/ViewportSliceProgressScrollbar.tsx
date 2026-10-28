@@ -70,16 +70,38 @@ function ViewportSliceProgressScrollbar({
   const { numberOfSlices, imageIndex } = imageSliceData;
 
   const imageIds = useMemo(() => getViewportImageIds(viewportData), [viewportData]);
-  const imageIdToIndex = useMemo(() => {
-    const map = new Map<string, number>();
+  // Progress marks follow imageIds. Denominator must match that list — viewport
+  // getNumberOfSlices() can disagree by 1 (or duplicates collapse a single-index map),
+  // which otherwise leaves Ready stuck at N-1/N forever.
+  const progressSliceCount =
+    imageIds.length > 0 ? imageIds.length : numberOfSlices;
+  // Map imageId → every stack index (duplicates must all light when one event arrives).
+  const imageIdToIndices = useMemo(() => {
+    const map = new Map<string, number[]>();
     for (let i = 0; i < imageIds.length; i++) {
       const imageId = imageIds[i];
-      if (imageId) {
-        map.set(imageId, i);
+      if (!imageId) {
+        continue;
+      }
+      const list = map.get(imageId);
+      if (list) {
+        list.push(i);
+      } else {
+        map.set(imageId, [i]);
       }
     }
     return map;
   }, [imageIds]);
+  // Back-compat for hooks that still expect a single index (first occurrence).
+  const imageIdToIndex = useMemo(() => {
+    const map = new Map<string, number>();
+    imageIdToIndices.forEach((indices, imageId) => {
+      if (indices.length) {
+        map.set(imageId, indices[0]);
+      }
+    });
+    return map;
+  }, [imageIdToIndices]);
 
   const isFullMode = useProgressScrollbarMode({
     viewportData,
@@ -102,17 +124,18 @@ function ViewportSliceProgressScrollbar({
     isFull: isFullyLoaded,
   } = useLoadedSliceBytes({
     isFullMode,
-    numberOfSlices,
+    numberOfSlices: progressSliceCount,
     viewportData,
     imageIds,
     imageIdToIndex,
+    imageIdToIndices,
     loadedBatchIntervalMs,
     monotonic: monotonicProgress,
   });
 
   const { bytes: viewedBytes, version: viewedVersion } = useViewedSliceBytes({
     isFullMode,
-    numberOfSlices,
+    numberOfSlices: progressSliceCount,
     imageIndex,
     imageIds,
     imageIdToIndex,
@@ -149,7 +172,7 @@ function ViewportSliceProgressScrollbar({
   // sizes; only recomputed when the underlying bytes actually change
   // (loadedVersion bumps on write, batched by loadedBatchIntervalMs).
   const loadedPercent = useMemo(() => {
-    if (!numberOfSlices) {
+    if (!progressSliceCount) {
       return 0;
     }
     let count = 0;
@@ -158,11 +181,11 @@ function ViewportSliceProgressScrollbar({
         count++;
       }
     }
-    return Math.round((count / numberOfSlices) * 100);
+    return Math.round((count / progressSliceCount) * 100);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- loadedVersion is the
     // change signal for the mutable loadedBytes array; including loadedBytes
     // itself would be a no-op dependency (same array reference every render).
-  }, [loadedVersion, numberOfSlices]);
+  }, [loadedVersion, progressSliceCount]);
 
   // SKM 2026-10-04 (Option B): count of slices already available locally (decoded or
   // byte-warmed) — the "Ready N / total" the radiologist sees in the badge, so background
@@ -176,7 +199,7 @@ function ViewportSliceProgressScrollbar({
     }
     return count;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadedVersion, numberOfSlices]);
+  }, [loadedVersion, progressSliceCount]);
 
   const showBadge = isFullMode && showPercentBadge && isLoading;
 
@@ -185,7 +208,7 @@ function ViewportSliceProgressScrollbar({
   // from the same loadedBytes source as the fill, so it never disagrees with it. -1 when
   // there is no meaningful reach ahead (current slice not yet downloaded, or none ahead).
   const downloadFrontier = useMemo(() => {
-    if (!numberOfSlices || numberOfSlices <= 1) {
+    if (!progressSliceCount || progressSliceCount <= 1) {
       return -1;
     }
     const cur = imageIndex || 0;
@@ -195,7 +218,7 @@ function ViewportSliceProgressScrollbar({
     // Leading edge of the contiguous downloaded run on each side of the doctor; the
     // frontier is the further edge (the ahead-biased moving-window side).
     let up = cur;
-    while (up + 1 < numberOfSlices && loadedBytes[up + 1]) {
+    while (up + 1 < progressSliceCount && loadedBytes[up + 1]) {
       up++;
     }
     let down = cur;
@@ -205,17 +228,17 @@ function ViewportSliceProgressScrollbar({
     return up - cur >= cur - down ? up : down;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- loadedVersion is the change
     // signal for the mutable loadedBytes array (same reference each render).
-  }, [loadedVersion, imageIndex, numberOfSlices]);
+  }, [loadedVersion, imageIndex, progressSliceCount]);
 
   const showFrontier =
     isFullMode &&
     showDownloadFrontier &&
     downloadFrontier >= 0 &&
     downloadFrontier !== (imageIndex || 0) &&
-    numberOfSlices > 1;
-  const frontierTopPct = showFrontier ? (downloadFrontier / (numberOfSlices - 1)) * 100 : 0;
+    progressSliceCount > 1;
+  const frontierTopPct = showFrontier ? (downloadFrontier / (progressSliceCount - 1)) * 100 : 0;
 
-  if (!numberOfSlices || numberOfSlices <= 1) {
+  if (!progressSliceCount || progressSliceCount <= 1) {
     return null;
   }
 
@@ -270,7 +293,7 @@ function ViewportSliceProgressScrollbar({
         {/* SKM 2026-10-04 (Option B): show the READY RANGE (available/total) + %, so the
             radiologist sees background preparation advancing. Non-blocking, corner-anchored. */}
         <span className="text-[10px] font-semibold leading-none text-white [font-variant-numeric:tabular-nums]">
-          {readyCount}/{numberOfSlices} · {loadedPercent}%
+          {readyCount}/{progressSliceCount} · {loadedPercent}%
         </span>
       </div>
       <div
@@ -283,7 +306,7 @@ function ViewportSliceProgressScrollbar({
         <SmartScrollbar
           className="absolute inset-0"
           value={imageIndex || 0}
-          total={numberOfSlices}
+          total={progressSliceCount}
           onValueChange={onScrollbarValueChange}
           isLoading={isLoading}
           enableKeyboardNavigation={false}

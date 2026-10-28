@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   cache as cornerstoneCache,
   Enums,
@@ -9,6 +9,44 @@ import {
 import { useByteArray } from '@ohif/ui-next';
 import { getImageIdFromCacheEvent, getImageIndexFromEvent, isProgressFullMode } from './helpers';
 import { ImageSliceData, ViewportData } from './types';
+
+/**
+ * The scrollbar is a sibling of the cornerstone element, inside `.viewport-wrapper`.
+ * Querying the canvas node never sees the thumb or the slider.
+ */
+function scrollbarRoot(element: HTMLElement): HTMLElement {
+  return (
+    (element.closest('.viewport-wrapper') as HTMLElement | null) ||
+    element.parentElement ||
+    element
+  );
+}
+
+/** Put the slice thumb on the displayed index without waiting for a React commit. */
+function paintSliceIndicator(
+  element: HTMLElement,
+  imageIndex: number,
+  numberOfSlices: number
+): void {
+  if (!element || !(numberOfSlices > 1)) {
+    return;
+  }
+  const clamped = Math.max(0, Math.min(numberOfSlices - 1, imageIndex));
+  const root = scrollbarRoot(element);
+  const thumb = root.querySelector('[data-skm-slice-indicator]') as HTMLElement | null;
+  if (thumb) {
+    const fillTop = Number(thumb.dataset.skmFillTop);
+    const maxTop = Number(thumb.dataset.skmMaxTop);
+    if (Number.isFinite(fillTop) && Number.isFinite(maxTop)) {
+      thumb.style.top = `${fillTop + (clamped / (numberOfSlices - 1)) * maxTop}px`;
+    }
+    thumb.setAttribute('data-skm-slice-index', String(clamped));
+  }
+  const slider = root.querySelector('[aria-label="Image navigation scrollbar"]');
+  if (slider) {
+    slider.setAttribute('aria-valuenow', String(clamped));
+  }
+}
 
 export function useProgressScrollbarMode({
   viewportData,
@@ -118,6 +156,9 @@ export function useViewportSliceSync({
       (viewportType === Enums.ViewportType.ORTHOGRAPHIC && Enums.Events.VOLUME_NEW_IMAGE) ||
       Enums.Events.IMAGE_RENDERED;
 
+    let pendingSlice: ImageSliceData | null = null;
+    let sliceRaf = 0;
+
     const updateIndex = event => {
       const viewport = cornerstoneViewportService.getCornerstoneViewport(viewportId);
       if (!viewport || viewport instanceof VolumeViewport3D) {
@@ -129,19 +170,100 @@ export function useViewportSliceSync({
         return;
       }
       const nextNumberOfSlices = viewport.getNumberOfSlices();
-
-      setImageSliceData({
+      // Move the thumb in this turn. React state is coalesced to the latest index
+      // once per frame so a fast scroll cannot queue a backlog of overlay renders
+      // that paint the thumb behind the canvas.
+      paintSliceIndicator(element, nextImageIndex, nextNumberOfSlices);
+      pendingSlice = {
         imageIndex: nextImageIndex,
         numberOfSlices: nextNumberOfSlices,
+      };
+      if (sliceRaf) {
+        return;
+      }
+      sliceRaf = requestAnimationFrame(() => {
+        sliceRaf = 0;
+        if (pendingSlice) {
+          setImageSliceData(pendingSlice);
+        }
       });
     };
 
     element.addEventListener(eventId, updateIndex);
+    const scrollEventName =
+      (Enums.Events as any).STACK_VIEWPORT_SCROLL || 'CORNERSTONE_STACK_VIEWPORT_SCROLL';
+    const publishSlice = (imageIndex: number, numberOfSlices: number) => {
+      paintSliceIndicator(element, imageIndex, numberOfSlices);
+      pendingSlice = { imageIndex, numberOfSlices };
+      if (sliceRaf) {
+        return;
+      }
+      sliceRaf = requestAnimationFrame(() => {
+        sliceRaf = 0;
+        if (pendingSlice) {
+          setImageSliceData(pendingSlice);
+        }
+      });
+    };
+
+    const onStackScroll = event => {
+      const live = cornerstoneViewportService.getCornerstoneViewport(viewportId);
+      if (!live || live instanceof VolumeViewport3D) {
+        return;
+      }
+      const fromEvent = event?.detail ? getImageIndexFromEvent(event) : undefined;
+      const fromViewport = live.getCurrentImageIdIndex?.();
+      const liveIndex = typeof fromEvent === 'number' ? fromEvent : fromViewport;
+      const liveCount = live.getNumberOfSlices?.();
+      if (typeof liveIndex !== 'number' || typeof liveCount !== 'number') {
+        return;
+      }
+      // The scroll event can run before currentImageIdIndex moves. Paint the
+      // requested index now, then again after this turn so a sync sample does
+      // not observe the previous slice.
+      publishSlice(liveIndex, liveCount);
+      queueMicrotask(() => {
+        queueMicrotask(() => {
+          const again = live.getCurrentImageIdIndex?.();
+          const count = live.getNumberOfSlices?.();
+          if (typeof again !== 'number' || typeof count !== 'number') {
+            return;
+          }
+          publishSlice(again, count);
+        });
+      });
+    };
+    if (scrollEventName !== eventId) {
+      element.addEventListener(scrollEventName, onStackScroll);
+    }
 
     return () => {
       element.removeEventListener(eventId, updateIndex);
+      if (scrollEventName !== eventId) {
+        element.removeEventListener(scrollEventName, onStackScroll);
+      }
+      if (sliceRaf) {
+        cancelAnimationFrame(sliceRaf);
+      }
     };
   }, [viewportData, element, viewportId, cornerstoneViewportService, setImageSliceData]);
+
+  // A React commit of an older slice can write aria/top after the direct paint.
+  // Re-apply the viewport's current index before the browser paints.
+  useLayoutEffect(() => {
+    if (!element) {
+      return;
+    }
+    const viewport = cornerstoneViewportService.getCornerstoneViewport(viewportId);
+    if (!viewport || viewport instanceof VolumeViewport3D) {
+      return;
+    }
+    const liveIndex = viewport.getCurrentImageIdIndex?.();
+    const liveCount = viewport.getNumberOfSlices?.();
+    if (typeof liveIndex === 'number' && typeof liveCount === 'number') {
+      paintSliceIndicator(element, liveIndex, liveCount);
+    }
+  });
 }
 
 export function useLoadedSliceBytes({
@@ -150,6 +272,7 @@ export function useLoadedSliceBytes({
   viewportData,
   imageIds,
   imageIdToIndex,
+  imageIdToIndices,
   loadedBatchIntervalMs,
   monotonic = false,
 }: {
@@ -158,6 +281,8 @@ export function useLoadedSliceBytes({
   viewportData: ViewportData;
   imageIds: string[];
   imageIdToIndex: Map<string, number>;
+  /** When set, one imageId marks every duplicate stack index (avoids Ready N-1/N). */
+  imageIdToIndices?: Map<string, number[]>;
   loadedBatchIntervalMs: number;
   // SKM 2026-10-03 (W5): when true, a slice that was ever loaded stays lit on the
   // bar even after the LRU evicts it. Required with windowed decode (W2) — only a
@@ -202,13 +327,21 @@ export function useLoadedSliceBytes({
       return;
     }
 
+    const indicesFor = (imageId: string): number[] => {
+      const many = imageIdToIndices?.get(imageId);
+      if (many && many.length) {
+        return many;
+      }
+      const one = imageIdToIndex.get(imageId);
+      return one !== undefined ? [one] : [];
+    };
+
     const markLoaded = event => {
       const imageId = getImageIdFromCacheEvent(event);
       if (!imageId) {
         return;
       }
-      const index = imageIdToIndex.get(imageId);
-      if (index !== undefined) {
+      for (const index of indicesFor(imageId)) {
         setLoadedByte(index);
       }
     };
@@ -221,8 +354,7 @@ export function useLoadedSliceBytes({
       if (!imageId) {
         return;
       }
-      const index = imageIdToIndex.get(imageId);
-      if (index !== undefined) {
+      for (const index of indicesFor(imageId)) {
         bulkDownloadedRef.current.add(index);
         setLoadedByte(index);
       }
@@ -240,12 +372,11 @@ export function useLoadedSliceBytes({
       if (!imageId) {
         return;
       }
-      const index = imageIdToIndex.get(imageId);
-      if (index !== undefined) {
+      for (const index of indicesFor(imageId)) {
         // SKM P2: keep the bar MONOTONIC for bulk-downloaded slices even when
         // Cornerstone's LRU evicts their decoded copy (bytes still available).
         if (bulkDownloadedRef.current.has(index)) {
-          return;
+          continue;
         }
         clearLoadedByte(index);
       }
@@ -271,6 +402,7 @@ export function useLoadedSliceBytes({
     numberOfSlices,
     viewportData,
     imageIdToIndex,
+    imageIdToIndices,
     resetLoaded,
     setLoadedByte,
     clearLoadedByte,

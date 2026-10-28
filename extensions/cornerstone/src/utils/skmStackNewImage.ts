@@ -23,6 +23,15 @@ import { eventTarget, Enums, getEnabledElements } from '@cornerstonejs/core';
 export function subscribeStackNewImage(handler: (evt?: any) => void): () => void {
   const E: any = Enums.Events as any;
   const STACK_NEW_IMAGE = E.STACK_NEW_IMAGE || 'CORNERSTONE_STACK_NEW_IMAGE';
+  return subscribeViewportElementEvent(STACK_NEW_IMAGE, handler);
+}
+
+/** Same per-element wiring as STACK_NEW_IMAGE, for another non-bubbling viewport event. */
+export function subscribeViewportElementEvent(
+  eventName: string,
+  handler: (evt?: any) => void
+): () => void {
+  const E: any = Enums.Events as any;
   const ELEMENT_ENABLED = E.ELEMENT_ENABLED || 'CORNERSTONE_ELEMENT_ENABLED';
   const ELEMENT_DISABLED = E.ELEMENT_DISABLED || 'CORNERSTONE_ELEMENT_DISABLED';
 
@@ -34,13 +43,12 @@ export function subscribeStackNewImage(handler: (evt?: any) => void): () => void
     }
     wired.add(element);
     try {
-      element.addEventListener(STACK_NEW_IMAGE, handler);
+      element.addEventListener(eventName, handler);
     } catch (e) {
       wired.delete(element);
     }
   };
 
-  // Catch elements that are already enabled before we subscribed.
   try {
     (getEnabledElements() || []).forEach((en: any) => wire(en?.element || en?.viewport?.element));
   } catch (e) {
@@ -52,7 +60,7 @@ export function subscribeStackNewImage(handler: (evt?: any) => void): () => void
     const el = evt?.detail?.element;
     if (el && wired.has(el)) {
       try {
-        el.removeEventListener(STACK_NEW_IMAGE, handler);
+        el.removeEventListener(eventName, handler);
       } catch (e) {
         /* noop */
       }
@@ -72,7 +80,7 @@ export function subscribeStackNewImage(handler: (evt?: any) => void): () => void
     }
     wired.forEach(el => {
       try {
-        el.removeEventListener(STACK_NEW_IMAGE, handler);
+        el.removeEventListener(eventName, handler);
       } catch (e) {
         /* noop */
       }

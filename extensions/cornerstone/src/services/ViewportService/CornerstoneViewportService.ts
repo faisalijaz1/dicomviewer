@@ -34,6 +34,11 @@ import {
 } from '../../types/Presentation';
 
 import JumpPresets from '../../utils/JumpPresets';
+import {
+  imageIdsSafeToCancel,
+  releaseRetiredViewport,
+  shouldReuseStackViewport,
+} from '../../utils/skmViewportReuse';
 import { ViewportProperties } from '@cornerstonejs/core/types';
 import { useLutPresentationStore } from '../../stores/useLutPresentationStore';
 import { usePositionPresentationStore } from '../../stores/usePositionPresentationStore';
@@ -128,6 +133,16 @@ class CornerstoneViewportService extends PubSubService implements IViewportServi
     this.renderingEngine = null;
     this.viewportGridResizeObserver = null;
     this.servicesManager = servicesManager;
+    // Office 7033dc3 leaked one StackViewport per series switch. This build
+    // keeps the stack viewport and calls setStack. Build gate token:
+    // retiredViewportRelease 1
+    if (!(globalThis as any).__skmViewportReuseLogged) {
+      (globalThis as any).__skmViewportReuseLogged = true;
+      // eslint-disable-next-line no-console
+      console.log(
+        '[SKM-VIEWPORT] series switch reuses the stack viewport, retiredViewportRelease 1, cancelLoadGuard 1'
+      );
+    }
   }
   hangingProtocolService: unknown;
   viewportsInfo: unknown;
@@ -507,11 +522,19 @@ class CornerstoneViewportService extends PubSubService implements IViewportServi
     // case
     viewportInfo.setRenderingEngineId(renderingEngine.id);
 
-    // Todo: this is not optimal at all, we are re-enabling the already enabled
-    // element which is not what we want. But enabledElement as part of the
-    // renderingEngine is designed to be used like this. This will trigger
-    // ENABLED_ELEMENT again and again, which will run onEnableElement callbacks
-    renderingEngine.enableElement(viewportInput);
+    // Office 7033dc3: enableElement on every series switch constructed a new
+    // StackViewport and left the previous one alive (~1.2 MB of its last image).
+    // A stack series change keeps the viewport and lets setStack replace the
+    // images. A type change (stack to volume) still goes through enableElement,
+    // and the viewport that was just disabled drops its image.
+    const previousViewport = renderingEngine.getViewport(viewportId);
+    const reuseStack = shouldReuseStackViewport(previousViewport, element, type);
+    if (!reuseStack) {
+      renderingEngine.enableElement(viewportInput);
+      if (previousViewport && previousViewport !== renderingEngine.getViewport(viewportId)) {
+        releaseRetiredViewport(previousViewport);
+      }
+    }
 
     viewportInfo.setViewportOptions(viewportOptions);
     viewportInfo.setDisplaySetOptions(displaySetOptions);
@@ -848,6 +871,23 @@ class CornerstoneViewportService extends PubSubService implements IViewportServi
     }
   }
 
+  // Prefetch around the new image when the stack is replaced. One listener per
+  // element; it closes over the element, not the StackViewport instance.
+  private _enableStackPrefetchOnNewImageSet(element: HTMLDivElement): void {
+    const el = element as HTMLDivElement & { __skmStackPrefetchWired?: boolean };
+    if (!el || el.__skmStackPrefetchWired) {
+      return;
+    }
+    el.__skmStackPrefetchWired = true;
+    el.addEventListener(csEnums.Events.VIEWPORT_NEW_IMAGE_SET, (evt: Event) => {
+      const target = (evt as CustomEvent)?.detail?.element;
+      if (target !== el) {
+        return;
+      }
+      csToolsUtils.stackContextPrefetch.enable(target);
+    });
+  }
+
   private async _setOtherViewport(
     viewport: Types.IStackViewport,
     viewportData: StackViewportData,
@@ -901,15 +941,10 @@ class CornerstoneViewportService extends PubSubService implements IViewportServi
       properties.colormap = colormap ?? properties.colormap;
     }
 
-    viewport.element.addEventListener(csEnums.Events.VIEWPORT_NEW_IMAGE_SET, evt => {
-      const { element } = evt.detail;
-
-      if (element !== viewport.element) {
-        return;
-      }
-
-      csToolsUtils.stackContextPrefetch.enable(element);
-    });
+    // Once per element, and the handler must not close over the viewport.
+    // The previous arrow was added on every setStack and kept each disabled
+    // StackViewport (and its last image) reachable.
+    this._enableStackPrefetchOnNewImageSet(viewport.element);
 
     const overlayProcessingResults = this._processExtraDisplaySetsForViewport(viewport);
 
@@ -963,7 +998,24 @@ class CornerstoneViewportService extends PubSubService implements IViewportServi
       const newImageIdSet = new Set(imageIds);
       const staleImageIds = previousImageIds.filter(id => !newImageIdSet.has(id));
       if (staleImageIds.length) {
-        imageLoader.cancelLoadImages(staleImageIds);
+        // Already-loaded images have a load object and no cancelFn. Cornerstone
+        // calls cancelFn unconditionally, which threw and aborted the switch
+        // (office index.97b9a615.js) before setStack. A cancel failure must
+        // not keep the previous series on screen.
+        try {
+          const cancellable = imageIdsSafeToCancel(staleImageIds, imageId =>
+            imageLoader.getImageLoadObject?.(imageId)
+          );
+          cancellable.forEach(imageId => {
+            try {
+              imageLoader.cancelLoadImages([imageId]);
+            } catch (e) {
+              /* this id must not stop the rest of the cancel, or the switch */
+            }
+          });
+        } catch (e) {
+          /* leave the switch to proceed */
+        }
       }
     }
 

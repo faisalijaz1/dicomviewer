@@ -808,11 +808,123 @@ lane (8) already had spare capacity.
 
 ## 11. CURRENT STOPPING POINT / WHERE WE STOPPED
 
-- **Current `master` HEAD:** `82b89de` — cosmetic scrollbar/progress polish.
-- **Latest *functional* change:** `60d5317` — adaptive prefetch concurrency.
+- **Multi-viewport P0 (in flight):** fair warmer (`2523c72`) was necessary but
+  insufficient — inactive Ready bars still hit a nearSkip hole under sequential
+  prefetch. Follow-up: series-aware nearSkip + `activeBias:1` (see
+  `docs/SKM_MULTI_VIEWPORT_PERF_AUDIT.md`). **Office Scenario A/B vs `2523c72`
+  required before production deploy. Incomplete runs are not benchmarks.**
+- **Closed-series memory (2026-10-13):** a long scroll-and-switch on the 2001+4403
+  CT ratcheted the tab heap to ~4 GB because the interaction hold froze orphan
+  eviction and decoded growth could reach the 4096 MB machine ceiling inside one
+  tab. Orphan images keep draining during scroll. One tab's decoded growth stops
+  at `tabDecodedCapMB` 3072. Office retest of `af01f8b` (`index.c8d70366.js`):
+  heap peaked at 680 MB and levelled off. The same run made scrolling ~10× slower
+  once eviction stayed on `budget-exhausted`, because one batch of up to 50
+  removals ran past the 48 ms budget. Office retest of `cf17a8d`
+  (`index.1adc0132.js`): the time limit stopped each turn after one image
+  because that image cost 100–600 ms, so the closed series never finished
+  draining and the heap plateaued near 6 GB. `parsedDataSetsReleased` stayed
+  at 1 because the cache-add event wraps the image. A closed series is now
+  dropped from the cache entry directly. Office retest of `6d7b5e1`
+  (`index.b2eca069.js`): scroll stayed ~3.5–4 s for 30 min, the series you
+  left stayed at 0 MB, and eviction batches were 1 ms. The heap still climbed
+  ~20 MB/min (peak 1,442 MB, cache ≤256 MB), and a 5-minute idle hold stayed at
+  2,089 MB against a 1,001 MB cache with `parsedDataSetsReleased` stuck at 60.
+  That counter only moved when a series was dropped, so prefetch-decoded slices
+  kept their parsed files. The loader now releases the parsed file when the
+  pixels are ready, and a small cache sweep retries any slice that still holds
+  one. Office retest of that build (`index.5c932257.js`): idle heap settled at
+  1.08× the cache and the dataset cache stayed at 0, but the heap still climbed
+  about 15 MB/min after a forced garbage collection. The loader promise keeps
+  the parsed element table after the file bytes are dropped. That table is now
+  cleared too, and the cache sweep waits until scrolling has been quiet.
+  Office retest of that build (`index.9b057598.js`): idle heap 1.07× the cache,
+  the series you left 0 MB, switch 10 ms, heap +12.9 MB/min (+11.3 after forced
+  GC), but every 80-wheel cycle took 6.07 s instead of 3.67 s from the first
+  minute, in two attempts. That build held the sweep during input and cleared
+  the browser resource-timing buffer every 5 s; the diagnostics it published
+  were refreshed only by the sweep, so scroll samples showed the previous
+  switch's values and could not say whether the per-decode hook runs. The sweep
+  is unconditional again (as in `5c932257`), the buffer clear is gone, the
+  element-table clear stays, and `__skmEvictorLast` now publishes on every
+  tick with `parsedReleasedBy` (hook / cacheAdd / sweep / drop / onScreen) and
+  `loaderWrapperCalls`. Office retest of that build (`index.278a36fd.js`):
+  idle heap 1.07× the cache, dataset release during scroll is the loader hook,
+  the series you left stayed at 0 MB, and a clean-host scroll was about 3.9 s.
+  The heap still climbed about 11 MB/min after a forced garbage collection.
+  Heap snapshots at minute 5 and minute 25 showed one new StackViewport per
+  series switch (178 switches, +178 instances), each keeping its last image
+  (~1.2 MB). `setViewportData` called `enableElement` on every switch, and the
+  `VIEWPORT_NEW_IMAGE_SET` listener closed over that viewport and was never
+  removed. A stack series change now keeps the viewport and calls `setStack`.
+  A type change still uses `enableElement`, then drops the disabled viewport's
+  image. Console: `[SKM-VIEWPORT] … retiredViewportRelease 1`. Office retest of
+  that build (`index.97b9a615.js`) stopped at the build check: the markers
+  were present, but a thumbnail switch threw `t.cancelFn is not a function`
+  inside `cancelLoadImages` and `setStack` never ran, so the viewport stayed
+  on the first series. Reusing the viewport means `getImageIds()` still lists
+  the series on screen, and Cornerstone calls `cancelFn` on load objects that
+  no longer have one. Only ids with no load object, or with a real `cancelFn`,
+  are passed to `cancelLoadImages`, and a cancel failure cannot abort the
+  switch. The production error title no longer stringifies `false` into
+  "Something went wrongfalse". Console token `cancelLoadGuard 1`. Not
+  office-measured yet.
+- **Slice thumb same-turn index (2026-10-13):** fast ArrowDown left aria and
+  `data-skm-slice-index` one behind `getCurrentImageIdIndex` because the scroll
+  paint read the index before it moved, and the sample ran before `STACK_NEW_IMAGE`.
+  The thumb now repaints from the viewport index after that turn. A flat decoded-cache
+  stretch of ~60 slices at ~30% fill is the ahead window, not a below-85% purge.
+- **Slice thumb paint target (2026-10-13):** direct paint queried the cornerstone
+  element. The progress scrollbar is a sibling overlay, so `data-skm-slice-index`
+  never appeared and aria kept updating only from React (1–2 slices behind).
+  Paint now uses `.viewport-wrapper`. `dataset.skmSliceIndex` does not put the
+  literal `data-skm-slice-index` in the bundle; the attribute is set explicitly.
+- **Slice thumb and input stamp follow-up (2026-10-12):** fast ArrowDown left
+  `aria-valuenow` up to 4 behind the viewport index because React committed an older
+  slice over the direct paint, and the thumb only listened for `STACK_NEW_IMAGE`.
+  It now also paints on stack scroll and again after each React commit.
+  `data-skm-slice-index` is the per-slice marker; integer CSS pixels still share
+  several slices on a 3674-slice track. Reactive-skip snapshots now refresh
+  `lastInputAt` / `msSinceInput`, and each input stamp writes them immediately.
+- **Slice thumb tracks the displayed index (2026-10-12):** the progress-scrollbar
+  thumb used whole pixel buckets, so it stayed still for several slices, and fast
+  scroll queued a React overlay render behind the canvas. The thumb now moves
+  linearly and is positioned in the `STACK_NEW_IMAGE` turn. `fairWarmComplete` is
+  false while either fair queue, an in-flight warm fetch, or a pending reconcile
+  remains. `skmTelemetry` and `skmScrollFollow` are on for this validation build.
+  Stack scroll stamps the eviction interaction time even when a synthetic wheel
+  does not reach `window`. Not measured on the office viewer until the next rebuild.
+- **Bounded eviction segments (2026-10-12):** a reactive pass stops after 100 removals
+  or 48 ms of removal time, keeps the remaining candidates, and continues on a
+  timeout rather than `requestIdleCallback`. Wheel, pressed-pointer, and arrow/page
+  keys hold eviction for 620 ms (`idleTimeout` 500 + quiet 120), which the 500 ms
+  idle timeout can no longer outlast. `passOutcome` is `interaction-deferred`,
+  `budget-exhausted`, `completed`, or `no-eligible-candidates`. Emergency removal
+  stays one batch of at most 10, only at fill ≥ prefetch pause + 0.05, then waits
+  out the hold. Two distinct series divide the prefetch window by the open stack
+  count (same divisor as the evictor); the keep clamp stays off. Fair warm-up does
+  not report complete while a visible series is missing imageIds or unwarmed,
+  uncached IDs. Not measured on the office viewer.
+- **Interaction-aware eviction (2026-10-12):** wheel and pressed-pointer input
+  share the existing quiet timestamp. While it is fresh, removal batches wait on
+  `setTimeout` and the 500 ms idle-callback timeout cannot run them. One batch of at
+  most 10 images is allowed only when fill is at least 0.05 above the prefetcher pause
+  (0.90 → 0.95), so prefetch cannot reload those images in a loop. Prefetch 4/8/10/6,
+  pool lane 10, reactive 0.85, and the keep clamp stay unchanged. Not yet measured
+  on the office viewer.
+- **Office canaries rolled back to the `1bc1058` production config (2026-10-12):**
+  Experiments A/B/C off (`testKeepWindowEnabled`, `testReactiveHighWaterEnabled`,
+  `idleOutsideKeepCleanupEnabled`, `skmPrefetchKeepClamp.enabled` all false).
+  Production `reactiveHighWater` remains 0.85. Read-only telemetry, throughput,
+  scroll-follow, study-switch, and eviction diagnostics are off.
+  `allowFixedPrefetchConcurrency` and `allowTestEviction` are false. Prefetch stays
+  min 4 / base 8 / max 10 / multiTab 6, pool lane 10, decode-ahead workers−1.
+  Bulk stays disabled. Fair-warmer behavior is unchanged. The deployed viewer is
+  not this config until the office host rebuilds and hard-refreshes.
+- **Still NOT yet proven:** adaptive prefetch concurrency A/B (`60d5317`).
+- **Prefetch 15–20 canary rolled back (2026-10-12):** commit `4e2bc4f` raised min/base/max/multiTab to 15/15/20/20, the prefetch pool lane to 20, and set `canaryDecodeAheadCap: 20`. Manual two-viewport scrolling showed more loading spinners and lag. Office config is back to min 4, base 8, max 10, multiTab 6, prefetch lane 10, decode-ahead = workers−1. Scroll behavior after this rollback has not been retested.
 - **Proven in office:** memory governor (6.2), 2816/4096 profile (16 GB 1-tab &
   2-tab), Preferences UI.
-- **NOT yet proven:** adaptive prefetch concurrency (`60d5317`).
 
 ### Next step — Office A/B validation of adaptive prefetch concurrency
 
@@ -1108,6 +1220,12 @@ skmSetMemoryBudget(base, ceil)  // e.g. skmSetMemoryBudget(5120, 6144) for 32 GB
 skmSetMemoryCeiling(mb)         // set only the ceiling (UI uses this)
 skmResetMemoryBudget()          // Auto / clear override
 skmGetPrefetchConcurrency()     // adaptive concurrency snapshot (__skmPrefetchConcurrency)
+// OFFICE-TEST pin (requires skmPrefetchConcurrency.allowFixedPrefetchConcurrency:true):
+skmSetFixedPrefetchConcurrency(4)   // hold configured target across adaptive ticks
+skmSetFixedPrefetchConcurrency(6)   // same; 8/10 may be capped — see requested vs effectiveMax
+skmGetFixedPrefetchConcurrency()    // { pinActive, adaptiveEnabled, requested, configured, effectiveMax }
+skmResetFixedPrefetchConcurrency()  // clear pin → normal adaptive reasons
+skmPrefetchConcDecisionLog()        // reason 'test_pin' while held
 ```
 
 **Build / deploy (office):**

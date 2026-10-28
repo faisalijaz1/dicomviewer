@@ -27,6 +27,14 @@
 // eslint-disable-next-line
 import { cache, eventTarget } from '@cornerstonejs/core';
 import { subscribeStackNewImage } from './utils/skmStackNewImage';
+import {
+  canDeclareFairWarmComplete,
+  isNearSkipActuallyCovered,
+  pickFairSeriesIndex,
+  planFairDrainReconcile,
+  shouldApplyNearSkip,
+  shouldRebuildFairQueue,
+} from './skmWarmerFairnessMath';
 
 export type SkmWarmerConfig = {
   enabled?: boolean;
@@ -68,6 +76,18 @@ export type SkmWarmerConfig = {
   rethrottleMs?: number;
   /** |Δindex| beyond which the moving window abandons and restarts (far jump). Default 120. */
   farJumpThreshold?: number;
+  /**
+   * Fair multi-viewport pick bias (preferred:other cycle numerator). 1 → ~1:1, 2 → ~2:1.
+   * Only used when activeSeriesOnly:false. Default 1 (equal large series should share bandwidth).
+   */
+  activeBias?: number;
+  /**
+   * When true (default), nearSkip applies only to the preferred/active series — inactive
+   * open series get their near band byte-warmed too, because sequential prefetch does not
+   * own that band until the focused series' window drains. Set false to skip near band on
+   * every fair job (legacy Test G behaviour; starves inactive Ready bars).
+   */
+  nearSkipPreferredOnly?: boolean;
 };
 
 /** Event the monotonic progress bar listens to (see scrollbar hooks). */
@@ -254,6 +274,10 @@ export function initSkmWarmer(
   const effectiveConcurrency = () =>
     Math.max(1, Math.min(perTab, Math.floor(globalCap / Math.max(1, liveTabs)) || 1));
 
+  // Default true = legacy active-viewport-only warmer (starves inactive panes).
+  // false = fair multi-viewport warming (see fairSync / fairPumpLoop below).
+  const activeSeriesOnly = config?.activeSeriesOnly !== false;
+
   // SKM 2026-10-09 (QA fix — Priority 2 round 3): warmSeries() now REQUIRES the generation's
   // AbortSignal (from beginNewWarmerGeneration()) and forwards it to fetch(), so a stale
   // generation's in-flight request is actually interrupted — not merely left to finish on its
@@ -385,6 +409,9 @@ export function initSkmWarmer(
   const mwSkipAhead = Math.max(0, config?.nearSkipAhead ?? 300);
   const mwSkipBehind = Math.max(0, config?.nearSkipBehind ?? 150);
   const mwThrottle = Math.max(50, config?.rethrottleMs ?? 250);
+  const mwFarJumpThreshold = Math.max(1, config?.farJumpThreshold ?? 120);
+  const fairActiveBias = Math.max(1, Math.floor(config?.activeBias ?? 1));
+  const nearSkipPreferredOnly = config?.nearSkipPreferredOnly !== false;
   // SKM 2026-10-04 (Phase B): sweep the WHOLE study (near-doctor first, ahead-biased), not
   // just ±ahead/behind, so the Ready N/Total frontier keeps advancing to 100% in the
   // background instead of stopping around the initial window. Bytes only (HTTP cache); the
@@ -448,29 +475,43 @@ export function initSkmWarmer(
     }
   };
 
-  // Ordered, ahead-biased list of imageIds to warm around `center` (center-out).
-  const mwOrderedWindow = (imageIds: string[], center: number, dir: number): string[] => {
+  // Ordered, ahead-biased list of imageIds to warm around center (center-out).
+  // applyNearSkip:false includes the near band (inactive series: prefetch does not own it yet).
+  const mwOrderedWindow = (
+    imageIds: string[],
+    center: number,
+    dir: number,
+    opts?: { applyNearSkip?: boolean }
+  ): string[] => {
     const last = imageIds.length - 1;
     // Phase B: when warming the whole study, extend the walk to both ends (still near-first,
     // ahead-biased); otherwise keep the bounded ±ahead/behind window.
     const aEnd = mwWholeStudy ? last : Math.min(last, center + (dir > 0 ? mwAhead : mwBehind));
     const bEnd = mwWholeStudy ? 0 : Math.max(0, center - (dir > 0 ? mwBehind : mwAhead));
-    // Far-band only: skip the near band the prefetcher decodes (fix G — no double-fetch).
-    // SKM 2026-10-07 (Fix 5): the prefetch decode window is now derived at runtime from the
-    // adaptive per-tab memory budget (skmMemoryBudget → window.__skmBudget.nearSkip). Read it
-    // live so the warmer always skips exactly the band the prefetcher currently decodes and
-    // byte-warms only BEYOND it — regardless of machine tier or tab count. Falls back to the
-    // static config values when the budget governor isn't present.
-    let skipAhead = mwSkipAhead;
-    let skipBehind = mwSkipBehind;
-    try {
-      const b = (globalThis as any).__skmBudget;
-      if (b && typeof b.nearSkip === 'number' && b.nearSkip > 0) {
-        skipAhead = b.nearSkip;
-        skipBehind = b.nearSkip;
+    // Far-band only: skip the near band the prefetcher decodes (Test G — no double-fetch).
+    // SKM 2026-10-07 (Fix 5): live nearSkip from keep-clamp / budget when present.
+    // Fair multi-viewport: only apply nearSkip when opts.applyNearSkip !== false so
+    // inactive series are not left with a keep-sized Ready-bar hole.
+    let skipAhead = 0;
+    let skipBehind = 0;
+    if (opts?.applyNearSkip !== false) {
+      skipAhead = mwSkipAhead;
+      skipBehind = mwSkipBehind;
+      try {
+        const clampSkip = (globalThis as any).__skmPrefetchKeepClampNearSkip;
+        if (typeof clampSkip === 'number' && clampSkip > 0) {
+          skipAhead = clampSkip;
+          skipBehind = clampSkip;
+        } else {
+          const b = (globalThis as any).__skmBudget;
+          if (b && typeof b.nearSkip === 'number' && b.nearSkip > 0) {
+            skipAhead = b.nearSkip;
+            skipBehind = b.nearSkip;
+          }
+        }
+      } catch (e) {
+        /* use config fallback */
       }
-    } catch (e) {
-      /* use config fallback */
     }
     const nearLo = center - skipBehind;
     const nearHi = center + skipAhead;
@@ -479,8 +520,23 @@ export function initSkmWarmer(
       if (i < 0 || i > last || !imageIds[i]) {
         return;
       }
-      if (i >= nearLo && i <= nearHi) {
-        return; // prefetcher owns this slice
+      if ((skipAhead > 0 || skipBehind > 0) && i >= nearLo && i <= nearHi) {
+        // Only omit when prefetch/warm actually covers the slice — never assume.
+        let inCs = false;
+        try {
+          inCs = !!(cache.getImageLoadObject && cache.getImageLoadObject(imageIds[i]));
+        } catch (e) {
+          inCs = false;
+        }
+        if (
+          isNearSkipActuallyCovered({
+            alreadyWarmed: warmedImageIds.has(imageIds[i]),
+            inCornerstoneCache: inCs,
+          })
+        ) {
+          return;
+        }
+        // Prefetch has not loaded it yet → keep in warmer queue (avoids Ready holes).
       }
       if (warmedImageIds.has(imageIds[i])) {
         return; // already byte-warmed this session — keep the sweep list to UNwarmed only,
@@ -543,14 +599,13 @@ export function initSkmWarmer(
     // (that caused re-scan churn). Between restarts the running sweep keeps progressing. A far
     // jump (> restart threshold) re-prioritises. This optimisation never applies across a
     // series change — seriesChanged bypasses it unconditionally, every time.
-    const MW_RESTART_THRESHOLD = 50;
     const centerDelta = mwLastCenter !== null ? center - mwLastCenter : null;
     if (
       !seriesChanged &&
       mwLastCenter !== null &&
       currentRunId > 0 &&
       centerDelta !== null &&
-      Math.abs(centerDelta) < MW_RESTART_THRESHOLD
+      Math.abs(centerDelta) < mwFarJumpThreshold
     ) {
       return;
     }
@@ -605,11 +660,437 @@ export function initSkmWarmer(
     }, mwThrottle);
   };
 
+  // ── Multi-viewport fair warmer (activeSeriesOnly:false) ───────────────────
+  // Root cause of 2×3674 pane imbalance: mwGetActiveSeries() + beginNewWarmerGeneration()
+  // warm ONLY the active viewport and ABORT the previous series on switch — so an
+  // inactive pane's Ready bar stalls while WADO traffic shows a single SeriesInstanceUID.
+  // Fair mode keeps a queue per open stack series, shares effectiveConcurrency() slots,
+  // prefers the active series (~2:1) but never starves others, and only aborts a job when
+  // that series leaves every viewport.
+  type FairJob = {
+    dsUID: string;
+    queue: string[];
+    controller: AbortController;
+    center: number;
+    direction: number;
+    sourceImageIdCount: number;
+  };
+  const fairJobs = new Map<string, FairJob>();
+  let fairPreferredDsUID: string | null = null;
+  let fairPickTick = 0;
+  let fairPumpRunning = false;
+  let fairTimer: ReturnType<typeof setTimeout> | null = null;
+  let fairSyncCount = 0;
+  let fairPicksActive = 0;
+  let fairPicksOther = 0;
+
+  const mwGetOpenSeries = (): Array<{
+    dsUID: string;
+    imageIds: string[];
+    viewportId: string;
+    imageIdsReady: boolean;
+  }> => {
+    const out: Array<{
+      dsUID: string;
+      imageIds: string[];
+      viewportId: string;
+      imageIdsReady: boolean;
+    }> = [];
+    const seen = new Set<string>();
+    try {
+      const { viewportGridService, displaySetService, cornerstoneViewportService } =
+        servicesManager.services;
+      const state = viewportGridService.getState();
+      const viewports: Map<string, any> = state?.viewports;
+      if (!viewports || typeof viewports.forEach !== 'function') {
+        return out;
+      }
+      const dataSource = extensionManager.getActiveDataSource()[0];
+      viewports.forEach((vpState: any, viewportId: string) => {
+        try {
+          const vp = cornerstoneViewportService?.getCornerstoneViewport?.(viewportId);
+          const type = String(vp?.type || '').toLowerCase();
+          if (type === 'orthographic' || type === 'volume3d' || type === 'volume_3d') {
+            return;
+          }
+        } catch (e) {
+          /* treat as stack candidate */
+        }
+        const dsUID = vpState?.displaySetInstanceUIDs?.[0];
+        if (!dsUID || seen.has(dsUID)) {
+          return;
+        }
+        seen.add(dsUID);
+        let imageIds: string[] = [];
+        try {
+          const displaySet = displaySetService
+            .getActiveDisplaySets()
+            .find((ds: any) => ds.displaySetInstanceUID === dsUID);
+          if (displaySet) {
+            imageIds = dataSource.getImageIdsForDisplaySet(displaySet) || [];
+          }
+        } catch (e) {
+          imageIds = [];
+        }
+        out.push({
+          dsUID,
+          imageIds,
+          viewportId,
+          imageIdsReady: imageIds.length > 0,
+        });
+      });
+    } catch (e) {
+      return out;
+    }
+    return out;
+  };
+
+  const fairRetryCounts = new Map<string, number>();
+  const FAIR_MAX_RETRIES = 2;
+  // After queues drain, re-enqueue unwarmed+uncached holes in chunks (never abandon
+  // large nearSkip gaps — that froze warm 2VP at e.g. 2313/3674 with pump stopped).
+  const FAIR_RECONCILE_CHUNK = 256;
+  let fairNeedsReconcile = true;
+  let fairReconcilePasses = 0;
+  let fairReconcileEnqueued = 0;
+  let fairSeriesWaiting = 0;
+  let fairUnwarmedOpenCount = 0;
+  let fairWarmComplete = false;
+  let fairWaitTimer: ReturnType<typeof setTimeout> | null = null;
+
+  type FairFetchResult = 'ok' | 'fail' | 'abort' | 'skip';
+
+  const fairFetchOne = async (imageId: string, signal: AbortSignal): Promise<FairFetchResult> => {
+    if (!imageId || signal.aborted || warmedImageIds.has(imageId)) {
+      return signal.aborted ? 'abort' : 'skip';
+    }
+    try {
+      if (cache.getImageLoadObject && cache.getImageLoadObject(imageId)) {
+        warmedImageIds.add(imageId);
+        emitAvailable(imageId);
+        return 'ok';
+      }
+    } catch (e) {
+      /* fetch */
+    }
+    const url = urlFromImageId(imageId);
+    if (!url) {
+      return 'fail';
+    }
+    warmerInFlightFetches++;
+    try {
+      const res = await fetch(url, { method: 'GET', signal });
+      if (res.ok) {
+        await res.arrayBuffer().catch(() => undefined);
+        warmedImageIds.add(imageId);
+        emitAvailable(imageId);
+        fairRetryCounts.delete(imageId);
+        return 'ok';
+      }
+      if (res.body) {
+        await res.body.cancel().catch(() => undefined);
+      }
+      return 'fail';
+    } catch (e) {
+      if ((e as any)?.name === 'AbortError') {
+        warmerFetchAbortedCount++;
+        return 'abort';
+      }
+      return 'fail';
+    } finally {
+      warmerInFlightFetches--;
+    }
+  };
+
+  const fairPumpLoop = async () => {
+    if (fairPumpRunning) {
+      return;
+    }
+    fairPumpRunning = true;
+    const inflight = new Set<Promise<void>>();
+    try {
+      for (;;) {
+        while (inflight.size >= effectiveConcurrency()) {
+          await Promise.race(inflight);
+        }
+        // Drop aborted jobs (series left the grid) so pickFairSeriesIndex cannot spin.
+        fairJobs.forEach((job, dsUID) => {
+          if (job.controller.signal.aborted) {
+            fairJobs.delete(dsUID);
+            return;
+          }
+          while (job.queue.length && warmedImageIds.has(job.queue[0])) {
+            job.queue.shift();
+          }
+        });
+        const keys = Array.from(fairJobs.keys());
+        const remaining = keys.map(k => fairJobs.get(k)?.queue.length || 0);
+        const idx = pickFairSeriesIndex({
+          keys,
+          remaining,
+          preferredKey: fairPreferredDsUID,
+          pickTick: fairPickTick++,
+          activeBias: fairActiveBias,
+        });
+        if (idx < 0) {
+          if (inflight.size === 0) {
+            break;
+          }
+          await Promise.race(inflight);
+          continue;
+        }
+        const job = fairJobs.get(keys[idx]);
+        if (!job || job.controller.signal.aborted) {
+          continue;
+        }
+        const imageId = job.queue.shift();
+        if (!imageId) {
+          continue;
+        }
+        if (keys[idx] === fairPreferredDsUID) {
+          fairPicksActive++;
+        } else {
+          fairPicksOther++;
+        }
+        const jobRef = job;
+        const p = fairFetchOne(imageId, job.controller.signal)
+          .then(result => {
+            if (result === 'fail' && !jobRef.controller.signal.aborted) {
+              const n = fairRetryCounts.get(imageId) || 0;
+              if (n < FAIR_MAX_RETRIES) {
+                fairRetryCounts.set(imageId, n + 1);
+                jobRef.queue.push(imageId);
+              }
+            }
+          })
+          .finally(() => {
+            inflight.delete(p);
+          });
+        inflight.add(p);
+        await new Promise(r => setTimeout(r, 0)); // yield to interaction lane
+      }
+    } finally {
+      fairPumpRunning = false;
+    }
+    // fairSync may have enqueued work while we were exiting; restart if needed.
+    let hasWork = Array.from(fairJobs.values()).some(
+      j => !j.controller.signal.aborted && j.queue.length > 0
+    );
+    if (!hasWork && fairNeedsReconcile) {
+      let cacheEmitted = 0;
+      let seriesWaiting = 0;
+      const toEnqueue: Array<{ job: FairJob; imageId: string }> = [];
+      for (const s of mwGetOpenSeries()) {
+        if (!s.imageIdsReady) {
+          seriesWaiting++;
+          continue;
+        }
+        let job = fairJobs.get(s.dsUID);
+        if (!job || job.controller.signal.aborted) {
+          const controller = new AbortController();
+          warmerGenerationStartedCount++;
+          job = {
+            dsUID: s.dsUID,
+            queue: [],
+            controller,
+            center: mwGetCenter(s.viewportId),
+            direction: 1,
+            sourceImageIdCount: s.imageIds.length,
+          };
+          fairJobs.set(s.dsUID, job);
+        }
+        for (const id of s.imageIds) {
+          if (!id || warmedImageIds.has(id)) {
+            continue;
+          }
+          try {
+            if (cache.getImageLoadObject && cache.getImageLoadObject(id)) {
+              warmedImageIds.add(id);
+              emitAvailable(id);
+              cacheEmitted++;
+              continue;
+            }
+          } catch (e) {
+            /* enqueue */
+          }
+          toEnqueue.push({ job, imageId: id });
+        }
+      }
+      fairSeriesWaiting = seriesWaiting;
+      fairUnwarmedOpenCount = toEnqueue.length;
+      const warmComplete = canDeclareFairWarmComplete({
+        seriesWaitingForImageIds: seriesWaiting,
+        missingUncachedCount: toEnqueue.length,
+      });
+      fairWarmComplete = warmComplete;
+      const plan = planFairDrainReconcile({
+        missingUncachedCount: toEnqueue.length,
+        chunkSize: FAIR_RECONCILE_CHUNK,
+      });
+      if (plan.action === 'enqueue-chunk' && plan.enqueueCount > 0) {
+        const chunk = toEnqueue.slice(0, plan.enqueueCount);
+        for (const item of chunk) {
+          item.job.queue.push(item.imageId);
+        }
+        fairReconcilePasses++;
+        fairReconcileEnqueued += chunk.length;
+        fairNeedsReconcile = true;
+        hasWork = true;
+        // eslint-disable-next-line no-console
+        console.log(
+          '[SKM-WARMER] drain reconcile: enqueued ' +
+            chunk.length +
+            '/' +
+            toEnqueue.length +
+            ' unwarmed hole(s); cache-emitted ' +
+            cacheEmitted +
+            '; continue=' +
+            plan.continueReconcile
+        );
+      } else if (!warmComplete) {
+        fairNeedsReconcile = true;
+        if (!fairWaitTimer) {
+          fairWaitTimer = setTimeout(() => {
+            fairWaitTimer = null;
+            void fairPumpLoop();
+          }, 500);
+        }
+      } else {
+        fairNeedsReconcile = false;
+        if (cacheEmitted > 0) {
+          // eslint-disable-next-line no-console
+          console.log(
+            '[SKM-WARMER] drain reconcile: done (cache-emitted ' + cacheEmitted + ')'
+          );
+        }
+      }
+    }
+    if (hasWork) {
+      if (fairWaitTimer) {
+        clearTimeout(fairWaitTimer);
+        fairWaitTimer = null;
+      }
+      void fairPumpLoop();
+    }
+  };
+
+  const fairSync = () => {
+    fairSyncCount++;
+    fairNeedsReconcile = true;
+    const open = mwGetOpenSeries();
+    const openSet = new Set(open.map(s => s.dsUID));
+    const active = mwGetActiveSeries();
+    const prevPreferred = fairPreferredDsUID;
+    fairPreferredDsUID = active?.dsUID ?? open[0]?.dsUID ?? null;
+    const preferredChanged = prevPreferred !== fairPreferredDsUID;
+
+    // Drop jobs for series no longer displayed in any viewport.
+    fairJobs.forEach((job, dsUID) => {
+      if (!openSet.has(dsUID)) {
+        try {
+          job.controller.abort();
+        } catch (e) {
+          /* noop */
+        }
+        fairJobs.delete(dsUID);
+        warmerGenerationCancelledCount++;
+      }
+    });
+
+    for (const s of open) {
+      if (!s.imageIdsReady) {
+        continue;
+      }
+      const center = mwGetCenter(s.viewportId);
+      const existing = fairJobs.get(s.dsUID);
+      // Prefetch owns the near band only for the preferred series (sequential panes).
+      const applyNearSkip = shouldApplyNearSkip({
+        nearSkipPreferredOnly,
+        seriesKey: s.dsUID,
+        preferredKey: fairPreferredDsUID,
+      });
+      if (!existing) {
+        const controller = new AbortController();
+        warmerGenerationStartedCount++;
+        fairJobs.set(s.dsUID, {
+          dsUID: s.dsUID,
+          queue: mwOrderedWindow(s.imageIds, center, 1, { applyNearSkip }),
+          controller,
+          center,
+          direction: 1,
+          sourceImageIdCount: s.imageIds.length,
+        });
+        continue;
+      }
+      const delta = center - existing.center;
+      if (
+        shouldRebuildFairQueue({
+          previousImageIdCount: existing.sourceImageIdCount,
+          currentImageIdCount: s.imageIds.length,
+          preferredChanged,
+          centerDelta: delta,
+          farJumpThreshold: mwFarJumpThreshold,
+        })
+      ) {
+        if (Math.abs(delta) >= mwFarJumpThreshold) {
+          existing.direction = delta >= 0 ? 1 : -1;
+        }
+        existing.center = center;
+        existing.sourceImageIdCount = s.imageIds.length;
+        // Re-prioritise remaining work; do not abort in-flight (series still open).
+        existing.queue = mwOrderedWindow(s.imageIds, center, existing.direction, {
+          applyNearSkip,
+        });
+      } else {
+        existing.center = center;
+      }
+    }
+
+    // eslint-disable-next-line no-console
+    console.log(
+      '[SKM-WARMER] fair multi-viewport sync: ' +
+        fairJobs.size +
+        ' series, preferred=' +
+        (fairPreferredDsUID || 'none') +
+        ', bias=' +
+        fairActiveBias +
+        ', slots=' +
+        effectiveConcurrency() +
+        ', nearSkipPreferredOnly=' +
+        nearSkipPreferredOnly
+    );
+    void fairPumpLoop();
+  };
+
+  let fairStarted = false;
+  const fairSchedule = () => {
+    if (fairTimer) {
+      return;
+    }
+    const delay = fairStarted ? mwThrottle : Math.max(mwThrottle, startDelayMs);
+    fairTimer = setTimeout(() => {
+      fairTimer = null;
+      fairStarted = true;
+      fairSync();
+    }, delay);
+  };
+
   try {
     const { viewportGridService } = servicesManager.services;
     const E = viewportGridService.EVENTS;
-    if (config?.movingWindow) {
-      // Follow the doctor: re-centre on viewport/grid changes and on every slice change.
+    if (config?.movingWindow && !activeSeriesOnly) {
+      // Fair multi-viewport: all open stack series share the warmer budget.
+      viewportGridService.subscribe(E.VIEWPORTS_READY, fairSchedule);
+      viewportGridService.subscribe(E.ACTIVE_VIEWPORT_ID_CHANGED, fairSchedule);
+      viewportGridService.subscribe(E.GRID_STATE_CHANGED, fairSchedule);
+      subscribeStackNewImage(fairSchedule);
+      // eslint-disable-next-line no-console
+      console.log(
+        '[SKM-WARMER] fair multi-viewport mode ON (activeSeriesOnly:false) — ' +
+          'inactive panes are warmed without aborting sibling series'
+      );
+    } else if (config?.movingWindow) {
+      // Legacy: follow the doctor on the ACTIVE viewport only.
       viewportGridService.subscribe(E.VIEWPORTS_READY, mwSchedule);
       viewportGridService.subscribe(E.ACTIVE_VIEWPORT_ID_CHANGED, mwSchedule);
       viewportGridService.subscribe(E.GRID_STATE_CHANGED, mwSchedule);
@@ -658,6 +1139,10 @@ export function initSkmWarmer(
   //                                  while a PREVIOUS one's workers had not yet all returned
   //                                  (the exact condition that used to let traffic accumulate)
   (window as any).skmWarmerDiagnostics = () => {
+    const fairQueues: Record<string, number> = {};
+    fairJobs.forEach((job, dsUID) => {
+      fairQueues[dsUID] = job.queue.length;
+    });
     const result = {
       warmerGenerationStarted: warmerGenerationStartedCount,
       warmerGenerationCancelled: warmerGenerationCancelledCount,
@@ -679,6 +1164,51 @@ export function initSkmWarmer(
       // the stock/WADO-URI path. See skmWarmerHasWarmed(imageId) to check a specific
       // imageId.
       warmedImageIdCount: warmedImageIds.size,
+      // Multi-viewport fairness (activeSeriesOnly:false)
+      activeSeriesOnly,
+      fairJobCount: fairJobs.size,
+      fairPreferredDsUID,
+      fairSyncCount,
+      fairPicksActive,
+      fairPicksOther,
+      fairQueues,
+      fairPumpRunning,
+      fairActiveBias,
+      nearSkipPreferredOnly,
+      mwFarJumpThreshold,
+      fairReconcilePasses,
+      fairReconcileEnqueued,
+      fairNeedsReconcile,
+      fairSeriesWaiting,
+      fairUnwarmedOpenCount,
+      fairQueuedSlices: (() => {
+        let queued = 0;
+        fairJobs.forEach(job => {
+          if (!job.controller.signal.aborted) {
+            queued += job.queue.length;
+          }
+        });
+        return queued;
+      })(),
+      fairWarmComplete: (() => {
+        let queued = 0;
+        fairJobs.forEach(job => {
+          if (!job.controller.signal.aborted) {
+            queued += job.queue.length;
+          }
+        });
+        // A sticky flag from an earlier empty reconcile must not read complete
+        // while either series still has a queue, in-flight fetches, or a pending reconcile.
+        return (
+          !fairPumpRunning &&
+          warmerInFlightFetches === 0 &&
+          !fairNeedsReconcile &&
+          canDeclareFairWarmComplete({
+            seriesWaitingForImageIds: fairSeriesWaiting,
+            missingUncachedCount: Math.max(fairUnwarmedOpenCount, queued),
+          })
+        );
+      })(),
     };
     // eslint-disable-next-line no-console
     console.log('[SKM-WARMER] diagnostics:', result);
@@ -690,4 +1220,6 @@ export function initSkmWarmer(
   // byte-warmed set without serializing the whole (possibly thousands-of-entries) Set
   // on every diagnostics call. Read-only; does not affect warmer behaviour.
   (window as any).skmWarmerHasWarmed = (imageId: string): boolean => warmedImageIds.has(imageId);
+  // Silent read for throughput diagnostics (no console spam).
+  (window as any).skmWarmerInFlight = (): number => warmerInFlightFetches;
 }
